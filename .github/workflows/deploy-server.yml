@@ -1,0 +1,53 @@
+name: Deploy server
+
+on:
+  push:
+    branches: [main]
+    paths: ["server/**", "deploy/**", ".github/workflows/deploy-server.yml"]
+  workflow_dispatch:
+
+concurrency: deploy-server
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - working-directory: server
+        run: |
+          npm ci
+          npm run build
+          CLAUDEBOOK_SECRET=ci-secret-0123456789 DATA_DIR=$RUNNER_TEMP/data node dist/index.js &
+          sleep 2
+          CLAUDEBOOK_SECRET=ci-secret-0123456789 npm test
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Ship to the Oracle server
+        env:
+          HOST: ${{ secrets.SERVER_HOST }}
+          USER: ${{ secrets.SERVER_USER }}
+          KEY: ${{ secrets.SERVER_SSH_KEY }}
+          CLAUDEBOOK_SECRET: ${{ secrets.CLAUDEBOOK_SECRET }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "$KEY" > ~/.ssh/id && chmod 600 ~/.ssh/id
+          ssh-keyscan -H "$HOST" >> ~/.ssh/known_hosts 2>/dev/null
+          SSH="ssh -i ~/.ssh/id $USER@$HOST"
+          $SSH "mkdir -p ~/claudebook"
+          rsync -az --delete -e "ssh -i ~/.ssh/id" --exclude node_modules --exclude dist server deploy "$USER@$HOST:~/claudebook/" --filter='P deploy/data' --filter='P deploy/.env'
+          printf 'CLAUDEBOOK_SECRET=%s\nDOMAIN=book.clarifiq.in\n' "$CLAUDEBOOK_SECRET" | $SSH "umask 077 && cat > ~/claudebook/deploy/.env"
+          $SSH "bash ~/claudebook/deploy/setup-server.sh"
+      - name: Health check
+        run: |
+          for i in $(seq 1 20); do
+            curl -fsS https://book.clarifiq.in/health && exit 0
+            sleep 6
+          done
+          echo "Server did not come up on https://book.clarifiq.in" && exit 1

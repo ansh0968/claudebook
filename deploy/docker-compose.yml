@@ -1,0 +1,27 @@
+services:
+  server:
+    build: ../server
+    restart: unless-stopped
+    environment:
+      CLAUDEBOOK_SECRET: ${CLAUDEBOOK_SECRET:?set CLAUDEBOOK_SECRET in deploy/.env}
+    volumes:
+      - ./data:/data
+
+  caddy:
+    image: caddy:2.8
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN:-book.clarifiq.in}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - server
+
+volumes:
+  caddy_data:
+  caddy_config:

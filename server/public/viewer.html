@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ClaudeBook Viewer</title>
+<style>
+  :root { --bg: #f4f1ec; --panel: #fff; --ink: #1f1d1a; --muted: #77716a; --accent: #d97757; --line: #e4dfd7; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #1b1a18; --panel: #262420; --ink: #f1ede6; --muted: #a39d94; --line: #3a3732; } }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 15px/1.4 system-ui, sans-serif; background: var(--bg); color: var(--ink); }
+  header { display: flex; gap: 12px; align-items: center; padding: 12px 16px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+  header h1 { font-size: 17px; margin: 0; }
+  select, button { font: inherit; padding: 6px 10px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel); color: var(--ink); }
+  button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+  #status { margin-left: auto; color: var(--muted); font-size: 13px; }
+  main { display: flex; gap: 16px; padding: 16px; }
+  #pages { width: 120px; flex: none; display: flex; flex-direction: column; gap: 8px; }
+  #pages button { text-align: left; }
+  #pages button.open { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent) inset; }
+  #stage { flex: 1; min-width: 0; }
+  #stage img { width: 100%; max-width: 800px; display: block; margin: 0 auto; background: #fff; border-radius: 6px; box-shadow: 0 2px 12px rgb(0 0 0 / .12); }
+  @media (max-width: 600px) { main { flex-direction: column; } #pages { width: auto; flex-direction: row; overflow-x: auto; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>ClaudeBook</h1>
+  <select id="notebook"></select>
+  <label><input type="checkbox" id="grid"> grid</label>
+  <button id="undo">Undo Claude</button>
+  <span id="status">connecting…</span>
+</header>
+<main>
+  <nav id="pages"></nav>
+  <section id="stage"><img id="page" alt="Current page"></section>
+</main>
+<script>
+const token = new URLSearchParams(location.search).get("token") || "";
+const auth = { Authorization: "Bearer " + token, "Content-Type": "application/json" };
+const $ = (id) => document.getElementById(id);
+let state = { notebooks: [], view: {} };
+
+async function load() {
+  state = await (await fetch("/api/notebooks", { headers: auth })).json();
+  const sel = $("notebook");
+  sel.innerHTML = state.notebooks.map((n) => `<option value="${n.id}">${n.title}</option>`).join("");
+  sel.value = state.view.notebookId || state.notebooks[0]?.id;
+  drawPages();
+}
+
+function currentNotebook() { return state.notebooks.find((n) => n.id === $("notebook").value); }
+
+function drawPages() {
+  const nb = currentNotebook();
+  if (!nb) return;
+  const openId = state.view.notebookId === nb.id ? state.view.pageId : nb.pages[0].id;
+  $("pages").innerHTML = nb.pages.map((p, i) => `<button data-id="${p.id}" class="${p.id === openId ? "open" : ""}">Page ${i + 1}</button>`).join("");
+  showPage(openId);
+}
+
+function showPage(id) {
+  $("page").dataset.id = id;
+  $("page").src = `/api/pages/${id}/render.png?token=${encodeURIComponent(token)}&grid=${$("grid").checked ? 1 : 0}&t=${Date.now()}`;
+}
+
+$("pages").onclick = async (e) => {
+  const id = e.target.dataset?.id;
+  if (!id) return;
+  // Opening a page here counts as "the page the user has open", same as on the iPad.
+  state.view = await (await fetch("/api/view", { method: "POST", headers: auth, body: JSON.stringify({ notebookId: currentNotebook().id, pageId: id }) })).json();
+  drawPages();
+};
+$("notebook").onchange = drawPages;
+$("grid").onchange = () => showPage($("page").dataset.id);
+$("undo").onclick = async () => {
+  await fetch(`/api/pages/${$("page").dataset.id}/claude?count=1`, { method: "DELETE", headers: auth });
+};
+
+function connect() {
+  const ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/live?token=${encodeURIComponent(token)}`);
+  ws.onopen = () => ($("status").textContent = "live");
+  ws.onclose = () => { $("status").textContent = "reconnecting…"; setTimeout(connect, 2000); };
+  ws.onmessage = (m) => {
+    const e = JSON.parse(m.data);
+    if (e.type === "notebook") load();
+    if (e.type === "claudeLayer" && e.pageId === $("page").dataset.id) showPage(e.pageId);
+  };
+}
+
+load().then(connect);
+</script>
+</body>
+</html>

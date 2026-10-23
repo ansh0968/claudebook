@@ -1,0 +1,43 @@
+name: Build iPad app
+
+on:
+  push:
+    branches: [main]
+    paths: ["ios/**", ".github/workflows/build-ios.yml"]
+  pull_request:
+    paths: ["ios/**", ".github/workflows/build-ios.yml"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Generate Xcode project
+        working-directory: ios
+        run: |
+          brew install xcodegen
+          xcodegen generate
+      - name: Build (unsigned)
+        working-directory: ios
+        run: |
+          set -o pipefail
+          xcodebuild -project ClaudeBook.xcodeproj -scheme ClaudeBook -configuration Release \
+            -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" build | tee build.log | grep -E "error:|warning: .*Swift|BUILD" || true
+          test -d build/Build/Products/Release-iphoneos/ClaudeBook.app
+      - name: Package IPA
+        working-directory: ios
+        run: |
+          mkdir -p Payload
+          cp -R build/Build/Products/Release-iphoneos/ClaudeBook.app Payload/
+          zip -qr ClaudeBook.ipa Payload
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ClaudeBook-ipa
+          path: ios/ClaudeBook.ipa
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: build-log
+          path: ios/build.log
