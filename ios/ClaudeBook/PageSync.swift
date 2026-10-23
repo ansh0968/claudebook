@@ -26,12 +26,13 @@ enum LocalDrawings {
 /// Renders what the user wrote and reads their handwriting, so Claude gets an image plus text positions.
 enum PageSnapshot {
     /// Paper (or PDF page) + user ink at 1000x1414, no Claude layer (the server adds that itself).
+    /// Rendered at 2x so Claude can zoom in and still read small handwriting.
     static func png(drawing: PKDrawing, background: PageBackground, pdf: PDFPage? = nil) -> Data {
         let format = UIGraphicsImageRendererFormat()
-        format.scale = 1
+        format.scale = 2
         let image = UIGraphicsImageRenderer(size: PageGeometry.size, format: format).image { ctx in
-            PaperView.drawPaper(background, pdf: pdf, pixelScale: 1, in: ctx.cgContext)
-            drawing.image(from: PageGeometry.rect, scale: 1).draw(in: PageGeometry.rect)
+            PaperView.drawPaper(background, pdf: pdf, pixelScale: 2, in: ctx.cgContext)
+            drawing.image(from: PageGeometry.rect, scale: 2).draw(in: PageGeometry.rect)
         }
         return image.pngData() ?? Data()
     }

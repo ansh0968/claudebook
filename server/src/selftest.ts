@@ -57,6 +57,7 @@ const math = stored.items.find((i) => i.type === "math");
 if (!math?.d || !math.w) throw new Error("math item was not typeset");
 console.log(`[math] stored outline, ${math.d.length} chars, ${math.w}px wide`);
 await call("get_current_page");
+await call("view_page", { zoom: { x: 50, y: 50, w: 600, h: 200 } });
 await call("erase_my_drawings", { count: 1 });
 await call("add_pages", { count: 2, background: "lined" });
 await call("create_notebook", { title: "Physics", pages: 3, background: "grid" });

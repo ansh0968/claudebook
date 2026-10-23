@@ -3,12 +3,13 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { ItemSchema, prepareItems } from "./items.js";
 import { compileTypst, downloadPdf, savePdf } from "./pdf.js";
-import { renderPage } from "./render.js";
+import { clampRegion, renderPage, type Region } from "./render.js";
 import { PAGE_H, PAGE_W, type Page, type Store } from "./store.js";
 
 const INSTRUCTIONS = `ClaudeBook is the user's handwritten notebook app on iPad. You can see their pages and draw on them.
 Pages use a fixed coordinate space: x 0..${PAGE_W} left to right, y 0..${PAGE_H} top to bottom.
 Workflow: call get_current_page first (it shows what the user has open, with a labelled blue coordinate grid and the positions of recognized handwriting).
+When checking work or reading small handwriting, zoom into each region (the zoom parameter) before judging it; the full-page image is too small to read every symbol.
 Use those coordinates to aim. Prefer simple shapes: an ellipse with padding around a mistake, an arrow pointing at it, short text next to it.
 Write equations and corrected working with "math" items (LaTeX), one line per item; use "text" items for words.
 Your drawings live on a separate layer the user can hide or undo, so don't be shy, but keep the page readable and never cover the user's writing with text.
@@ -36,7 +37,7 @@ export function buildMcpServer(store: Store) {
     return store.view().pageId ? store.findPage(store.view().pageId!) : { notebook: nb, page: nb.pages[0], index: 0 };
   }
 
-  function describe(found: { notebook: { title: string; id: string; pages: Page[] }; page: Page; index: number }) {
+  function describe(found: { notebook: { title: string; id: string; pages: Page[] }; page: Page; index: number }, region?: Region) {
     const { notebook, page, index } = found;
     const lines = [
       `Notebook "${notebook.title}" (id ${notebook.id}), page ${index + 1} of ${notebook.pages.length} (page id ${page.id}).`,
@@ -45,30 +46,42 @@ export function buildMcpServer(store: Store) {
     if (page.snapshotVersion === 0) {
       lines.push(page.pdf ? "The user hasn't written on this page yet, so you only see the PDF." : "The app hasn't uploaded any ink for this page yet, so it looks empty.");
     }
-    if (page.textBoxes.length) {
+    // When zoomed, only list handwriting that overlaps the zoomed area.
+    const boxes = region
+      ? page.textBoxes.filter((b) => b.x < region.x + region.w && b.x + b.w > region.x && b.y < region.y + region.h && b.y + b.h > region.y)
+      : page.textBoxes;
+    if (boxes.length) {
       lines.push("Recognized handwriting (x, y, w, h):");
-      for (const b of page.textBoxes) lines.push(`- [${Math.round(b.x)}, ${Math.round(b.y)}, ${Math.round(b.w)}, ${Math.round(b.h)}] ${b.text}`);
+      for (const b of boxes) lines.push(`- [${Math.round(b.x)}, ${Math.round(b.y)}, ${Math.round(b.w)}, ${Math.round(b.h)}] ${b.text}`);
     }
     return lines.join("\n");
   }
 
-  async function pageWithImage(found: NonNullable<ReturnType<typeof resolvePage>>, grid: boolean): Promise<ToolResult> {
-    const png = await renderPage(store, found.page, { grid });
-    return { content: [{ type: "text", text: describe(found) }, { type: "image", data: png.toString("base64"), mimeType: "image/png" }] };
+  async function pageWithImage(found: NonNullable<ReturnType<typeof resolvePage>>, grid: boolean, zoom?: Region): Promise<ToolResult> {
+    const region = zoom && clampRegion(zoom);
+    const png = await renderPage(store, found.page, { grid, region });
+    let text = describe(found, region);
+    if (region) text += `\nZoomed into x ${region.x}..${region.x + region.w}, y ${region.y}..${region.y + region.h}; grid labels are still page coordinates.`;
+    return { content: [{ type: "text", text }, { type: "image", data: png.toString("base64"), mimeType: "image/png" }] };
   }
+
+  const zoom = z
+    .object({ x: z.number(), y: z.number(), w: z.number(), h: z.number() })
+    .optional()
+    .describe("Zoom into this rectangle (page coordinates) at high resolution. Use it to read small or messy handwriting, check working line by line, or aim marks precisely. e.g. {x:0,y:300,w:500,h:300}");
 
   server.registerTool(
     "get_current_page",
     {
       title: "Look at the open page",
       description: "See the notebook page the user currently has open on their iPad, as an image plus recognized handwriting. Start here.",
-      inputSchema: { grid: z.boolean().optional().describe("Overlay a labelled coordinate grid, default true") },
+      inputSchema: { grid: z.boolean().optional().describe("Overlay a labelled coordinate grid, default true"), zoom },
       annotations: { readOnlyHint: true },
     },
-    async ({ grid }) => {
+    async ({ grid, zoom }) => {
       const found = resolvePage();
       if (!found) return fail("The user has no notebook open.");
-      return pageWithImage(found, grid ?? true);
+      return pageWithImage(found, grid ?? true, zoom);
     },
   );
 
@@ -82,13 +95,14 @@ export function buildMcpServer(store: Store) {
         notebook_id: z.string().optional(),
         page_number: z.number().int().min(1).optional(),
         grid: z.boolean().optional().describe("Overlay a labelled coordinate grid, default true"),
+        zoom,
       },
       annotations: { readOnlyHint: true },
     },
-    async ({ page_id, notebook_id, page_number, grid }) => {
+    async ({ page_id, notebook_id, page_number, grid, zoom }) => {
       const found = resolvePage(page_id, notebook_id, page_number);
       if (!found) return fail("Page not found.");
-      return pageWithImage(found, grid ?? true);
+      return pageWithImage(found, grid ?? true, zoom);
     },
   );
 
