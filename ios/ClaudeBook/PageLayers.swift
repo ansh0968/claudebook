@@ -1,56 +1,91 @@
-import PDFKit
 import UIKit
 
-/// Paper: blank, lined, grid, dotted, or a PDF page. Views draw in page coordinates scaled to their bounds,
-/// so they can be resized to the current zoom and redrawn crisp.
-final class PaperView: UIView {
-    var background: PageBackground = .blank { didSet { setNeedsDisplay() } }
-    var pdfPage: PDFPage? { didSet { setNeedsDisplay() } }
+/// Everything that decides how a page's paper looks. Tiles draw on background threads, so views hold
+/// this as one value swapped under a lock rather than several separately mutable properties.
+struct PaperStyle {
+    var background: PageBackground = .blank
+    var pdf: CGPDFPage?
+    var dark = false
+    var invertPDF = true
+}
+
+/// A CATiledLayer that shows new tiles at once instead of fading them in.
+final class InstantTiledLayer: CATiledLayer {
+    override class func fadeDuration() -> CFTimeInterval { 0 }
+}
+
+/// A page-sized view whose bounds are always the page (1000x1414 units); the canvas scales it with a
+/// transform. Tiled, so zooming in redraws just the visible tiles sharper instead of one giant bitmap.
+class TiledPageView: UIView {
+    override class var layerClass: AnyClass { InstantTiledLayer.self }
 
     override init(frame: CGRect) {
         super.init(frame: frame)
-        backgroundColor = .white
-        contentMode = .scaleToFill
+        let tiled = layer as! CATiledLayer
+        // 2 zoomed-out levels and 5 magnified ones covers fit-to-width up to 5x zoom on a 2x screen.
+        tiled.levelsOfDetail = 7
+        tiled.levelsOfDetailBias = 5
+        tiled.tileSize = CGSize(width: 512, height: 512)
         isUserInteractionEnabled = false
+        isOpaque = false
+        backgroundColor = .clear
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+}
+
+/// Paper: blank, lined, grid, dotted, or a PDF page.
+final class PaperView: TiledPageView {
+    private let lock = NSLock()
+    private var _style = PaperStyle()
+
+    var style: PaperStyle {
+        get { lock.lock(); defer { lock.unlock() }; return _style }
+        set {
+            lock.lock(); _style = newValue; lock.unlock()
+            layer.shadowOpacity = newValue.dark ? 0 : 0.16
+            setNeedsDisplay()
+        }
+    }
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        layer.shadowColor = UIColor.black.cgColor
+        layer.shadowOffset = CGSize(width: 0, height: 2)
+        layer.shadowRadius = 5
+        layer.shadowPath = UIBezierPath(rect: PageGeometry.rect).cgPath
     }
 
     required init?(coder: NSCoder) { fatalError() }
 
     override func draw(_ rect: CGRect) {
         guard let ctx = UIGraphicsGetCurrentContext() else { return }
-        let scale = bounds.width / PageGeometry.width
-        ctx.scaleBy(x: scale, y: scale)
-        Self.drawPaper(background, pdf: pdfPage, pixelScale: scale * contentScaleFactor, in: ctx)
+        Self.drawPaper(style, in: ctx)
     }
 
-    static func drawPaper(_ background: PageBackground, pdf: PDFPage? = nil, pixelScale: CGFloat = 1, in ctx: CGContext) {
+    static let darkPaper = UIColor(hex: "#1E1E20")
+
+    /// Draws the page in page units. Snapshots for Claude always pass a light style.
+    static func drawPaper(_ style: PaperStyle, in ctx: CGContext) {
         let w = PageGeometry.width, h = PageGeometry.height
-        ctx.setFillColor(UIColor.white.cgColor)
+        ctx.setFillColor((style.dark ? darkPaper : .white).cgColor)
         ctx.fill(PageGeometry.rect)
-        if let pdf {
-            // Aspect-fit and centered, same as the server's rasterizer.
-            let box = pdf.bounds(for: .mediaBox)
-            let rotated = abs(pdf.rotation) % 180 == 90
-            let size = rotated ? CGSize(width: box.height, height: box.width) : box.size
-            let fit = min(w / size.width, h / size.height)
-            let target = CGRect(x: (w - size.width * fit) / 2, y: (h - size.height * fit) / 2, width: size.width * fit, height: size.height * fit)
-            let px = CGSize(width: min(4096, target.width * pixelScale), height: min(4096 * target.height / target.width, target.height * pixelScale))
-            UIGraphicsPushContext(ctx)
-            pdf.thumbnail(of: px, for: .mediaBox).draw(in: target)
-            UIGraphicsPopContext()
+        if let pdf = style.pdf {
+            drawPDF(pdf, in: ctx, invert: style.dark && style.invertPDF)
             return
         }
-        switch background {
+        let dark = style.dark
+        switch style.background {
         case .blank:
             break
         case .lined:
-            ctx.setStrokeColor(UIColor(hex: "#C9D7E8").cgColor)
+            ctx.setStrokeColor(UIColor(hex: dark ? "#34404F" : "#C9D7E8").cgColor)
             ctx.setLineWidth(1.5)
             var y: CGFloat = 120
             while y < h - 40 { ctx.move(to: CGPoint(x: 40, y: y)); ctx.addLine(to: CGPoint(x: w - 40, y: y)); y += 40 }
             ctx.strokePath()
         case .grid:
-            ctx.setStrokeColor(UIColor(hex: "#E3EAF2").cgColor)
+            ctx.setStrokeColor(UIColor(hex: dark ? "#2B323B" : "#E3EAF2").cgColor)
             ctx.setLineWidth(1)
             var x: CGFloat = 25
             while x < w { ctx.move(to: CGPoint(x: x, y: 0)); ctx.addLine(to: CGPoint(x: x, y: h)); x += 25 }
@@ -58,7 +93,7 @@ final class PaperView: UIView {
             while y < h { ctx.move(to: CGPoint(x: 0, y: y)); ctx.addLine(to: CGPoint(x: w, y: y)); y += 25 }
             ctx.strokePath()
         case .dotted:
-            ctx.setFillColor(UIColor(hex: "#C9D2DC").cgColor)
+            ctx.setFillColor(UIColor(hex: dark ? "#454C56" : "#C9D2DC").cgColor)
             var x: CGFloat = 25
             while x < w {
                 var y: CGFloat = 25
@@ -67,58 +102,136 @@ final class PaperView: UIView {
             }
         }
     }
+
+    /// Where a PDF page lands: aspect-fit and centered, same as the server's rasterizer.
+    static func pdfRect(_ page: CGPDFPage) -> CGRect {
+        let box = page.getBoxRect(.mediaBox)
+        let quarter = (Int(page.rotationAngle) % 360 + 360) % 360
+        let size = quarter == 90 || quarter == 270 ? CGSize(width: box.height, height: box.width) : box.size
+        guard size.width > 0, size.height > 0 else { return PageGeometry.rect }
+        let fit = min(PageGeometry.width / size.width, PageGeometry.height / size.height)
+        return CGRect(x: (PageGeometry.width - size.width * fit) / 2, y: (PageGeometry.height - size.height * fit) / 2,
+                      width: size.width * fit, height: size.height * fit)
+    }
+
+    /// Vector PDF drawing, so it stays sharp at every zoom level. Dark mode inverts it (black text on
+    /// white becomes light text on dark paper).
+    static func drawPDF(_ page: CGPDFPage, in ctx: CGContext, invert: Bool) {
+        let box = page.getBoxRect(.mediaBox)
+        let target = pdfRect(page)
+        let quarter = (Int(page.rotationAngle) % 360 + 360) % 360
+        let displayWidth = quarter == 90 || quarter == 270 ? box.height : box.width
+        guard displayWidth > 0 else { return }
+        let fit = target.width / displayWidth
+
+        ctx.saveGState()
+        ctx.setFillColor(UIColor.white.cgColor)
+        ctx.fill(target)
+        ctx.saveGState()
+        ctx.clip(to: target)
+        // Flip into PDF space (y up) with the origin at the target's bottom left, then apply /Rotate.
+        ctx.translateBy(x: target.minX, y: target.maxY)
+        ctx.scaleBy(x: fit, y: -fit)
+        switch quarter {
+        case 90: ctx.translateBy(x: 0, y: box.width); ctx.rotate(by: -.pi / 2)
+        case 180: ctx.translateBy(x: box.width, y: box.height); ctx.rotate(by: .pi)
+        case 270: ctx.translateBy(x: box.height, y: 0); ctx.rotate(by: .pi / 2)
+        default: break
+        }
+        ctx.translateBy(x: -box.minX, y: -box.minY)
+        ctx.interpolationQuality = .high
+        ctx.drawPDFPage(page)
+        ctx.restoreGState()
+        if invert {
+            ctx.setBlendMode(.difference)
+            ctx.setFillColor(UIColor.white.cgColor)
+            ctx.fill(target)
+            // Lift pure black to the dark paper color so the PDF blends into the page.
+            ctx.setBlendMode(.lighten)
+            ctx.setFillColor(darkPaper.cgColor)
+            ctx.fill(target)
+        }
+        ctx.restoreGState()
+    }
 }
 
 /// Claude's ink, drawn natively so it stays crisp at any zoom. Never takes touches.
-final class ClaudeLayerView: UIView {
-    var items: [ClaudeItem] = [] { didSet { setNeedsDisplay() } }
+final class ClaudeLayerView: TiledPageView {
+    private let lock = NSLock()
+    private var _items: [ClaudeItem] = []
+    private var _dark = false
 
-    override init(frame: CGRect) {
-        super.init(frame: frame)
-        backgroundColor = .clear
-        isOpaque = false
-        isUserInteractionEnabled = false
-        contentMode = .scaleToFill
+    func update(items: [ClaudeItem], dark: Bool) {
+        lock.lock()
+        let same = items == _items && dark == _dark
+        _items = items
+        _dark = dark
+        lock.unlock()
+        if !same { setNeedsDisplay() }
     }
-
-    required init?(coder: NSCoder) { fatalError() }
 
     override func draw(_ rect: CGRect) {
         guard let ctx = UIGraphicsGetCurrentContext() else { return }
-        let scale = bounds.width / PageGeometry.width
-        ctx.scaleBy(x: scale, y: scale)
-        for item in items { ClaudeRenderer.draw(item, in: ctx) }
+        lock.lock()
+        let items = _items, dark = _dark
+        lock.unlock()
+        for item in items { ClaudeRenderer.draw(item, dark: dark, in: ctx) }
     }
 }
 
 /// Downloads each PDF once and keeps it on disk.
+@MainActor
 enum PDFCache {
-    private static var dir: URL = {
+    private static let dir: URL = {
         let url = URL.applicationSupportDirectory.appending(path: "pdfs", directoryHint: .isDirectory)
         try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         return url
     }()
-    private static var open: [String: PDFDocument] = [:]
+    private static var open: [String: CGPDFDocument] = [:]
 
-    @MainActor
-    static func page(_ ref: PDFRef) async -> PDFPage? {
-        if let doc = open[ref.file] { return doc.page(at: ref.page - 1) }
+    /// The page if its PDF is already open, so freshly shown pages don't flash blank.
+    static func cached(_ ref: PDFRef) -> CGPDFPage? {
+        open[ref.file]?.page(at: ref.page)
+    }
+
+    static func page(_ ref: PDFRef) async -> CGPDFPage? {
+        if let page = cached(ref) { return page }
         let url = dir.appending(path: "\(ref.file).pdf")
         if !FileManager.default.fileExists(atPath: url.path) {
             guard let data = try? await API.current?.pdf(file: ref.file) else { return nil }
             try? data.write(to: url, options: .atomic)
         }
-        guard let doc = PDFDocument(url: url) else { return nil }
+        guard let doc = CGPDFDocument(url as CFURL) else { return nil }
         open[ref.file] = doc
-        return doc.page(at: ref.page - 1)
+        return doc.page(at: ref.page)
     }
 }
 
 enum ClaudeRenderer {
     static let defaultColor = "#D97757"
+    /// Parsed outlines for text and math items, which tiles would otherwise re-parse for every tile.
+    private static let paths = NSCache<NSString, CGPath>()
 
-    static func draw(_ item: ClaudeItem, in ctx: CGContext) {
-        let color = UIColor(hex: item.color ?? defaultColor)
+    private static func outline(_ item: ClaudeItem, _ d: String) -> CGPath {
+        let key = "\(item.id):\(d.count)" as NSString
+        if let path = paths.object(forKey: key) { return path }
+        let path = SVGPath.parse(d)
+        paths.setObject(path, forKey: key)
+        return path
+    }
+
+    /// In dark mode, very dark colors (black ink, navy) flip to light versions of the same hue.
+    static func adapt(_ color: UIColor, dark: Bool) -> UIColor {
+        guard dark else { return color }
+        var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+        guard color.getRed(&r, green: &g, blue: &b, alpha: &a), 0.2126 * r + 0.7152 * g + 0.0722 * b < 0.3 else { return color }
+        var hue: CGFloat = 0, sat: CGFloat = 0, bri: CGFloat = 0
+        color.getHue(&hue, saturation: &sat, brightness: &bri, alpha: &a)
+        return UIColor(hue: hue, saturation: sat * 0.6, brightness: max(0.85, 1 - bri * 0.3), alpha: a)
+    }
+
+    static func draw(_ item: ClaudeItem, dark: Bool = false, in ctx: CGContext) {
+        let color = adapt(UIColor(hex: item.color ?? defaultColor), dark: dark)
         ctx.saveGState()
         defer { ctx.restoreGState() }
         ctx.setStrokeColor(color.cgColor)
@@ -133,7 +246,7 @@ enum ClaudeRenderer {
         func strokeAndFill(_ path: CGPath) {
             if let fill = item.fill, fill != "none" {
                 ctx.addPath(path)
-                ctx.setFillColor(UIColor(hex: fill).cgColor)
+                ctx.setFillColor(adapt(UIColor(hex: fill), dark: dark).cgColor)
                 ctx.fillPath()
             }
             ctx.addPath(path)
@@ -167,12 +280,12 @@ enum ClaudeRenderer {
             strokeAndFill(CGPath(roundedRect: r, cornerWidth: 4, cornerHeight: 4, transform: nil))
         case "highlight":
             guard let r = rect(item) else { return }
-            ctx.setFillColor(UIColor(hex: item.color ?? "#FFE066").withAlphaComponent(0.45).cgColor)
+            ctx.setFillColor(UIColor(hex: item.color ?? "#FFE066").withAlphaComponent(dark ? 0.32 : 0.45).cgColor)
             ctx.fill(r)
         case "text":
             // The server ships the handwriting as outlines so both sides draw identical shapes.
             if let d = item.d, !d.isEmpty {
-                ctx.addPath(SVGPath.parse(d))
+                ctx.addPath(outline(item, d))
                 ctx.setFillColor(color.cgColor)
                 ctx.fillPath()
                 return
@@ -188,11 +301,11 @@ enum ClaudeRenderer {
             UIGraphicsPopContext()
         case "svg":
             guard let d = item.d else { return }
-            strokeAndFill(SVGPath.parse(d))
+            strokeAndFill(outline(item, d))
         case "math":
             // The server typesets LaTeX into one flattened path in page coordinates.
             guard let d = item.d else { return }
-            ctx.addPath(SVGPath.parse(d))
+            ctx.addPath(outline(item, d))
             ctx.setFillColor(color.cgColor)
             ctx.fillPath()
         default:

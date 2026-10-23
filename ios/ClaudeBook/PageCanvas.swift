@@ -1,26 +1,68 @@
-import PDFKit
 import PencilKit
 import SwiftUI
 import UIKit
 
-/// One page. PKCanvasView is itself the zooming scroll view, so PencilKit renders ink crisp at any zoom.
-/// Paper sits underneath the ink and Claude's layer on top; both are resized to match the zoom.
-/// Drawing coordinates are page coordinates (0..1000 x 0..1414) because contentSize = page size * zoomScale.
-final class PageCanvasController: UIViewController, PKCanvasViewDelegate {
-    let canvas = PKCanvasView()
-    let paper = PaperView(frame: PageGeometry.rect)
-    let claudeLayer = ClaudeLayerView(frame: PageGeometry.rect)
-    let toolPicker = PKToolPicker()
+/// Where each page sits in the continuous scroll, in page units (one unit is one server coordinate).
+enum NotebookLayout {
+    static let gap: CGFloat = 28
+    static let pitch = PageGeometry.height + gap
 
-    private(set) var page: Page?
+    static func offset(_ i: Int) -> CGFloat { CGFloat(i) * pitch }
+
+    static func height(pages: Int) -> CGFloat { max(PageGeometry.height, CGFloat(pages) * pitch - gap) }
+
+    /// The page under a y position; the gap after a page counts as that page.
+    static func index(forY y: CGFloat, count: Int) -> Int {
+        min(max(0, count - 1), max(0, Int(floor(y / pitch))))
+    }
+
+    /// The page a stroke belongs to: whichever page its middle is nearest, so ink in a gap is split down the middle.
+    static func page(forStrokeAt y: CGFloat, count: Int) -> Int {
+        index(forY: y + gap / 2, count: count)
+    }
+}
+
+/// The whole notebook as one vertical scroll, like GoodNotes or Notes.
+///
+/// One PKCanvasView spans every page and is itself the zooming scroll view, so PencilKit keeps ink crisp
+/// at any zoom. Its drawing coordinates are notebook coordinates: page i occupies y = offset(i) ..< offset(i) + 1414.
+/// Each page's ink is stored separately in that page's own coordinates (what the server and Claude use),
+/// and split back out of the canvas after every edit. Paper sits under the ink and Claude's layer over it,
+/// as tiled views that exist only for pages near the screen.
+final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
+    let canvas = PKCanvasView()
+    let toolPicker = PKToolPicker()
+    private let paperContainer = UIView()
+    private let claudeContainer = UIView()
+    private let footer = UILabel()
+
+    private(set) var notebookId: String?
+    private(set) var pages: [Page] = []
+    private(set) var currentIndex = 0
+    /// Ink per page id, in page coordinates.
+    private var drawings: [String: PKDrawing] = [:]
+    private var fingerprints: [String: Int] = [:]
+    private var onScreen: [String: (paper: PaperView, claude: ClaudeLayerView)] = [:]
+    private var commitTask: Task<Void, Never>?
     private var uploadTask: Task<Void, Never>?
+    private var viewTask: Task<Void, Never>?
     private var loading = false
     private var lastWidth: CGFloat = 0
+    private var pendingScroll: CGFloat?
+    private var pullArmed = false
+    private(set) var dark = false
+    private(set) var invertPDFs = true
+
     var onSyncState: ((String) -> Void)?
+    var onPageChange: ((Int) -> Void)?
+    var onPullToAdd: (() -> Void)?
+
+    private static let footerInset: CGFloat = 140
+    private static let pullDistance: CGFloat = 70
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        view.backgroundColor = UIColor(white: 0.93, alpha: 1)
+        view.backgroundColor = UIColor { $0.userInterfaceStyle == .dark ? UIColor(white: 0.06, alpha: 1) : UIColor(white: 0.91, alpha: 1) }
 
         canvas.translatesAutoresizingMaskIntoConstraints = false
         canvas.backgroundColor = .clear
@@ -30,6 +72,7 @@ final class PageCanvasController: UIViewController, PKCanvasViewDelegate {
         canvas.tool = PKInkingTool(.pen, color: .black, width: 3)
         canvas.showsHorizontalScrollIndicator = false
         canvas.contentInsetAdjustmentBehavior = .never
+        canvas.alwaysBounceVertical = true
         canvas.bouncesZoom = true
         view.addSubview(canvas)
         NSLayoutConstraint.activate([
@@ -39,9 +82,19 @@ final class PageCanvasController: UIViewController, PKCanvasViewDelegate {
             canvas.trailingAnchor.constraint(equalTo: view.trailingAnchor),
         ])
 
-        // Paper goes under PencilKit's own content view, Claude's layer above it.
-        canvas.insertSubview(paper, at: 0)
-        canvas.addSubview(claudeLayer)
+        // Paper goes under PencilKit's own content view, Claude's layer above it. Neither takes touches.
+        for container in [paperContainer, claudeContainer] {
+            container.isUserInteractionEnabled = false
+            container.backgroundColor = .clear
+        }
+        canvas.insertSubview(paperContainer, at: 0)
+        canvas.addSubview(claudeContainer)
+
+        footer.text = "Pull up to add a page"
+        footer.font = .preferredFont(forTextStyle: .footnote)
+        footer.textColor = .secondaryLabel
+        footer.textAlignment = .center
+        canvas.addSubview(footer)
 
         toolPicker.setVisible(true, forFirstResponder: canvas)
         toolPicker.addObserver(canvas)
@@ -56,38 +109,174 @@ final class PageCanvasController: UIViewController, PKCanvasViewDelegate {
         super.viewDidLayoutSubviews()
         let width = canvas.bounds.width
         guard width > 0, width != lastWidth else { return }
-        // Fit the page to the width; allow zooming in 5x from there.
+        // Fit the page to the width; allow zooming in 5x from there. Keep the same spot on screen on rotation.
         let fit = width / PageGeometry.width
+        let top = lastWidth > 0 ? topY : nil
         let relative = lastWidth > 0 ? canvas.zoomScale / (lastWidth / PageGeometry.width) : 1
         lastWidth = width
         canvas.minimumZoomScale = fit
         canvas.maximumZoomScale = fit * 5
         canvas.zoomScale = fit * max(1, relative)
-        layoutLayers(redraw: true)
+        layoutContent()
+        if let top { scroll(toY: top, animated: false) }
+        applyPendingScroll()
+    }
+
+    // MARK: Layout
+
+    /// The notebook y (page units) at the top of the screen.
+    private var topY: CGFloat { (canvas.contentOffset.y + canvas.adjustedContentInset.top) / canvas.zoomScale }
+
+    private func layoutContent() {
+        let s = canvas.zoomScale
+        let size = CGSize(width: PageGeometry.width * s, height: NotebookLayout.height(pages: pages.count) * s)
+        canvas.contentSize = size
+        // Center horizontally when zoomed out past the width (e.g. during a pinch bounce).
+        let side = max(0, (canvas.bounds.width - size.width) / 2)
+        canvas.contentInset = UIEdgeInsets(top: 16, left: side, bottom: Self.footerInset, right: side)
+        paperContainer.frame = CGRect(origin: .zero, size: size)
+        claudeContainer.frame = CGRect(origin: .zero, size: size)
+        footer.frame = CGRect(x: 0, y: size.height + 36, width: size.width, height: 24)
+        updateVisiblePages()
+    }
+
+    /// Only pages on or next to the screen get paper and Claude views; the rest are released.
+    private func updateVisiblePages() {
+        guard !pages.isEmpty, canvas.zoomScale > 0 else { return }
+        let s = canvas.zoomScale
+        let top = canvas.contentOffset.y / s, bottom = (canvas.contentOffset.y + canvas.bounds.height) / s
+        let first = max(0, NotebookLayout.index(forY: top, count: pages.count) - 1)
+        let last = min(pages.count - 1, NotebookLayout.index(forY: bottom, count: pages.count) + 1)
+        var keep = Set<String>()
+        for i in first...last {
+            let page = pages[i]
+            keep.insert(page.id)
+            let views = onScreen[page.id] ?? makeViews(for: page)
+            for v in [views.paper, views.claude] as [UIView] {
+                v.bounds = PageGeometry.rect
+                v.transform = CGAffineTransform(scaleX: s, y: s)
+                v.center = CGPoint(x: PageGeometry.width / 2 * s, y: (NotebookLayout.offset(i) + PageGeometry.height / 2) * s)
+            }
+        }
+        for (id, views) in onScreen where !keep.contains(id) {
+            views.paper.removeFromSuperview()
+            views.claude.removeFromSuperview()
+            onScreen[id] = nil
+        }
+    }
+
+    private func makeViews(for page: Page) -> (paper: PaperView, claude: ClaudeLayerView) {
+        let paper = PaperView(frame: PageGeometry.rect)
+        paper.style = style(for: page)
+        let claude = ClaudeLayerView(frame: PageGeometry.rect)
+        claude.update(items: page.claudeLayer, dark: dark)
+        paperContainer.addSubview(paper)
+        claudeContainer.addSubview(claude)
+        let views = (paper: paper, claude: claude)
+        onScreen[page.id] = views
+        if let ref = page.pdf, PDFCache.cached(ref) == nil {
+            let id = page.id
+            Task {
+                guard let pdf = await PDFCache.page(ref), let v = self.onScreen[id] else { return }
+                var style = v.paper.style
+                style.pdf = pdf
+                v.paper.style = style
+            }
+        }
+        return views
+    }
+
+    private func style(for page: Page) -> PaperStyle {
+        PaperStyle(background: page.background, pdf: page.pdf.flatMap { PDFCache.cached($0) }, dark: dark, invertPDF: invertPDFs)
+    }
+
+    private func clampedOffsetY(_ y: CGFloat) -> CGFloat {
+        let inset = canvas.adjustedContentInset
+        let maxY = max(-inset.top, canvas.contentSize.height + inset.bottom - canvas.bounds.height)
+        return min(max(y, -inset.top), maxY)
+    }
+
+    /// Scroll so notebook y (page units) is at the top of the screen.
+    func scroll(toY y: CGFloat, animated: Bool) {
+        guard lastWidth > 0, !pages.isEmpty else { pendingScroll = y; return }
+        let offset = clampedOffsetY(y * canvas.zoomScale - canvas.adjustedContentInset.top)
+        canvas.setContentOffset(CGPoint(x: canvas.contentOffset.x, y: offset), animated: animated)
+        updateVisiblePages()
+        updateCurrentPage()
+    }
+
+    func scrollTo(page i: Int, animated: Bool) {
+        scroll(toY: NotebookLayout.offset(i), animated: animated)
+    }
+
+    private func applyPendingScroll() {
+        guard let y = pendingScroll, lastWidth > 0, !pages.isEmpty else { return }
+        pendingScroll = nil
+        scroll(toY: y, animated: false)
+        updateCurrentPage(force: true)
+    }
+
+    // MARK: Scrolling and zooming
+
+    func scrollViewDidScroll(_ scrollView: UIScrollView) {
+        updateVisiblePages()
+        updateCurrentPage()
+        if scrollView.isDragging {
+            pullArmed = bottomOverscroll > Self.pullDistance
+            footer.text = pullArmed ? "Release to add a page" : "Pull up to add a page"
+        }
     }
 
     func scrollViewDidZoom(_ scrollView: UIScrollView) {
-        layoutLayers(redraw: false)
+        layoutContent()
     }
 
-    func scrollViewDidEndZooming(_ scrollView: UIScrollView, with view: UIView?, atScale scale: CGFloat) {
-        layoutLayers(redraw: true)
+    func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
+        guard pullArmed else { return }
+        pullArmed = false
+        footer.text = "Adding a page…"
+        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+        onPullToAdd?()
     }
 
-    /// Keep content size, paper and Claude's layer matched to the current zoom. While pinching we just
-    /// stretch the old bitmaps; when the pinch ends we redraw them at the new resolution.
-    private func layoutLayers(redraw: Bool) {
-        let s = canvas.zoomScale
-        let size = CGSize(width: PageGeometry.width * s, height: PageGeometry.height * s)
-        canvas.contentSize = size
-        // Center horizontally when zoomed out past the width (e.g. during a pinch bounce).
-        let inset = max(0, (canvas.bounds.width - size.width) / 2)
-        canvas.contentInset = UIEdgeInsets(top: 0, left: inset, bottom: 120, right: inset)
-        for layer in [paper, claudeLayer] as [UIView] {
-            layer.frame = CGRect(origin: .zero, size: size)
-            if redraw { layer.setNeedsDisplay() }
+    /// Called once the page that a pull asked for is in (or failed to arrive).
+    func endPullToAdd() {
+        footer.text = "Pull up to add a page"
+    }
+
+    /// How far the user has dragged past the end of the last page's footer.
+    private var bottomOverscroll: CGFloat {
+        let inset = canvas.adjustedContentInset
+        let maxY = max(-inset.top, canvas.contentSize.height + inset.bottom - canvas.bounds.height)
+        return canvas.contentOffset.y - maxY
+    }
+
+    /// The page in the middle of the screen is "the page", for the title and for Claude.
+    private func updateCurrentPage(force: Bool = false) {
+        guard !pages.isEmpty, canvas.zoomScale > 0 else { return }
+        let mid = (canvas.contentOffset.y + canvas.bounds.height / 2) / canvas.zoomScale
+        let i = NotebookLayout.index(forY: mid, count: pages.count)
+        guard i != currentIndex || force else { return }
+        currentIndex = i
+        // Async: this can run inside a layout pass that SwiftUI started, where changing its state is not allowed.
+        DispatchQueue.main.async { self.onPageChange?(i) }
+        reportView()
+    }
+
+    /// Tell the server which page is on screen, so "look at my page" just works in Claude.
+    private func reportView() {
+        guard let nb = notebookId, pages.indices.contains(currentIndex) else { return }
+        let pageId = pages[currentIndex].id
+        UserDefaults.standard.set(currentIndex, forKey: "lastPage.\(nb)")
+        viewTask?.cancel()
+        viewTask = Task {
+            try? await Task.sleep(for: .milliseconds(400))
+            guard !Task.isCancelled else { return }
+            try? await API.current?.setView(notebookId: nb, pageId: pageId)
         }
     }
+
+    // MARK: Settings from the editor
 
     var pencilOnly: Bool {
         get { canvas.drawingPolicy == .pencilOnly }
@@ -95,109 +284,285 @@ final class PageCanvasController: UIViewController, PKCanvasViewDelegate {
     }
 
     var showClaude: Bool {
-        get { !claudeLayer.isHidden }
-        set { claudeLayer.isHidden = !newValue }
+        get { !claudeContainer.isHidden }
+        set { claudeContainer.isHidden = !newValue }
     }
 
-    /// Switch to another page. Saves the current one first.
-    func show(_ page: Page) {
-        if let old = self.page, old.id != page.id { flush() }
-        let isNew = self.page?.id != page.id
-        self.page = page
-        paper.background = page.background
-        claudeLayer.items = page.claudeLayer
-        guard isNew else { return }
-        paper.pdfPage = nil
-        if let ref = page.pdf {
-            let id = page.id
-            Task {
-                let pdfPage = await PDFCache.page(ref)
-                if self.page?.id == id { self.paper.pdfPage = pdfPage }
+    func setAppearance(dark: Bool, invertPDFs: Bool) {
+        guard dark != self.dark || invertPDFs != self.invertPDFs else { return }
+        self.dark = dark
+        self.invertPDFs = invertPDFs
+        for (id, views) in onScreen {
+            guard let page = pages.first(where: { $0.id == id }) else { continue }
+            var style = views.paper.style
+            style.dark = dark
+            style.invertPDF = invertPDFs
+            views.paper.style = style
+            views.claude.update(items: page.claudeLayer, dark: dark)
+        }
+    }
+
+    // MARK: Notebook content
+
+    /// Show a notebook, or refresh the one on screen. If only Claude's layers changed, the ink is left alone.
+    func setNotebook(_ notebook: Notebook) {
+        let first = notebookId != notebook.id
+        if !first && notebook.pages.map(\.id) == pages.map(\.id) {
+            pages = notebook.pages
+            for (id, views) in onScreen {
+                if let page = pages.first(where: { $0.id == id }) { views.claude.update(items: page.claudeLayer, dark: dark) }
             }
+            return
+        }
+
+        // Pages were added (or this is the first load). Capture ink under the old layout, then re-lay it out.
+        commitNow()
+        let anchor = pages.indices.contains(currentIndex) ? pages[NotebookLayout.index(forY: topY, count: pages.count)].id : nil
+        let anchorDelta = anchor.flatMap { id in pages.firstIndex { $0.id == id } }.map { topY - NotebookLayout.offset($0) }
+        notebookId = notebook.id
+        pages = notebook.pages
+        for page in pages where drawings[page.id] == nil {
+            let drawing = LocalDrawings.load(page.id) ?? PKDrawing()
+            drawings[page.id] = drawing
+            fingerprints[page.id] = Self.fingerprint(drawing.strokes, dy: 0)
+        }
+        rebuildCanvasDrawing()
+        for views in onScreen.values {
+            views.paper.removeFromSuperview()
+            views.claude.removeFromSuperview()
+        }
+        onScreen = [:]
+        layoutContent()
+
+        if first {
+            let saved = UserDefaults.standard.integer(forKey: "lastPage.\(notebook.id)")
+            currentIndex = max(0, min(saved, pages.count - 1))
+            pendingScroll = NotebookLayout.offset(currentIndex)
+            applyPendingScroll()
+            restoreBackups()
+            if !pendingIds.isEmpty { scheduleUpload(delay: 1) }
+        } else if let anchor, let anchorDelta, let i = pages.firstIndex(where: { $0.id == anchor }) {
+            // Keep whatever was on screen in place, even if pages were inserted above it.
+            scroll(toY: NotebookLayout.offset(i) + anchorDelta, animated: false)
+            updateCurrentPage(force: true)
+        }
+        footer.text = "Pull up to add a page"
+    }
+
+    /// Claude drew on a page: refresh just that page's layer.
+    func reloadClaudeLayer(pageId: String) {
+        guard pages.contains(where: { $0.id == pageId }) else { return }
+        Task {
+            guard let items = try? await API.current?.claudeItems(pageId: pageId),
+                  let i = self.pages.firstIndex(where: { $0.id == pageId }) else { return }
+            self.pages[i].claudeLayer = items
+            self.onScreen[pageId]?.claude.update(items: items, dark: self.dark)
+        }
+    }
+
+    var currentPage: Page? { pages.indices.contains(currentIndex) ? pages[currentIndex] : nil }
+
+    private func rebuildCanvasDrawing() {
+        var combined = PKDrawing()
+        for (i, page) in pages.enumerated() {
+            guard let drawing = drawings[page.id], !drawing.strokes.isEmpty else { continue }
+            combined.append(drawing.transformed(using: CGAffineTransform(translationX: 0, y: NotebookLayout.offset(i))))
         }
         loading = true
-        canvas.drawing = LocalDrawings.load(page.id) ?? PKDrawing()
+        canvas.drawing = combined
         loading = false
-        canvas.setContentOffset(CGPoint(x: -canvas.contentInset.left, y: 0), animated: false)
-        if canvas.drawing.strokes.isEmpty {
-            // Fresh install or new device: pull the backup from the server.
-            let id = page.id
-            Task {
-                guard let data = try? await API.current?.drawing(pageId: id), let drawing = try? PKDrawing(data: data), self.page?.id == id else { return }
-                self.loading = true
-                self.canvas.drawing = drawing
-                self.loading = false
+    }
+
+    /// Fresh install or new device: pull each page's ink backup from the server.
+    private func restoreBackups() {
+        let missing = pages.map(\.id).filter { !LocalDrawings.exists($0) }
+        guard !missing.isEmpty, let api = API.current else { return }
+        Task {
+            var restored: [String: PKDrawing] = [:]
+            await withTaskGroup(of: (String, Data?, Bool).self) { group in
+                for id in missing {
+                    group.addTask {
+                        do {
+                            return (id, try await api.drawing(pageId: id), true)
+                        } catch {
+                            return (id, nil, false)
+                        }
+                    }
+                }
+                for await (id, data, reached) in group {
+                    if let data, let drawing = try? PKDrawing(data: data) { restored[id] = drawing }
+                    // The server has no ink for this page either: remember that so we don't ask again.
+                    else if reached && data == nil { LocalDrawings.save(PKDrawing(), pageId: id) }
+                }
+            }
+            guard !restored.isEmpty else { return }
+            commitNow()
+            for (id, drawing) in restored where drawings[id]?.strokes.isEmpty ?? true {
+                drawings[id] = drawing
+                fingerprints[id] = Self.fingerprint(drawing.strokes, dy: 0)
                 LocalDrawings.save(drawing, pageId: id)
             }
+            rebuildCanvasDrawing()
         }
     }
 
-    func reloadClaudeLayer() {
-        guard let id = page?.id else { return }
-        Task {
-            guard let items = try? await API.current?.claudeItems(pageId: id), self.page?.id == id else { return }
-            self.page?.claudeLayer = items
-            self.claudeLayer.items = items
-        }
-    }
-
-    /// Used by the CI smoke test: a known stroke so we can check coordinates survive the round trip.
+    /// Used by the CI smoke test: known strokes so we can check coordinates survive the round trip. A circle
+    /// and a line on page 1, and a zigzag near the top of page 2 to check ink is split between pages.
     func addTestStroke() {
-        var points: [PKStrokePoint] = []
-        for i in 0...48 {
-            let a = Double(i) / 48 * 2 * .pi
-            points.append(PKStrokePoint(location: CGPoint(x: 500 + 150 * cos(a), y: 700 + 150 * sin(a)), timeOffset: Double(i) * 0.01,
-                                        size: CGSize(width: 5, height: 5), opacity: 1, force: 1, azimuth: 0, altitude: .pi / 2))
+        func stroke(_ pts: [CGPoint]) -> PKStroke {
+            let points = pts.enumerated().map { i, p in
+                PKStrokePoint(location: p, timeOffset: Double(i) * 0.01, size: CGSize(width: 5, height: 5),
+                              opacity: 1, force: 1, azimuth: 0, altitude: .pi / 2)
+            }
+            return PKStroke(ink: PKInk(.pen, color: .systemBlue), path: PKStrokePath(controlPoints: points, creationDate: Date()))
         }
-        let stroke = PKStroke(ink: PKInk(.pen, color: .systemBlue), path: PKStrokePath(controlPoints: points, creationDate: Date()))
-        canvas.drawing = PKDrawing(strokes: canvas.drawing.strokes + [stroke])
+        var strokes = [
+            stroke((0...48).map { i in
+                let a = Double(i) / 48 * 2 * .pi
+                return CGPoint(x: 500 + 150 * cos(a), y: 700 + 150 * sin(a))
+            }),
+            stroke((0...20).map { CGPoint(x: 100 + Double($0) * 40, y: 1300) }),
+        ]
+        if pages.count > 1 {
+            let top = NotebookLayout.offset(1)
+            strokes.append(stroke((0...8).map { CGPoint(x: 150 + CGFloat($0) * 90, y: top + ($0 % 2 == 0 ? 160 : 260)) }))
+        }
+        canvas.drawing = PKDrawing(strokes: canvas.drawing.strokes + strokes)
     }
+
+    // MARK: Saving and syncing
 
     func canvasViewDrawingDidChange(_ canvasView: PKCanvasView) {
-        guard !loading, let page else { return }
-        LocalDrawings.save(canvasView.drawing, pageId: page.id)
-        scheduleUpload(delay: 1.5)
+        guard !loading, !pages.isEmpty else { return }
+        onSyncState?("unsynced")
+        commitTask?.cancel()
+        commitTask = Task {
+            try? await Task.sleep(for: .milliseconds(350))
+            guard !Task.isCancelled else { return }
+            self.commitNow()
+        }
     }
 
-    /// Upload right away (used when leaving a page or the app going to background).
+    /// Split the canvas back into pages; save and queue an upload for each page whose ink changed.
+    private func commitNow() {
+        commitTask?.cancel()
+        commitTask = nil
+        guard !pages.isEmpty else { return }
+        var buckets = Array(repeating: [PKStroke](), count: pages.count)
+        for stroke in canvas.drawing.strokes {
+            buckets[NotebookLayout.page(forStrokeAt: stroke.renderBounds.midY, count: pages.count)].append(stroke)
+        }
+        var changed = false
+        for (i, page) in pages.enumerated() {
+            let dy = NotebookLayout.offset(i)
+            let fp = Self.fingerprint(buckets[i], dy: dy)
+            guard fp != fingerprints[page.id] else { continue }
+            let drawing = PKDrawing(strokes: buckets[i]).transformed(using: CGAffineTransform(translationX: 0, y: -dy))
+            drawings[page.id] = drawing
+            fingerprints[page.id] = fp
+            LocalDrawings.save(drawing, pageId: page.id)
+            PendingUploads.all.insert(page.id)
+            changed = true
+        }
+        if changed { scheduleUpload(delay: 1.5) } else if pendingIds.isEmpty { onSyncState?("synced") }
+    }
+
+    /// Cheap change detector for a page's strokes. Positions are rounded so moving ink between notebook and
+    /// page coordinates doesn't register as an edit.
+    private static func fingerprint(_ strokes: [PKStroke], dy: CGFloat) -> Int {
+        var h = Hasher()
+        func q(_ v: CGFloat) -> Int { Int((v * 64).rounded()) }
+        h.combine(strokes.count)
+        for s in strokes {
+            let b = s.renderBounds
+            h.combine(q(b.minX)); h.combine(q(b.minY - dy)); h.combine(q(b.width)); h.combine(q(b.height))
+            h.combine(s.path.count)
+            h.combine(s.path.creationDate)
+            h.combine(s.ink.inkType.rawValue)
+            h.combine(s.ink.color)
+            if let mask = s.mask {
+                var elements = 0
+                mask.cgPath.applyWithBlock { _ in elements += 1 }
+                h.combine(elements)
+                h.combine(q(mask.bounds.width)); h.combine(q(mask.bounds.height))
+            }
+        }
+        return h.finalize()
+    }
+
+    /// Queued page uploads that belong to this notebook.
+    private var pendingIds: Set<String> {
+        let ids = Set(pages.map(\.id))
+        return PendingUploads.all.filter { ids.contains($0) }
+    }
+
+    /// Upload right away (used when leaving the notebook or the app going to background).
     func flush() {
-        guard uploadTask != nil else { return }
-        scheduleUpload(delay: 0)
+        commitNow()
+        if !pendingIds.isEmpty { scheduleUpload(delay: 0) }
     }
 
     private func scheduleUpload(delay: Double) {
-        guard let page else { return }
         uploadTask?.cancel()
-        let drawing = canvas.drawing
         onSyncState?("unsynced")
         uploadTask = Task {
             if delay > 0 { try? await Task.sleep(for: .seconds(delay)) }
-            guard !Task.isCancelled, let api = API.current else { return }
-            onSyncState?("syncing")
+            guard !Task.isCancelled else { return }
+            await self.uploadPending()
+        }
+    }
+
+    private func uploadPending() async {
+        guard let api = API.current else { return }
+        onSyncState?("syncing")
+        var failed = false
+        for id in pendingIds {
+            guard !Task.isCancelled else { return }
+            guard let page = pages.first(where: { $0.id == id }) else { continue }
+            let drawing = drawings[id] ?? PKDrawing()
+            PendingUploads.all.remove(id)
             do {
-                // Resolve the PDF here, not when scheduling: it may still have been downloading then.
-                var pdfPage: PDFPage?
-                if let ref = page.pdf { pdfPage = await PDFCache.page(ref) }
+                // Resolve the PDF here, not earlier: it may still have been downloading then.
+                var pdf: CGPDFPage?
+                if let ref = page.pdf { pdf = await PDFCache.page(ref) }
                 let boxes = await PageSnapshot.recognizeText(drawing: drawing)
                 // Without the PDF the snapshot would hide it from Claude, so let the server's own render stand.
-                if page.pdf == nil || pdfPage != nil {
-                    let png = PageSnapshot.png(drawing: drawing, background: page.background, pdf: pdfPage)
-                    try await api.uploadSnapshot(pageId: page.id, png: png, textBoxes: boxes)
+                if page.pdf == nil || pdf != nil {
+                    let png = PageSnapshot.png(drawing: drawing, background: page.background, pdf: pdf)
+                    try await api.uploadSnapshot(pageId: id, png: png, textBoxes: boxes)
                 }
-                try await api.uploadDrawing(pageId: page.id, data: drawing.dataRepresentation())
-                onSyncState?("synced")
+                try await api.uploadDrawing(pageId: id, data: drawing.dataRepresentation())
             } catch {
-                onSyncState?("offline")
+                PendingUploads.all.insert(id)
+                if Task.isCancelled { return }
+                failed = true
             }
-            if !Task.isCancelled { uploadTask = nil }
+        }
+        guard !Task.isCancelled else { return }
+        if failed {
+            onSyncState?("offline")
+            // Try again in a bit; edits in the meantime reschedule sooner.
+            uploadTask = Task {
+                try? await Task.sleep(for: .seconds(20))
+                guard !Task.isCancelled else { return }
+                await self.uploadPending()
+            }
+        } else {
+            onSyncState?(pendingIds.isEmpty ? "synced" : "unsynced")
+            uploadTask = nil
         }
     }
 }
 
 /// SwiftUI wrapper. The controller is owned by the editor so toolbar buttons can talk to it.
-struct PageCanvas: UIViewControllerRepresentable {
-    let controller: PageCanvasController
+struct NotebookCanvas: UIViewControllerRepresentable {
+    let controller: NotebookCanvasController
+    var dark: Bool
+    var invertPDFs: Bool
 
-    func makeUIViewController(context: Context) -> PageCanvasController { controller }
-    func updateUIViewController(_ vc: PageCanvasController, context: Context) {}
+    func makeUIViewController(context: Context) -> NotebookCanvasController { controller }
+
+    func updateUIViewController(_ vc: NotebookCanvasController, context: Context) {
+        vc.setAppearance(dark: dark, invertPDFs: invertPDFs)
+    }
 }

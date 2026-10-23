@@ -1,4 +1,3 @@
-import PDFKit
 import PencilKit
 import UIKit
 import Vision
@@ -13,6 +12,8 @@ enum LocalDrawings {
 
     static func url(_ pageId: String) -> URL { dir.appending(path: "\(pageId).pkdrawing") }
 
+    static func exists(_ pageId: String) -> Bool { FileManager.default.fileExists(atPath: url(pageId).path) }
+
     static func load(_ pageId: String) -> PKDrawing? {
         guard let data = try? Data(contentsOf: url(pageId)) else { return nil }
         return try? PKDrawing(data: data)
@@ -23,18 +24,34 @@ enum LocalDrawings {
     }
 }
 
+/// Pages whose ink changed but hasn't reached the server yet. Kept on disk so a page drawn on just
+/// before the app was killed still uploads next time its notebook opens.
+enum PendingUploads {
+    private static let key = "pendingUploads"
+
+    static var all: Set<String> {
+        get { Set(UserDefaults.standard.stringArray(forKey: key) ?? []) }
+        set { UserDefaults.standard.set(Array(newValue), forKey: key) }
+    }
+}
+
 /// Renders what the user wrote and reads their handwriting, so Claude gets an image plus text positions.
 enum PageSnapshot {
     /// Paper (or PDF page) + user ink at 1000x1414, no Claude layer (the server adds that itself).
-    /// Rendered at 2x so Claude can zoom in and still read small handwriting.
-    static func png(drawing: PKDrawing, background: PageBackground, pdf: PDFPage? = nil) -> Data {
+    /// Rendered at 2x so Claude can zoom in and still read small handwriting. Always light, whatever the
+    /// app's appearance, so Claude sees dark ink on white paper.
+    static func png(drawing: PKDrawing, background: PageBackground, pdf: CGPDFPage? = nil) -> Data {
         let format = UIGraphicsImageRendererFormat()
         format.scale = 2
-        let image = UIGraphicsImageRenderer(size: PageGeometry.size, format: format).image { ctx in
-            PaperView.drawPaper(background, pdf: pdf, pixelScale: 2, in: ctx.cgContext)
-            drawing.image(from: PageGeometry.rect, scale: 2).draw(in: PageGeometry.rect)
+        var data = Data()
+        UITraitCollection(userInterfaceStyle: .light).performAsCurrent {
+            let image = UIGraphicsImageRenderer(size: PageGeometry.size, format: format).image { ctx in
+                PaperView.drawPaper(PaperStyle(background: background, pdf: pdf), in: ctx.cgContext)
+                drawing.image(from: PageGeometry.rect, scale: 2).draw(in: PageGeometry.rect)
+            }
+            data = image.pngData() ?? Data()
         }
-        return image.pngData() ?? Data()
+        return data
     }
 
     /// On-device handwriting recognition. Runs on ink alone so ruled lines don't confuse Vision.
@@ -42,12 +59,15 @@ enum PageSnapshot {
         guard !drawing.strokes.isEmpty else { return [] }
         let format = UIGraphicsImageRendererFormat()
         format.scale = 2
-        let image = UIGraphicsImageRenderer(size: PageGeometry.size, format: format).image { _ in
-            UIColor.white.setFill()
-            UIRectFill(PageGeometry.rect)
-            drawing.image(from: PageGeometry.rect, scale: 2).draw(in: PageGeometry.rect)
+        var image: UIImage?
+        UITraitCollection(userInterfaceStyle: .light).performAsCurrent {
+            image = UIGraphicsImageRenderer(size: PageGeometry.size, format: format).image { _ in
+                UIColor.white.setFill()
+                UIRectFill(PageGeometry.rect)
+                drawing.image(from: PageGeometry.rect, scale: 2).draw(in: PageGeometry.rect)
+            }
         }
-        guard let cg = image.cgImage else { return [] }
+        guard let cg = image?.cgImage else { return [] }
         return await Task.detached(priority: .userInitiated) {
             let request = VNRecognizeTextRequest()
             request.recognitionLevel = .accurate

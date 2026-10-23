@@ -57,33 +57,59 @@ jobs:
           sleep 8
           xcrun simctl io "$UDID" screenshot shots/1-library.png
           xcrun simctl terminate "$UDID" in.clarifiq.claudebook
-          # "Claude" makes a worksheet PDF; open it so the app has to render a PDF page.
-          printf '#set page(paper: "a4")\n= Practice sheet\n\n*1.* Solve $x^2 - 5x + 6 = 0$.\n#v(9cm)\n*2.* Sketch $y = sin x$ for $0 <= x <= 2 pi$.\n' > /tmp/sheet.typ
+          # "Claude" makes a two-page worksheet PDF; open it so the app has to render PDF pages.
+          printf '#set page(paper: "a4")\n= Practice sheet\n\n*1.* Solve $x^2 - 5x + 6 = 0$.\n#v(9cm)\n*2.* Sketch $y = sin x$ for $0 <= x <= 2 pi$.\n#pagebreak()\n*3.* Differentiate $f(x) = x^3 e^x$.\n' > /tmp/sheet.typ
           jq -n --rawfile t /tmp/sheet.typ '{jsonrpc:"2.0",id:2,method:"tools/call",params:{name:"create_pdf",arguments:{title:"Worksheet",typst:$t}}}' \
             | curl -fsS -X POST "$BASE/mcp/$SECRET" -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' -d @- | jq -r '.result.content[0].text'
-          PDF_NB=$(curl -fsS -H "Authorization: Bearer $SECRET" $BASE/api/notebooks | jq -r '.notebooks[] | select(.title=="Worksheet") | .id')
-          PDF_PAGE=$(curl -fsS -H "Authorization: Bearer $SECRET" $BASE/api/notebooks/$PDF_NB | jq -r '.pages[0].id')
-          curl -fsS -X POST -H "Authorization: Bearer $SECRET" -H 'Content-Type: application/json' -d "{\"notebookId\":\"$PDF_NB\",\"pageId\":\"$PDF_PAGE\"}" $BASE/api/view; echo
+          api() { curl -fsS -H "Authorization: Bearer $SECRET" "$BASE/api/$1"; }
+          mcp() { curl -fsS -X POST "$BASE/mcp/$SECRET" -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' -d "$1" | jq -r '.result.content[0].text // .'; }
+          PDF_NB=$(api notebooks | jq -r '.notebooks[] | select(.title=="Worksheet") | .id')
+          PAGE1=$(api notebooks/$PDF_NB | jq -r '.pages[0].id')
+          PAGE2=$(api notebooks/$PDF_NB | jq -r '.pages[1].id')
+          curl -fsS -X POST -H "Authorization: Bearer $SECRET" -H 'Content-Type: application/json' -d "{\"notebookId\":\"$PDF_NB\",\"pageId\":\"$PAGE1\"}" $BASE/api/view; echo
           export SIMCTL_CHILD_CLAUDEBOOK_AUTOOPEN=1 SIMCTL_CHILD_CLAUDEBOOK_TEST_STROKE=1
           xcrun simctl launch "$UDID" in.clarifiq.claudebook
           sleep 10
           xcrun simctl io "$UDID" screenshot shots/2-editor.png
           # Claude draws on whatever page the app reported as open.
-          curl -fsS -X POST "$BASE/mcp/$SECRET" -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"draw_on_page","arguments":{"items":[
+          mcp '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"draw_on_page","arguments":{"items":[
             {"type":"ellipse","center":[500,700],"rx":190,"ry":190,"color":"#E5484D"},
             {"type":"arrow","from":[850,300],"to":[640,560]},
             {"type":"text","x":560,"y":220,"text":"Claude was here","size":40},
             {"type":"highlight","x":80,"y":1000,"w":500,"h":60},
             {"type":"math","latex":"x = \\frac{5 \\pm 1}{2} \\Rightarrow x \\in \\{2, 3\\}","x":120,"y":330,"size":40,"color":"#30A46C"},
+            {"type":"text","x":120,"y":1150,"text":"black ink check","size":36,"color":"black"},
             {"type":"path","points":[[100,1200],[250,1120],[400,1220],[550,1130],[700,1210]],"color":"#30A46C","width":5}]}}}'
-          echo
           sleep 5
           xcrun simctl io "$UDID" screenshot shots/3-claude-drew.png
-          # What the server (and so Claude) sees for that page, built from the app's uploaded snapshot.
-          PAGE=$(curl -fsS -H "Authorization: Bearer $SECRET" $BASE/api/notebooks | jq -r .view.pageId)
-          curl -fsS -H "Authorization: Bearer $SECRET" "$BASE/api/pages/$PAGE/render.png?grid=1" -o shots/4-server-view.png
-          curl -fsS -H "Authorization: Bearer $SECRET" "$BASE/api/pages/$PAGE/claude" | head -c 300; echo
-          xcrun simctl spawn "$UDID" log show --last 3m --style compact --predicate 'process == "ClaudeBook" AND messageType >= 16' | tail -40 || true
+          # What the server (and so Claude) sees for each page, built from the app's uploaded snapshots.
+          echo "view: $(api notebooks | jq -c .view) (page 1 is $PAGE1)"
+          api "pages/$PAGE1/render.png?grid=1" > shots/4-server-page1.png
+          api "pages/$PAGE2/render.png?grid=1" > shots/4b-server-page2.png
+          # Dark mode follows the iPad by default; Claude's snapshot must stay light.
+          xcrun simctl ui "$UDID" appearance dark
+          sleep 5
+          xcrun simctl io "$UDID" screenshot shots/5-dark.png
+          xcrun simctl ui "$UDID" appearance light
+          # Scroll test: stop 500 units above page 2 so the bottom of page 1 and the top of page 2 are both on screen.
+          xcrun simctl terminate "$UDID" in.clarifiq.claudebook
+          unset SIMCTL_CHILD_CLAUDEBOOK_TEST_STROKE
+          export SIMCTL_CHILD_CLAUDEBOOK_TEST_SCROLL=942
+          xcrun simctl launch "$UDID" in.clarifiq.claudebook
+          sleep 12
+          xcrun simctl io "$UDID" screenshot shots/6-scrolled.png
+          echo "view after scrolling: $(api notebooks | jq -c .view) (page 2 is $PAGE2)"
+          mcp '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"draw_on_page","arguments":{"items":[
+            {"type":"rect","x":90,"y":120,"w":820,"h":200,"color":"#3B82F6"},
+            {"type":"text","x":560,"y":360,"text":"page 2!","size":44}]}}}'
+          sleep 5
+          xcrun simctl io "$UDID" screenshot shots/7-claude-page2.png
+          # Claude inserts a page at the start: everything on screen should stay put, ink included.
+          mcp "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"tools/call\",\"params\":{\"name\":\"add_pages\",\"arguments\":{\"notebook_id\":\"$PDF_NB\",\"after_page\":0,\"background\":\"lined\"}}}"
+          sleep 6
+          xcrun simctl io "$UDID" screenshot shots/8-page-inserted.png
+          api notebooks/$PDF_NB | jq -c '[.pages[] | {id, pdf: .pdf.page, claude: (.claudeLayer | length), v: .snapshotVersion}]'
+          xcrun simctl spawn "$UDID" log show --last 5m --style compact --predicate 'process == "ClaudeBook" AND messageType >= 16' | tail -40 || true
           echo "--- server log"; tail -20 $RUNNER_TEMP/server.log
       - name: Publish screenshots to ci-screenshots branch
         if: always()

@@ -57,16 +57,17 @@ jobs:
           VERSION=0.1.$GITHUB_RUN_NUMBER
           BASE=https://github.com/$GITHUB_REPOSITORY/releases/latest/download
           jq -n --arg v "$VERSION" --arg date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --argjson size "$(stat -f%z ClaudeBook.ipa)" \
-            --arg url "$BASE/ClaudeBook.ipa" --arg sha "${GITHUB_SHA::7}" '{
+            --arg url "$BASE/ClaudeBook.ipa" --arg base "$BASE" --arg sha "${GITHUB_SHA::7}" '{
               name: "ClaudeBook", identifier: "in.clarifiq.claudebook.source",
               apps: [{
                 name: "ClaudeBook", bundleIdentifier: "in.clarifiq.claudebook", developerName: "Sufi",
                 localizedDescription: "Handwritten notebooks that Claude can see and draw on.",
-                iconURL: "https://github.githubassets.com/images/modules/logos_page/GitHub-Mark.png",
+                iconURL: ($base + "/icon.png"),
                 versions: [{ version: $v, buildVersion: ($v | split(".") | last), date: $date, size: $size, downloadURL: $url, localizedDescription: ("Build " + $sha) }]
               }],
               news: []
             }' > source.json
+          cp ClaudeBook/Assets.xcassets/AppIcon.appiconset/AppIcon-1024.png icon.png
           gh release delete latest -y --cleanup-tag 2>/dev/null || true
-          gh release create latest ClaudeBook.ipa source.json --target "$GITHUB_SHA" \
+          gh release create latest ClaudeBook.ipa source.json icon.png --target "$GITHUB_SHA" \
             --title "ClaudeBook $VERSION" --notes "Latest iPad build ($VERSION, ${GITHUB_SHA::7})."
