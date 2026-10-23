@@ -1,7 +1,9 @@
 name: Deploy server
 
-# Manual only until the first deploy is verified against the services already on the box.
 on:
+  push:
+    branches: [main]
+    paths: ["server/**", "deploy/**", ".github/workflows/deploy-server.yml"]
   workflow_dispatch:
     inputs:
       reveal_secret:
@@ -63,3 +65,21 @@ jobs:
             sleep 6
           done
           echo "Server did not come up on https://book.clarifiq.in" && exit 1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Verify from outside (read-only)
+        working-directory: server
+        env:
+          HOST: ${{ secrets.SERVER_HOST }}
+          USER: ${{ secrets.SERVER_USER }}
+        run: |
+          npm ci --silent
+          SECRET=$(ssh -i ~/.ssh/id -o BatchMode=yes "$USER@$HOST" "sed -n 's/^CLAUDEBOOK_SECRET=//p' ~/claudebook/deploy/.env")
+          echo "::add-mask::$SECRET"
+          CLAUDEBOOK_URL=https://book.clarifiq.in CLAUDEBOOK_SECRET="$SECRET" npx tsx src/verify.ts
+      - name: Existing sites still answer
+        run: |
+          code=$(curl -s -o /dev/null -w '%{http_code}' http://dash.clarifiq.in/)
+          echo "dash.clarifiq.in -> $code"
+          case "$code" in 2*|3*|401|403) ;; *) echo "dash.clarifiq.in looks broken"; exit 1;; esac
