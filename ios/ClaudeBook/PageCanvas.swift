@@ -1,3 +1,4 @@
+import PDFKit
 import PencilKit
 import SwiftUI
 import UIKit
@@ -168,16 +169,21 @@ final class PageCanvasController: UIViewController, PKCanvasViewDelegate {
         guard let page else { return }
         uploadTask?.cancel()
         let drawing = canvas.drawing
-        let pdfPage = paper.pdfPage
         onSyncState?("unsynced")
         uploadTask = Task {
             if delay > 0 { try? await Task.sleep(for: .seconds(delay)) }
             guard !Task.isCancelled, let api = API.current else { return }
             onSyncState?("syncing")
             do {
-                let png = PageSnapshot.png(drawing: drawing, background: page.background, pdf: pdfPage)
+                // Resolve the PDF here, not when scheduling: it may still have been downloading then.
+                var pdfPage: PDFPage?
+                if let ref = page.pdf { pdfPage = await PDFCache.page(ref) }
                 let boxes = await PageSnapshot.recognizeText(drawing: drawing)
-                try await api.uploadSnapshot(pageId: page.id, png: png, textBoxes: boxes)
+                // Without the PDF the snapshot would hide it from Claude, so let the server's own render stand.
+                if page.pdf == nil || pdfPage != nil {
+                    let png = PageSnapshot.png(drawing: drawing, background: page.background, pdf: pdfPage)
+                    try await api.uploadSnapshot(pageId: page.id, png: png, textBoxes: boxes)
+                }
                 try await api.uploadDrawing(pageId: page.id, data: drawing.dataRepresentation())
                 onSyncState?("synced")
             } catch {
