@@ -153,14 +153,17 @@ export function buildMcpServer(store: Store) {
     async ({ items, page_id, notebook_id, page_number }) => {
       const found = resolvePage(page_id, notebook_id, page_number);
       if (!found) return fail("Page not found.");
-      let stamped;
+      let stamped, summaries;
       try {
         stamped = prepareItems(items);
+        // Bounds can fail even after typesetting (for example arithmetic
+        // overflow while smoothing). Finish the response before persisting.
+        summaries = stamped.map(describeItem);
       } catch (e) {
         return fail(`${(e as Error).message}. Nothing was drawn.`);
       }
       store.addClaudeItems(found.page.id, stamped);
-      return text(JSON.stringify({ message: `Drew ${items.length} item(s) on page ${found.index + 1} of "${found.notebook.title}". Call view_page to check placement.`, page_id: found.page.id, items: stamped.map(describeItem) }));
+      return text(JSON.stringify({ message: `Drew ${items.length} item(s) on page ${found.index + 1} of "${found.notebook.title}". Call view_page to check placement.`, page_id: found.page.id, items: summaries }));
     },
   );
 

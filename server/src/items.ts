@@ -128,6 +128,9 @@ export function translateItem(item: Item, dx: number, dy: number): Item {
     if ("err" in outline && outline.err) throw new Error(`Invalid SVG path: ${outline.err}`);
     moved.d = outline.translate(dx, dy).round(4).toString();
   }
+  // Inputs may be finite while arithmetic overflows. Validate the complete
+  // result before the store replaces any items or JSON turns Infinity into null.
+  itemBBox(moved);
   return moved;
 }
 

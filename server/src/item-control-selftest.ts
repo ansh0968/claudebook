@@ -21,6 +21,13 @@ const legacy = { type: "svg", d: "M broken", id: "legacy", createdAt: "old" } as
 assert.throws(() => translateItem(legacy, 10, 20), /Invalid SVG/);
 assert.throws(() => translateItem(legacy, Infinity, 20), /finite/);
 assert.equal(legacy.d, "M broken");
+assert.throws(() => itemBBox(prepareItems([{ type: "path", points: [[1e308, 0], [-1e308, 10], [1e308, 20]] }])[0]), /Invalid SVG|finite/);
+assert.throws(() => pointBounds([[0, 0], [Infinity, 10]]), /finite/);
+assert.throws(() => pointBounds([[-1e308, 0], [1e308, 10]]), /finite/);
+const extremeLine = prepareItems([{ type: "line", from: [1e308, 10], to: [1e308, 20] }])[0];
+assert.throws(() => translateItem(extremeLine, 1e308, 0), /finite/);
+assert.deepEqual(extremeLine.type === "line" && extremeLine.from, [1e308, 10]);
+assert.doesNotThrow(() => itemBBox(extremeLine));
 assert.deepEqual(itemBBox(prepareItems([{ type: "line", from: [10, 20], to: [30, 40] }])[0]), { x: 8.5, y: 18.5, w: 23, h: 23 });
 assert.deepEqual(itemBBox(prepareItems([{ type: "rect", x: 10, y: 20, w: 30, h: 40 }])[0]), { x: 8.5, y: 18.5, w: 33, h: 43 });
 assert.deepEqual(itemBBox(prepareItems([{ type: "highlight", x: 10, y: 20, w: 30, h: 40 }])[0]), { x: 10, y: 20, w: 30, h: 40 });
@@ -59,6 +66,14 @@ if (process.env.CLAUDEBOOK_SECRET) {
     const view = await call("view_page", { grid: false });
     assert.ok(view[0].text?.includes(draw.items[0].id)); assert.ok(view[0].text?.includes('"bbox"'));
     await call("erase_my_drawings", { count: 1, ids: [draw.items[0].id] }, true); assert.equal((await savedItems()).length, 2);
+    const beforeInvalidDraw = await savedItems();
+    await call("draw_on_page", { items: [{ type: "line", from: [0, 0], to: [20, 20] }, { type: "path", points: [[1e308, 0], [-1e308, 10], [1e308, 20]] }] }, true);
+    assert.deepEqual(await savedItems(), beforeInvalidDraw, "Bounds failure must not persist part of a draw batch");
+    const extreme = JSON.parse((await call("draw_on_page", { items: [{ type: "line", from: [1e308, 10], to: [1e308, 20] }] }))[0].text!);
+    const beforeInvalidMove = await savedItems();
+    await call("move_items", { ids: [draw.items[0].id, extreme.items[0].id], dx: 1e308, dy: 0 }, true);
+    assert.deepEqual(await savedItems(), beforeInvalidMove, "Overflow must not persist part of a move batch");
+    await call("erase_my_drawings", { ids: [extreme.items[0].id] });
     await call("erase_my_drawings", { group: "geometry" });
     assert.deepEqual((await savedItems()).map((i) => i.id), [draw.items[2].id]);
     await call("erase_my_drawings", { count: 1 }); assert.equal((await savedItems()).length, 0);
