@@ -28,7 +28,8 @@ jobs:
           xcodebuild -project ClaudeBook.xcodeproj -scheme ClaudeBook -configuration Release \
             -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath build \
             MARKETING_VERSION=0.1.$GITHUB_RUN_NUMBER CURRENT_PROJECT_VERSION=$GITHUB_RUN_NUMBER \
-            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" build | tee build.log | grep -E "error:|warning: .*Swift|BUILD" || true
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" build > build.log 2>&1 || { tail -100 build.log; exit 1; }
+          grep -E "error:|warning: .*Swift|BUILD" build.log || true
           test -d build/Build/Products/Release-iphoneos/ClaudeBook.app
       - name: Package IPA
         working-directory: ios

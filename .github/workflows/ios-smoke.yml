@@ -41,7 +41,8 @@ jobs:
           set -o pipefail
           xcodebuild -project ClaudeBook.xcodeproj -scheme ClaudeBook -configuration Debug \
             -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' -derivedDataPath build \
-            CODE_SIGNING_ALLOWED=NO build | grep -E "error:|warning:|BUILD" || true
+            CODE_SIGNING_ALLOWED=NO build > build.log 2>&1 || { tail -100 build.log; exit 1; }
+          grep -E "error:|warning:|BUILD" build.log || true
           test -d build/Build/Products/Debug-iphonesimulator/ClaudeBook.app
       - name: Run on an iPad simulator
         working-directory: ios
@@ -114,6 +115,53 @@ jobs:
           api notebooks/$PDF_NB | jq -c '[.pages[] | {id, pdf: .pdf.page, claude: (.claudeLayer | length), v: .snapshotVersion}]'
           xcrun simctl spawn "$UDID" log show --last 5m --style compact --predicate 'process == "ClaudeBook" AND messageType >= 16' | tail -40 || true
           echo "--- server log"; tail -20 $RUNNER_TEMP/server.log
+      - name: Chemistry tools and refreshed UI
+        working-directory: ios
+        run: |
+          UDID=$(xcrun simctl list devices available -j | jq -r '[.devices[][] | select(.name | test("iPad Pro"))][0].udid')
+          xcrun simctl terminate "$UDID" in.clarifiq.claudebook || true
+          node ../scripts/smoke-fixture.mjs
+          export SIMCTL_CHILD_CLAUDEBOOK_SERVER=$BASE SIMCTL_CHILD_CLAUDEBOOK_SECRET=$SECRET
+          export SIMCTL_CHILD_CLAUDEBOOK_AUTOOPEN=1
+          xcrun simctl launch "$UDID" in.clarifiq.claudebook
+          sleep 10
+          xcrun simctl io "$UDID" screenshot shots/9-chemistry-tools.png
+          TEST_RUNNER_CLAUDEBOOK_SERVER=$BASE TEST_RUNNER_CLAUDEBOOK_SECRET=$SECRET \
+            xcodebuild -project ClaudeBook.xcodeproj -scheme ClaudeBook -configuration Debug \
+            -destination "id=$UDID" -derivedDataPath test-build -resultBundlePath TestResults.xcresult \
+            -parallel-testing-enabled NO CODE_SIGNING_ALLOWED=NO test > ui-test.log 2>&1 \
+            || { tail -150 ui-test.log; exit 1; }
+          node ../scripts/smoke-fixture.mjs reveal
+          xcrun simctl terminate "$UDID" in.clarifiq.claudebook || true
+          xcrun simctl launch "$UDID" in.clarifiq.claudebook
+          sleep 5
+          xcrun simctl io "$UDID" screenshot shots/10-hint-revealed.png
+          xcrun simctl ui "$UDID" appearance dark
+          sleep 3
+          xcrun simctl io "$UDID" screenshot shots/11-chemistry-dark.png
+          xcrun simctl ui "$UDID" appearance light
+          xcrun simctl terminate "$UDID" in.clarifiq.claudebook
+          unset SIMCTL_CHILD_CLAUDEBOOK_AUTOOPEN
+          xcrun simctl launch "$UDID" in.clarifiq.claudebook
+          sleep 5
+          xcrun simctl io "$UDID" screenshot shots/12-library-refreshed.png
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ipad-smoke-screenshots
+          path: ios/shots/*.png
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: simulator-build-log
+          path: ios/build.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ipad-interaction-test-results
+          path: |
+            ios/ui-test.log
+            ios/TestResults.xcresult
       - name: Publish screenshots to ci-screenshots branch
         if: always()
         working-directory: ios
