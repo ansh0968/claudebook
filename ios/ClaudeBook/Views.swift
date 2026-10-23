@@ -1,4 +1,7 @@
+import PDFKit
+import PencilKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 @main
 struct ClaudeBookApp: App {
@@ -76,6 +79,8 @@ struct LibraryView: View {
     @State private var error: String?
     @State private var newTitle = ""
     @State private var showNew = false
+    @State private var showImport = false
+    @State private var importing = false
     @State private var path: [String] = []
 
     var body: some View {
@@ -110,9 +115,14 @@ struct LibraryView: View {
                         Label(live.connected ? "Live" : "Offline", systemImage: live.connected ? "dot.radiowaves.left.and.right" : "wifi.slash")
                     }
                 }
-                ToolbarItem(placement: .topBarTrailing) {
+                ToolbarItemGroup(placement: .topBarTrailing) {
+                    if importing { ProgressView() }
+                    Button { showImport = true } label: { Label("Import PDF", systemImage: "doc.richtext") }
                     Button { showNew = true } label: { Label("New notebook", systemImage: "plus") }
                 }
+            }
+            .fileImporter(isPresented: $showImport, allowedContentTypes: [.pdf]) { result in
+                if case .success(let url) = result { Task { await importPDF(url) } }
             }
             .alert("New notebook", isPresented: $showNew) {
                 TextField("Title", text: $newTitle)
@@ -120,17 +130,40 @@ struct LibraryView: View {
                 Button("Cancel", role: .cancel) {}
             }
             .refreshable { await load() }
-            .task { await load() }
+            .task {
+                let view = await load()
+                // CI smoke test: jump straight into the open notebook.
+                if ProcessInfo.processInfo.environment["CLAUDEBOOK_AUTOOPEN"] == "1", let id = view?.notebookId { path = [id] }
+            }
             .onAppear {
                 live.onEvent = { e in if e.type == "notebook" { Task { await load() } } }
             }
         }
     }
 
-    private func load() async {
+    @discardableResult
+    private func load() async -> ViewState? {
         do {
-            notebooks = try await API.current?.notebooks().notebooks ?? []
+            let list = try await API.current?.notebooks()
+            notebooks = list?.notebooks ?? []
             error = nil
+            return list?.view
+        } catch {
+            self.error = error.localizedDescription
+            return nil
+        }
+    }
+
+    private func importPDF(_ url: URL) async {
+        importing = true
+        defer { importing = false }
+        let scoped = url.startAccessingSecurityScopedResource()
+        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+        do {
+            let data = try Data(contentsOf: url)
+            guard let nb = try await API.current?.importPDF(data, title: url.deletingPathExtension().lastPathComponent) else { return }
+            await load()
+            path.append(nb.id)
         } catch {
             self.error = error.localizedDescription
         }
@@ -159,6 +192,8 @@ struct NotebookEditor: View {
     @State private var sync = "synced"
     @State private var showClaude = true
     @State private var pencilOnly = true
+    @State private var showPages = false
+    @State private var testStrokeDone = false
 
     var body: some View {
         PageCanvas(controller: controller)
@@ -169,6 +204,7 @@ struct NotebookEditor: View {
                 ToolbarItemGroup(placement: .topBarLeading) {
                     Button { go(index - 1) } label: { Image(systemName: "chevron.left") }.disabled(index == 0)
                     Button { go(index + 1) } label: { Image(systemName: "chevron.right") }.disabled(index + 1 >= (notebook?.pages.count ?? 0))
+                    Button { showPages = true } label: { Image(systemName: "square.grid.2x2") }
                     Button { Task { await addPage() } } label: { Image(systemName: "doc.badge.plus") }
                 }
                 ToolbarItemGroup(placement: .topBarTrailing) {
@@ -182,6 +218,14 @@ struct NotebookEditor: View {
                         Button("Clear Claude's ink on this page", role: .destructive) { undoClaude(count: nil) }
                     } label: {
                         Image(systemName: "sparkles").foregroundStyle(Color(red: 0.85, green: 0.47, blue: 0.34))
+                    }
+                }
+            }
+            .sheet(isPresented: $showPages) {
+                if let notebook {
+                    PageGrid(notebook: notebook, current: index) { i in
+                        showPages = false
+                        go(i)
                     }
                 }
             }
@@ -214,6 +258,10 @@ struct NotebookEditor: View {
         notebook = nb
         if keepPage, let currentId, let i = nb.pages.firstIndex(where: { $0.id == currentId }) { index = i }
         go(min(index, nb.pages.count - 1))
+        if ProcessInfo.processInfo.environment["CLAUDEBOOK_TEST_STROKE"] == "1", !testStrokeDone {
+            testStrokeDone = true
+            controller.addTestStroke()
+        }
     }
 
     private func go(_ i: Int) {
@@ -237,6 +285,65 @@ struct NotebookEditor: View {
         Task {
             try? await API.current?.undoClaude(pageId: id, count: count)
             controller.reloadClaudeLayer()
+        }
+    }
+}
+
+/// All pages of a notebook as thumbnails. Tap one to jump there.
+struct PageGrid: View {
+    let notebook: Notebook
+    let current: Int
+    var onPick: (Int) -> Void
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 140), spacing: 20)], spacing: 20) {
+                    ForEach(Array(notebook.pages.enumerated()), id: \.element.id) { i, page in
+                        Button { onPick(i) } label: {
+                            VStack(spacing: 6) {
+                                PageThumbnail(page: page)
+                                    .overlay(RoundedRectangle(cornerRadius: 4).stroke(i == current ? Color.accentColor : .clear, lineWidth: 3))
+                                Text("\(i + 1)").font(.caption).foregroundStyle(.secondary)
+                            }
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(20)
+            }
+            .navigationTitle(notebook.title)
+            .navigationBarTitleDisplayMode(.inline)
+        }
+    }
+}
+
+struct PageThumbnail: View {
+    let page: Page
+    @State private var image: UIImage?
+
+    var body: some View {
+        Group {
+            if let image { Image(uiImage: image).resizable() } else { Color.white }
+        }
+        .aspectRatio(PageGeometry.width / PageGeometry.height, contentMode: .fit)
+        .clipShape(RoundedRectangle(cornerRadius: 4))
+        .shadow(color: .black.opacity(0.12), radius: 4, y: 1)
+        .task(id: page.id) { image = await render() }
+    }
+
+    private func render() async -> UIImage {
+        var pdfPage: PDFPage?
+        if let ref = page.pdf { pdfPage = await PDFCache.page(ref) }
+        let drawing = LocalDrawings.load(page.id) ?? PKDrawing()
+        let size = CGSize(width: 200, height: 200 * PageGeometry.height / PageGeometry.width)
+        let s = size.width / PageGeometry.width
+        return UIGraphicsImageRenderer(size: size).image { ctx in
+            let cg = ctx.cgContext
+            cg.scaleBy(x: s, y: s)
+            PaperView.drawPaper(page.background, pdf: pdfPage, pixelScale: s * 2, in: cg)
+            drawing.image(from: PageGeometry.rect, scale: s * 2).draw(in: PageGeometry.rect)
+            for item in page.claudeLayer { ClaudeRenderer.draw(item, in: cg) }
         }
     }
 }

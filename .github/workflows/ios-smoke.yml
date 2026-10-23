@@ -1,0 +1,90 @@
+name: iPad smoke test
+
+# Builds the app for the simulator, points it at a throwaway local server, has "Claude" draw on the
+# open page, and saves screenshots to the ci-screenshots branch so they can be reviewed without a Mac.
+on:
+  push:
+    branches: [main]
+    paths: ["ios/**", ".github/workflows/ios-smoke.yml"]
+  workflow_dispatch:
+
+concurrency: ios-smoke
+
+permissions:
+  contents: write
+
+env:
+  SECRET: smoke-test-secret-0123456789
+  BASE: http://127.0.0.1:8787
+
+jobs:
+  smoke:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Start a throwaway server
+        working-directory: server
+        run: |
+          npm ci
+          npm run build
+          CLAUDEBOOK_SECRET=$SECRET DATA_DIR=$RUNNER_TEMP/data nohup node dist/index.js > $RUNNER_TEMP/server.log 2>&1 &
+          for i in $(seq 1 20); do curl -fsS $BASE/health && break; sleep 1; done
+      - name: Build for simulator
+        working-directory: ios
+        run: |
+          brew install xcodegen
+          xcodegen generate
+          set -o pipefail
+          xcodebuild -project ClaudeBook.xcodeproj -scheme ClaudeBook -configuration Debug \
+            -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO build | grep -E "error:|warning:|BUILD" || true
+          test -d build/Build/Products/Debug-iphonesimulator/ClaudeBook.app
+      - name: Run on an iPad simulator
+        working-directory: ios
+        run: |
+          UDID=$(xcrun simctl list devices available -j | jq -r '[.devices[][] | select(.name | test("iPad Pro"))][0].udid')
+          echo "Using $(xcrun simctl list devices | grep $UDID)"
+          xcrun simctl boot "$UDID"
+          xcrun simctl bootstatus "$UDID" -b
+          xcrun simctl install "$UDID" build/Build/Products/Debug-iphonesimulator/ClaudeBook.app
+          mkdir -p shots
+          export SIMCTL_CHILD_CLAUDEBOOK_SERVER=$BASE SIMCTL_CHILD_CLAUDEBOOK_SECRET=$SECRET
+          xcrun simctl launch "$UDID" in.clarifiq.claudebook
+          sleep 8
+          xcrun simctl io "$UDID" screenshot shots/1-library.png
+          xcrun simctl terminate "$UDID" in.clarifiq.claudebook
+          export SIMCTL_CHILD_CLAUDEBOOK_AUTOOPEN=1 SIMCTL_CHILD_CLAUDEBOOK_TEST_STROKE=1
+          xcrun simctl launch "$UDID" in.clarifiq.claudebook
+          sleep 10
+          xcrun simctl io "$UDID" screenshot shots/2-editor.png
+          # Claude draws on whatever page the app reported as open.
+          curl -fsS -X POST "$BASE/mcp/$SECRET" -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"draw_on_page","arguments":{"items":[
+            {"type":"ellipse","center":[500,700],"rx":190,"ry":190,"color":"#E5484D"},
+            {"type":"arrow","from":[850,300],"to":[640,560]},
+            {"type":"text","x":560,"y":220,"text":"Claude was here","size":40},
+            {"type":"highlight","x":80,"y":1000,"w":500,"h":60},
+            {"type":"path","points":[[100,1200],[250,1120],[400,1220],[550,1130],[700,1210]],"color":"#30A46C","width":5}]}}}'
+          echo
+          sleep 5
+          xcrun simctl io "$UDID" screenshot shots/3-claude-drew.png
+          # What the server (and so Claude) sees for that page, built from the app's uploaded snapshot.
+          PAGE=$(curl -fsS -H "Authorization: Bearer $SECRET" $BASE/api/notebooks | jq -r .view.pageId)
+          curl -fsS -H "Authorization: Bearer $SECRET" "$BASE/api/pages/$PAGE/render.png?grid=1" -o shots/4-server-view.png
+          curl -fsS -H "Authorization: Bearer $SECRET" "$BASE/api/pages/$PAGE/claude" | head -c 300; echo
+          xcrun simctl spawn "$UDID" log show --last 3m --style compact --predicate 'process == "ClaudeBook" AND messageType >= 16' | tail -40 || true
+          echo "--- server log"; tail -20 $RUNNER_TEMP/server.log
+      - name: Publish screenshots to ci-screenshots branch
+        if: always()
+        working-directory: ios
+        run: |
+          [ -d shots ] || exit 0
+          cp -R shots $RUNNER_TEMP/shots
+          cd $RUNNER_TEMP && rm -rf pub && mkdir pub && cd pub
+          git init -q -b ci-screenshots
+          cp ../shots/*.png .
+          echo "Smoke test for ${GITHUB_SHA::7}, run $GITHUB_RUN_ID" > README.md
+          git add . && git -c user.name=claudebook-ci -c user.email=ci@users.noreply.github.com commit -qm "Screenshots for ${GITHUB_SHA::7}"
+          git push -qf "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" ci-screenshots

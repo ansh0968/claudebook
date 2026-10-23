@@ -43,11 +43,19 @@ struct ClaudeItem: Codable, Identifiable, Hashable {
     var d: String?
     var closed: Bool?
     var dashed: Bool?
+    var latex: String?
+}
+
+/// A page that sits on top of a PDF page. `page` is 1-based.
+struct PDFRef: Codable, Hashable {
+    var file: String
+    var page: Int
 }
 
 struct Page: Codable, Identifiable, Hashable {
     var id: String
     var background: PageBackground
+    var pdf: PDFRef?
     var snapshotVersion: Int
     var textBoxes: [TextBox]
     var claudeLayer: [ClaudeItem]

@@ -6,13 +6,17 @@ enum Credentials {
     private static let urlKey = "serverURL"
     private static let account = "claudebook-secret"
 
+    /// CI's simulator smoke test points the app at a throwaway local server through these.
+    private static let env = ProcessInfo.processInfo.environment
+
     static var serverURL: String {
-        get { UserDefaults.standard.string(forKey: urlKey) ?? "https://book.clarifiq.in" }
+        get { env["CLAUDEBOOK_SERVER"] ?? UserDefaults.standard.string(forKey: urlKey) ?? "https://book.clarifiq.in" }
         set { UserDefaults.standard.set(newValue, forKey: urlKey) }
     }
 
     static var secret: String {
         get {
+            if let s = env["CLAUDEBOOK_SECRET"] { return s }
             let query: [String: Any] = [
                 kSecClass as String: kSecClassGenericPassword,
                 kSecAttrAccount as String: account,
@@ -51,8 +55,10 @@ struct API {
         return API(base: url, secret: Credentials.secret)
     }
 
-    private func request(_ path: String, method: String = "GET", json: Encodable? = nil, body: Data? = nil) async throws -> Data {
-        var req = URLRequest(url: base.appending(path: "api").appending(path: path))
+    private func request(_ path: String, method: String = "GET", json: Encodable? = nil, body: Data? = nil, contentType: String = "application/octet-stream", query: [URLQueryItem] = []) async throws -> Data {
+        var url = base.appending(path: "api").appending(path: path)
+        if !query.isEmpty { url.append(queryItems: query) }
+        var req = URLRequest(url: url)
         req.httpMethod = method
         req.setValue("Bearer \(secret)", forHTTPHeaderField: "Authorization")
         req.timeoutInterval = 30
@@ -60,7 +66,7 @@ struct API {
             req.setValue("application/json", forHTTPHeaderField: "Content-Type")
             req.httpBody = try JSONEncoder().encode(json)
         } else if let body {
-            req.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
+            req.setValue(contentType, forHTTPHeaderField: "Content-Type")
             req.httpBody = body
         }
         let (data, resp) = try await URLSession.shared.data(for: req)
@@ -107,6 +113,14 @@ struct API {
 
     func drawing(pageId: String) async throws -> Data? {
         do { return try await request("pages/\(pageId)/drawing") } catch let e as APIError where e.status == 404 { return nil }
+    }
+
+    func importPDF(_ data: Data, title: String) async throws -> Notebook {
+        try decode(Notebook.self, await request("notebooks/import-pdf", method: "POST", body: data, contentType: "application/pdf", query: [URLQueryItem(name: "title", value: title)]))
+    }
+
+    func pdf(file: String) async throws -> Data {
+        try await request("pdfs/\(file)")
     }
 
     func claudeItems(pageId: String) async throws -> [ClaudeItem] {

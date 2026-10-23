@@ -1,3 +1,4 @@
+import PDFKit
 import PencilKit
 import UIKit
 import Vision
@@ -24,12 +25,12 @@ enum LocalDrawings {
 
 /// Renders what the user wrote and reads their handwriting, so Claude gets an image plus text positions.
 enum PageSnapshot {
-    /// Paper + user ink at 1000x1414, no Claude layer (the server adds that itself).
-    static func png(drawing: PKDrawing, background: PageBackground) -> Data {
+    /// Paper (or PDF page) + user ink at 1000x1414, no Claude layer (the server adds that itself).
+    static func png(drawing: PKDrawing, background: PageBackground, pdf: PDFPage? = nil) -> Data {
         let format = UIGraphicsImageRendererFormat()
         format.scale = 1
         let image = UIGraphicsImageRenderer(size: PageGeometry.size, format: format).image { ctx in
-            PaperView.drawPaper(background, in: ctx.cgContext)
+            PaperView.drawPaper(background, pdf: pdf, pixelScale: 1, in: ctx.cgContext)
             drawing.image(from: PageGeometry.rect, scale: 1).draw(in: PageGeometry.rect)
         }
         return image.pngData() ?? Data()

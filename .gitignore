@@ -4,3 +4,4 @@ data/
 .env
 *.png
 !ios/**/*.png
+.claude/worktrees/

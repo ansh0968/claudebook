@@ -1,25 +1,45 @@
+import PDFKit
 import UIKit
 
-/// Paper: blank, lined, grid or dotted. Drawn in page coordinates.
+/// Paper: blank, lined, grid, dotted, or a PDF page. Views draw in page coordinates scaled to their bounds,
+/// so they can be resized to the current zoom and redrawn crisp.
 final class PaperView: UIView {
     var background: PageBackground = .blank { didSet { setNeedsDisplay() } }
+    var pdfPage: PDFPage? { didSet { setNeedsDisplay() } }
 
     override init(frame: CGRect) {
         super.init(frame: frame)
         backgroundColor = .white
-        contentMode = .redraw
+        contentMode = .scaleToFill
+        isUserInteractionEnabled = false
     }
 
     required init?(coder: NSCoder) { fatalError() }
 
     override func draw(_ rect: CGRect) {
-        Self.drawPaper(background, in: UIGraphicsGetCurrentContext()!)
+        guard let ctx = UIGraphicsGetCurrentContext() else { return }
+        let scale = bounds.width / PageGeometry.width
+        ctx.scaleBy(x: scale, y: scale)
+        Self.drawPaper(background, pdf: pdfPage, pixelScale: scale * contentScaleFactor, in: ctx)
     }
 
-    static func drawPaper(_ background: PageBackground, in ctx: CGContext) {
+    static func drawPaper(_ background: PageBackground, pdf: PDFPage? = nil, pixelScale: CGFloat = 1, in ctx: CGContext) {
         let w = PageGeometry.width, h = PageGeometry.height
         ctx.setFillColor(UIColor.white.cgColor)
         ctx.fill(PageGeometry.rect)
+        if let pdf {
+            // Aspect-fit and centered, same as the server's rasterizer.
+            let box = pdf.bounds(for: .mediaBox)
+            let rotated = abs(pdf.rotation) % 180 == 90
+            let size = rotated ? CGSize(width: box.height, height: box.width) : box.size
+            let fit = min(w / size.width, h / size.height)
+            let target = CGRect(x: (w - size.width * fit) / 2, y: (h - size.height * fit) / 2, width: size.width * fit, height: size.height * fit)
+            let px = CGSize(width: min(4096, target.width * pixelScale), height: min(4096 * target.height / target.width, target.height * pixelScale))
+            UIGraphicsPushContext(ctx)
+            pdf.thumbnail(of: px, for: .mediaBox).draw(in: target)
+            UIGraphicsPopContext()
+            return
+        }
         switch background {
         case .blank:
             break
@@ -58,14 +78,39 @@ final class ClaudeLayerView: UIView {
         backgroundColor = .clear
         isOpaque = false
         isUserInteractionEnabled = false
-        contentMode = .redraw
+        contentMode = .scaleToFill
     }
 
     required init?(coder: NSCoder) { fatalError() }
 
     override func draw(_ rect: CGRect) {
         guard let ctx = UIGraphicsGetCurrentContext() else { return }
+        let scale = bounds.width / PageGeometry.width
+        ctx.scaleBy(x: scale, y: scale)
         for item in items { ClaudeRenderer.draw(item, in: ctx) }
+    }
+}
+
+/// Downloads each PDF once and keeps it on disk.
+enum PDFCache {
+    private static var dir: URL = {
+        let url = URL.applicationSupportDirectory.appending(path: "pdfs", directoryHint: .isDirectory)
+        try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        return url
+    }()
+    private static var open: [String: PDFDocument] = [:]
+
+    @MainActor
+    static func page(_ ref: PDFRef) async -> PDFPage? {
+        if let doc = open[ref.file] { return doc.page(at: ref.page - 1) }
+        let url = dir.appending(path: "\(ref.file).pdf")
+        if !FileManager.default.fileExists(atPath: url.path) {
+            guard let data = try? await API.current?.pdf(file: ref.file) else { return nil }
+            try? data.write(to: url, options: .atomic)
+        }
+        guard let doc = PDFDocument(url: url) else { return nil }
+        open[ref.file] = doc
+        return doc.page(at: ref.page - 1)
     }
 }
 
@@ -137,6 +182,12 @@ enum ClaudeRenderer {
         case "svg":
             guard let d = item.d else { return }
             strokeAndFill(SVGPath.parse(d))
+        case "math":
+            // The server typesets LaTeX into one flattened path in page coordinates.
+            guard let d = item.d else { return }
+            ctx.addPath(SVGPath.parse(d))
+            ctx.setFillColor(color.cgColor)
+            ctx.fillPath()
         default:
             break
         }

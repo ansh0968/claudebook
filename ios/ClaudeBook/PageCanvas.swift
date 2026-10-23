@@ -2,51 +2,45 @@ import PencilKit
 import SwiftUI
 import UIKit
 
-/// One page: paper, the user's PencilKit ink, and Claude's layer on top, all in a zoomable 1000x1414 space.
-final class PageCanvasController: UIViewController, PKCanvasViewDelegate, UIScrollViewDelegate {
-    let scrollView = UIScrollView()
-    let pageView = UIView(frame: PageGeometry.rect)
+/// One page. PKCanvasView is itself the zooming scroll view, so PencilKit renders ink crisp at any zoom.
+/// Paper sits underneath the ink and Claude's layer on top; both are resized to match the zoom.
+/// Drawing coordinates are page coordinates (0..1000 x 0..1414) because contentSize = page size * zoomScale.
+final class PageCanvasController: UIViewController, PKCanvasViewDelegate {
+    let canvas = PKCanvasView()
     let paper = PaperView(frame: PageGeometry.rect)
-    let canvas = PKCanvasView(frame: PageGeometry.rect)
     let claudeLayer = ClaudeLayerView(frame: PageGeometry.rect)
     let toolPicker = PKToolPicker()
 
     private(set) var page: Page?
     private var uploadTask: Task<Void, Never>?
     private var loading = false
+    private var lastWidth: CGFloat = 0
     var onSyncState: ((String) -> Void)?
 
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = UIColor(white: 0.93, alpha: 1)
 
-        scrollView.delegate = self
-        scrollView.backgroundColor = .clear
-        scrollView.maximumZoomScale = 6
-        scrollView.showsHorizontalScrollIndicator = false
-        scrollView.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(scrollView)
-        NSLayoutConstraint.activate([
-            scrollView.topAnchor.constraint(equalTo: view.topAnchor),
-            scrollView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
-            scrollView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            scrollView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-        ])
-
-        pageView.layer.shadowColor = UIColor.black.cgColor
-        pageView.layer.shadowOpacity = 0.12
-        pageView.layer.shadowRadius = 10
-        scrollView.addSubview(pageView)
-        pageView.addSubview(paper)
-
+        canvas.translatesAutoresizingMaskIntoConstraints = false
         canvas.backgroundColor = .clear
         canvas.isOpaque = false
-        canvas.isScrollEnabled = false
         canvas.drawingPolicy = .pencilOnly
         canvas.delegate = self
         canvas.tool = PKInkingTool(.pen, color: .black, width: 3)
-        pageView.addSubview(canvas)
-        pageView.addSubview(claudeLayer)
+        canvas.showsHorizontalScrollIndicator = false
+        canvas.contentInsetAdjustmentBehavior = .never
+        canvas.bouncesZoom = true
+        view.addSubview(canvas)
+        NSLayoutConstraint.activate([
+            canvas.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
+            canvas.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            canvas.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            canvas.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+        ])
+
+        // Paper goes under PencilKit's own content view, Claude's layer above it.
+        canvas.insertSubview(paper, at: 0)
+        canvas.addSubview(claudeLayer)
 
         toolPicker.setVisible(true, forFirstResponder: canvas)
         toolPicker.addObserver(canvas)
@@ -59,34 +53,39 @@ final class PageCanvasController: UIViewController, PKCanvasViewDelegate, UIScro
 
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
-        let fit = max(0.1, (scrollView.bounds.width - 32) / PageGeometry.width)
-        let wasAtMin = scrollView.zoomScale <= scrollView.minimumZoomScale + 0.001
-        scrollView.minimumZoomScale = fit
-        if wasAtMin || scrollView.zoomScale < fit { scrollView.zoomScale = fit }
-        centerPage()
+        let width = canvas.bounds.width
+        guard width > 0, width != lastWidth else { return }
+        // Fit the page to the width; allow zooming in 5x from there.
+        let fit = width / PageGeometry.width
+        let relative = lastWidth > 0 ? canvas.zoomScale / (lastWidth / PageGeometry.width) : 1
+        lastWidth = width
+        canvas.minimumZoomScale = fit
+        canvas.maximumZoomScale = fit * 5
+        canvas.zoomScale = fit * max(1, relative)
+        layoutLayers(redraw: true)
     }
 
-    func viewForZooming(in scrollView: UIScrollView) -> UIView? { pageView }
-
-    func scrollViewDidZoom(_ scrollView: UIScrollView) { centerPage() }
+    func scrollViewDidZoom(_ scrollView: UIScrollView) {
+        layoutLayers(redraw: false)
+    }
 
     func scrollViewDidEndZooming(_ scrollView: UIScrollView, with view: UIView?, atScale scale: CGFloat) {
-        // Re-rasterize at the new zoom so ink and Claude's layer stay sharp instead of a blurry bitmap.
-        let s = scale * (self.view.window?.screen.scale ?? 2)
-        for v in [paper, canvas, claudeLayer] as [UIView] {
-            v.contentScaleFactor = s
-            v.setNeedsDisplay()
-        }
+        layoutLayers(redraw: true)
     }
 
-    private func centerPage() {
-        let size = scrollView.bounds.size, content = pageView.frame.size
-        scrollView.contentInset = UIEdgeInsets(
-            top: max(16, (size.height - content.height) / 2),
-            left: max(16, (size.width - content.width) / 2),
-            bottom: 16,
-            right: max(16, (size.width - content.width) / 2)
-        )
+    /// Keep content size, paper and Claude's layer matched to the current zoom. While pinching we just
+    /// stretch the old bitmaps; when the pinch ends we redraw them at the new resolution.
+    private func layoutLayers(redraw: Bool) {
+        let s = canvas.zoomScale
+        let size = CGSize(width: PageGeometry.width * s, height: PageGeometry.height * s)
+        canvas.contentSize = size
+        // Center horizontally when zoomed out past the width (e.g. during a pinch bounce).
+        let inset = max(0, (canvas.bounds.width - size.width) / 2)
+        canvas.contentInset = UIEdgeInsets(top: 0, left: inset, bottom: 120, right: inset)
+        for layer in [paper, claudeLayer] as [UIView] {
+            layer.frame = CGRect(origin: .zero, size: size)
+            if redraw { layer.setNeedsDisplay() }
+        }
     }
 
     var pencilOnly: Bool {
@@ -107,9 +106,18 @@ final class PageCanvasController: UIViewController, PKCanvasViewDelegate, UIScro
         paper.background = page.background
         claudeLayer.items = page.claudeLayer
         guard isNew else { return }
+        paper.pdfPage = nil
+        if let ref = page.pdf {
+            let id = page.id
+            Task {
+                let pdfPage = await PDFCache.page(ref)
+                if self.page?.id == id { self.paper.pdfPage = pdfPage }
+            }
+        }
         loading = true
         canvas.drawing = LocalDrawings.load(page.id) ?? PKDrawing()
         loading = false
+        canvas.setContentOffset(CGPoint(x: -canvas.contentInset.left, y: 0), animated: false)
         if canvas.drawing.strokes.isEmpty {
             // Fresh install or new device: pull the backup from the server.
             let id = page.id
@@ -132,6 +140,18 @@ final class PageCanvasController: UIViewController, PKCanvasViewDelegate, UIScro
         }
     }
 
+    /// Used by the CI smoke test: a known stroke so we can check coordinates survive the round trip.
+    func addTestStroke() {
+        var points: [PKStrokePoint] = []
+        for i in 0...48 {
+            let a = Double(i) / 48 * 2 * .pi
+            points.append(PKStrokePoint(location: CGPoint(x: 500 + 150 * cos(a), y: 700 + 150 * sin(a)), timeOffset: Double(i) * 0.01,
+                                        size: CGSize(width: 5, height: 5), opacity: 1, force: 1, azimuth: 0, altitude: .pi / 2))
+        }
+        let stroke = PKStroke(ink: PKInk(.pen, color: .systemBlue), path: PKStrokePath(controlPoints: points, creationDate: Date()))
+        canvas.drawing = PKDrawing(strokes: canvas.drawing.strokes + [stroke])
+    }
+
     func canvasViewDrawingDidChange(_ canvasView: PKCanvasView) {
         guard !loading, let page else { return }
         LocalDrawings.save(canvasView.drawing, pageId: page.id)
@@ -148,13 +168,14 @@ final class PageCanvasController: UIViewController, PKCanvasViewDelegate, UIScro
         guard let page else { return }
         uploadTask?.cancel()
         let drawing = canvas.drawing
+        let pdfPage = paper.pdfPage
         onSyncState?("unsynced")
         uploadTask = Task {
             if delay > 0 { try? await Task.sleep(for: .seconds(delay)) }
             guard !Task.isCancelled, let api = API.current else { return }
             onSyncState?("syncing")
             do {
-                let png = PageSnapshot.png(drawing: drawing, background: page.background)
+                let png = PageSnapshot.png(drawing: drawing, background: page.background, pdf: pdfPage)
                 let boxes = await PageSnapshot.recognizeText(drawing: drawing)
                 try await api.uploadSnapshot(pageId: page.id, png: png, textBoxes: boxes)
                 try await api.uploadDrawing(pageId: page.id, data: drawing.dataRepresentation())
