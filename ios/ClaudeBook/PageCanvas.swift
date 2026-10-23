@@ -292,6 +292,7 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
         guard dark != self.dark || invertPDFs != self.invertPDFs else { return }
         self.dark = dark
         self.invertPDFs = invertPDFs
+        toolPicker.overrideUserInterfaceStyle = dark ? .dark : .light
         for (id, views) in onScreen {
             guard let page = pages.first(where: { $0.id == id }) else { continue }
             var style = views.paper.style
@@ -378,8 +379,7 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
         let missing = pages.map(\.id).filter { !LocalDrawings.exists($0) }
         guard !missing.isEmpty, let api = API.current else { return }
         Task {
-            var restored: [String: PKDrawing] = [:]
-            await withTaskGroup(of: (String, Data?, Bool).self) { group in
+            let results = await withTaskGroup(of: (String, Data?, Bool).self) { group -> [(String, Data?, Bool)] in
                 for id in missing {
                     group.addTask {
                         do {
@@ -389,10 +389,17 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
                         }
                     }
                 }
-                for await (id, data, reached) in group {
-                    if let data, let drawing = try? PKDrawing(data: data) { restored[id] = drawing }
-                    // The server has no ink for this page either: remember that so we don't ask again.
-                    else if reached && data == nil { LocalDrawings.save(PKDrawing(), pageId: id) }
+                var out: [(String, Data?, Bool)] = []
+                for await result in group { out.append(result) }
+                return out
+            }
+            var restored: [String: PKDrawing] = [:]
+            for (id, data, reached) in results {
+                if let data, let drawing = try? PKDrawing(data: data) { restored[id] = drawing }
+                // The server has no ink for this page either: remember that so we don't ask again,
+                // unless the user has drawn on it in the meantime (that already saved a file).
+                else if reached && data == nil && !LocalDrawings.exists(id) && (drawings[id]?.strokes.isEmpty ?? true) {
+                    LocalDrawings.save(PKDrawing(), pageId: id)
                 }
             }
             guard !restored.isEmpty else { return }
