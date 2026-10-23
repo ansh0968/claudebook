@@ -1,6 +1,8 @@
 // What Claude can put on a page. Kept deliberately high level: Claude is much better at
 // "circle this box" than at plotting hundreds of exact points.
+import { nanoid } from "nanoid";
 import { z } from "zod";
+import { renderMath } from "./math.js";
 
 const pt = z.tuple([z.number(), z.number()]).describe("[x, y] in page coordinates");
 const color = z.string().optional().describe("CSS color, default Claude orange #D97757. Use red #E5484D for mistakes, green #30A46C for corrections");
@@ -20,10 +22,26 @@ export const ItemSchema = z.discriminatedUnion("type", [
     .describe("Handwritten-style text. x,y is the top-left. size is the line height, default 32. Use \\n for new lines"),
   z.object({ type: z.literal("svg"), d: z.string(), color, width, fill: z.string().optional() })
     .describe("Raw SVG path data in page coordinates, for figures and diagrams"),
+  z.object({ type: z.literal("math"), latex: z.string(), x: z.number(), y: z.number(), size: z.number().optional(), color })
+    .describe("Typeset math from LaTeX, e.g. x = \\frac{-b \\pm \\sqrt{b^2-4ac}}{2a}. Use this for every equation and corrected working step. x,y is the top-left, size is the line height, default 36. One line per item"),
 ]);
 
 export type ItemInput = z.infer<typeof ItemSchema>;
-export type Item = ItemInput & { id: string; createdAt: string };
+/** Stored items. Math items also carry the typeset outline (`d`) and its box (`w`, `h`) in page coordinates. */
+export type Item = ItemInput & { id: string; createdAt: string; d?: string; w?: number; h?: number };
+
+/** Stamp ids and typeset any math. Throws on bad LaTeX so nothing half-drawn lands on the page. */
+export function prepareItems(items: ItemInput[]): Item[] {
+  return items.map((i) => {
+    const base = { ...i, id: nanoid(8), createdAt: new Date().toISOString() };
+    if (i.type !== "math") return base;
+    try {
+      return { ...base, ...renderMath(i.latex, i.x, i.y, i.size ?? 36) };
+    } catch (e) {
+      throw new Error(`LaTeX error in "${i.latex}": ${(e as Error).message}`);
+    }
+  });
+}
 
 const DEFAULT_COLOR = "#D97757";
 
@@ -43,7 +61,7 @@ function smoothPath(points: [number, number][], closed = false) {
   return closed ? d + " Z" : d;
 }
 
-export function itemToSvg(item: ItemInput): string {
+export function itemToSvg(item: ItemInput & { d?: string }): string {
   const c = esc(item.color ?? DEFAULT_COLOR);
   const w = "width" in item && item.width ? item.width : 3;
   const stroke = `stroke="${c}" stroke-width="${w}" stroke-linecap="round" stroke-linejoin="round"`;
@@ -72,5 +90,7 @@ export function itemToSvg(item: ItemInput): string {
     }
     case "svg":
       return `<path d="${esc(item.d)}" fill="${esc(item.fill ?? "none")}" ${stroke}/>`;
+    case "math":
+      return item.d ? `<path d="${esc(item.d)}" fill="${c}"/>` : "";
   }
 }
