@@ -4,6 +4,7 @@ import { nanoid } from "nanoid";
 import { z } from "zod";
 import { renderMath } from "./math.js";
 import { renderHandwriting } from "./handwriting.js";
+import { renderMolecule } from "./molecule.js";
 import svgpath from "svgpath";
 import { arrowPath, pathBounds, pointBounds, type BBox, type Point } from "./geometry.js";
 
@@ -30,6 +31,8 @@ export const ItemSchema = z.discriminatedUnion("type", [
     .describe("Raw SVG path data in page coordinates, for figures and diagrams"),
   z.object({ type: z.literal("math"), latex: z.string(), x: z.number(), y: z.number(), size: z.number().optional(), color, group })
     .describe("Typeset math from LaTeX, e.g. x = \\frac{-b \\pm \\sqrt{b^2-4ac}}{2a}. Use this for every equation and corrected working step, and for any symbol, subscript or charge. Chemistry works with mhchem: \\ce{H2SO4}, \\ce{OH-}, \\ce{A + B -> C}. x,y is the top-left, size is the line height, default 36. One line per item"),
+  z.object({ type: z.literal("molecule"), smiles: z.string(), x: z.number(), y: z.number(), size: z.number().positive().optional(), color, group })
+    .describe("Chemical structure from SMILES. x,y is the top-left; size is the longest side, default 180"),
 ]);
 
 export type ItemInput = z.infer<typeof ItemSchema>;
@@ -41,6 +44,7 @@ export function prepareItems(items: ItemInput[]): Item[] {
   return items.map((i) => {
     const base = { ...i, id: nanoid(8), createdAt: new Date().toISOString() };
     if (i.type === "text") return { ...base, ...renderHandwriting(i.text, i.x, i.y, i.size ?? 32) };
+    if (i.type === "molecule") return { ...base, ...renderMolecule(i.smiles, i.x, i.y, i.size ?? 180) };
     if (i.type !== "math") {
       if (i.type === "svg") pathBounds(i.d);
       return base;
@@ -98,7 +102,7 @@ export function itemBBox(item: Item): BBox {
 /** A hidden hint's answer must never leak through the page description. */
 export function itemLabel(item: Item): string {
   const value = item.type === "text" ? item.text : item.type === "math" ? item.latex
-    : item.group ?? item.type;
+    : item.type === "molecule" ? item.smiles : item.group ?? item.type;
   return value.replace(/\s+/g, " ").slice(0, 80);
 }
 
@@ -142,6 +146,10 @@ export function itemToSvg(item: ItemInput & { d?: string }): string {
     }
     case "svg":
       return `<path d="${esc(item.d)}" fill="${esc(item.fill ?? "none")}" ${stroke}/>`;
+    case "molecule": {
+      const shape = item.d === undefined ? renderMolecule(item.smiles, item.x, item.y, item.size ?? 180) : item;
+      return shape.d ? `<path d="${esc(shape.d)}" fill="${c}"/>` : "";
+    }
     case "math":
       return item.d ? `<path d="${esc(item.d)}" fill="${c}"/>` : "";
   }
