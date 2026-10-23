@@ -3,6 +3,7 @@
 import fs from "node:fs";
 import sharp, { type OverlayOptions } from "sharp";
 import { itemToSvg } from "./items.js";
+import { rasterizePdfPage } from "./pdf.js";
 import { PAGE_H, PAGE_W, type Page, type Store } from "./store.js";
 
 function backgroundSvg(page: Page) {
@@ -38,10 +39,13 @@ const svgDoc = (body: string, bg?: string) =>
 
 export async function renderPage(store: Store, page: Page, opts: { grid?: boolean; claudeLayer?: boolean; scale?: number } = {}) {
   const { grid = false, claudeLayer = true, scale = 1 } = opts;
+  // Base: the app's snapshot (paper + PDF + ink) if it has sent one, else the bare PDF page, else paper.
   const snap = store.snapshotPath(page.id);
   const base = fs.existsSync(snap)
     ? sharp(await sharp(snap).resize(PAGE_W, PAGE_H, { fit: "fill" }).flatten({ background: "#ffffff" }).png().toBuffer())
-    : sharp(Buffer.from(svgDoc(backgroundSvg(page), "#ffffff")));
+    : page.pdf
+      ? sharp(await rasterizePdfPage(store, page.pdf.file, page.pdf.page))
+      : sharp(Buffer.from(svgDoc(backgroundSvg(page), "#ffffff")));
 
   const layers: OverlayOptions[] = [];
   if (claudeLayer && page.claudeLayer.length) layers.push({ input: Buffer.from(svgDoc(page.claudeLayer.map(itemToSvg).join(""))) });

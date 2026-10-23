@@ -129,6 +129,20 @@ export class Store {
     return nb;
   }
 
+  /** One page per PDF page. Appends to `notebookId` if given, else makes a new notebook titled `title`. */
+  addPdfPages(file: string, count: number, title: string, notebookId?: string) {
+    const pages = Array.from({ length: count }, (_, i) => ({ ...this.newPage("blank"), pdf: { file, page: i + 1 } }));
+    if (notebookId) {
+      const at = this.insertPages(notebookId, pages);
+      return { notebook: this.getNotebook(notebookId)!, firstIndex: at };
+    }
+    const nb = this.createNotebook(title, 1);
+    nb.pages = pages;
+    this.save();
+    this.emit({ type: "notebook", notebookId: nb.id });
+    return { notebook: nb, firstIndex: 0 };
+  }
+
   /** Insert pages after `afterIndex` (-1 = at the start, undefined = at the end). */
   insertPages(notebookId: string, pages: Page[], afterIndex?: number) {
     const nb = this.getNotebook(notebookId);

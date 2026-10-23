@@ -7,6 +7,7 @@ import express, { type NextFunction, type Request, type Response } from "express
 import { WebSocketServer, type WebSocket } from "ws";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { buildMcpServer } from "./mcp.js";
+import { PDF_ID, pdfPath, savePdf } from "./pdf.js";
 import { claudeLayerSvg, renderPage } from "./render.js";
 import { Store, type Background, type TextBox } from "./store.js";
 
@@ -70,6 +71,24 @@ api.get("/notebooks", (_req, res) => res.json({ notebooks: store.listNotebooks()
 api.post("/notebooks", (req, res) => {
   const { title, pages, background } = req.body as { title?: string; pages?: number; background?: Background };
   res.json(store.createNotebook(title || "Untitled", pages ?? 1, background ?? "blank"));
+});
+
+/** The app uploads a PDF from Files; every PDF page becomes a notebook page. */
+api.post("/notebooks/import-pdf", express.raw({ type: "application/pdf", limit: "100mb" }), async (req, res) => {
+  if (!Buffer.isBuffer(req.body) || req.body.length === 0) return res.status(400).json({ error: "send the PDF as the body with Content-Type application/pdf" });
+  try {
+    const { file, pages } = await savePdf(store, req.body);
+    const title = typeof req.query.title === "string" && req.query.title.trim() ? req.query.title.trim() : "Imported PDF";
+    res.json(store.addPdfPages(file, pages, title).notebook);
+  } catch (e) {
+    res.status(400).json({ error: (e as Error).message });
+  }
+});
+
+api.get("/pdfs/:file", (req, res) => {
+  if (!PDF_ID.test(req.params.file)) return res.status(400).end();
+  const file = path.resolve(pdfPath(store, req.params.file));
+  fs.existsSync(file) ? res.type("application/pdf").set("Cache-Control", "private, max-age=31536000, immutable").sendFile(file) : res.status(404).end();
 });
 
 api.get("/notebooks/:id", (req, res) => {
