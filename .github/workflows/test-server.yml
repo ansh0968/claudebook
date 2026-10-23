@@ -1,0 +1,37 @@
+name: Test server
+
+on:
+  pull_request:
+    paths: ["server/**", ".github/workflows/test-server.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install PDF tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq poppler-utils
+          curl -fsSL https://github.com/typst/typst/releases/download/v0.13.1/typst-x86_64-unknown-linux-musl.tar.xz | tar xJ -C "$RUNNER_TEMP"
+          sudo mv "$RUNNER_TEMP/typst-x86_64-unknown-linux-musl/typst" /usr/local/bin/
+      - name: Build and exercise a disposable server
+        working-directory: server
+        env:
+          CLAUDEBOOK_SECRET: ci-test-secret-0123456789
+          DATA_DIR: ${{ runner.temp }}/claudebook-test
+        run: |
+          npm ci
+          npm run build
+          node dist/index.js > "$RUNNER_TEMP/server.log" 2>&1 &
+          SERVER_PID=$!
+          trap 'kill "$SERVER_PID"' EXIT
+          for i in $(seq 1 30); do curl -fsS http://localhost:8787/health && break; sleep 1; done
+          npm test
