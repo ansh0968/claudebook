@@ -415,7 +415,8 @@ struct NotebookEditor: View {
             }
             .sheet(isPresented: $showPages) {
                 if let notebook {
-                    PageGrid(notebook: notebook, current: index) { i in
+                    // Layer events update the controller directly; thumbnails should show those changes too.
+                    PageGrid(notebook: notebookWithCurrentPages(notebook), current: index) { i in
                         showPages = false
                         controller.scrollTo(page: i, animated: false)
                     }
@@ -477,6 +478,12 @@ struct NotebookEditor: View {
         case "unsynced": return "icloud"
         default: return "checkmark.icloud"
         }
+    }
+
+    private func notebookWithCurrentPages(_ notebook: Notebook) -> Notebook {
+        var snapshot = notebook
+        snapshot.pages = controller.pages
+        return snapshot
     }
 
     private func load() async {

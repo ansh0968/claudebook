@@ -473,6 +473,7 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
     /// produce the same 1000 x 1414 page region that Claude sees.
     func beginDoubtSelection() {
         guard selectionOverlay == nil, !pages.isEmpty else { return }
+        flush()
         canvas.setContentOffset(canvas.contentOffset, animated: false)
         toolPicker.setVisible(false, forFirstResponder: canvas)
         let overlay = RegionSelectionView(frame: canvas.frame)
