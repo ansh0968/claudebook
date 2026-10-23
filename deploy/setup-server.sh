@@ -43,7 +43,7 @@ if sudo firewall-cmd --state >/dev/null 2>&1; then
   for svc in http https; do
     sudo firewall-cmd --query-service=$svc >/dev/null || { sudo firewall-cmd --permanent --add-service=$svc >/dev/null; reload_fw=1; }
   done
-  [ -n "${reload_fw:-}" ] && sudo firewall-cmd --reload >/dev/null && log "opened http/https in firewalld"
+  if [ -n "${reload_fw:-}" ]; then sudo firewall-cmd --reload >/dev/null; log "opened http/https in firewalld"; fi
 fi
 
 # Install an nginx config only if the whole config still validates; otherwise put the old one back.
