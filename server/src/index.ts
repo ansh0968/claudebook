@@ -11,6 +11,7 @@ import { buildMcpServer } from "./mcp.js";
 import { PDF_ID, pdfPath, savePdf } from "./pdf.js";
 import { claudeLayerSvg, renderPage } from "./render.js";
 import { Store, type Background, type TextBox } from "./store.js";
+import { parsePageRegion } from "./regions.js";
 
 const PORT = Number(process.env.PORT ?? 8787);
 const DATA_DIR = process.env.DATA_DIR ?? path.resolve("data");
@@ -162,6 +163,22 @@ api.get("/pages/:id/claude.svg", (req, res) => {
 api.get("/pages/:id/claude", (req, res) => {
   const found = store.findPage(req.params.id);
   found ? res.json({ items: found.page.claudeLayer }) : res.status(404).end();
+});
+
+api.post("/pages/:id/doubts", (req, res) => {
+  if (!store.findPage(req.params.id)) return res.status(404).json({ error: "no such page" });
+  const region = parsePageRegion(req.body?.region);
+  if (!region || (req.body?.pageId !== undefined && req.body.pageId !== req.params.id)) {
+    return res.status(400).json({ error: "pageId must match the URL and region must fit within the page" });
+  }
+  res.status(201).json({ doubt: store.addDoubt(req.params.id, region) });
+});
+
+api.get("/pages/:id/doubts", (req, res) => {
+  const found = store.findPage(req.params.id);
+  if (!found) return res.status(404).json({ error: "no such page" });
+  if (req.query.status !== undefined && req.query.status !== "open") return res.status(400).json({ error: "status must be open" });
+  res.json({ doubts: found.page.doubts.filter((d) => req.query.status !== "open" || !d.resolvedAt) });
 });
 
 api.delete("/pages/:id/claude", (req, res) => {

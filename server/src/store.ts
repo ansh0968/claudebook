@@ -20,6 +20,16 @@ export interface TextBox {
   h: number;
 }
 
+export interface PageRegion { x: number; y: number; w: number; h: number }
+
+export interface Doubt {
+  id: string;
+  pageId: string;
+  region: PageRegion;
+  createdAt: string;
+  resolvedAt?: string;
+}
+
 export interface Page {
   id: string;
   background: Background;
@@ -29,6 +39,7 @@ export interface Page {
   snapshotVersion: number;
   /** Handwriting recognized on device, in page coordinates. */
   textBoxes: TextBox[];
+  doubts: Doubt[];
   claudeLayer: Item[];
   updatedAt: string;
 }
@@ -73,6 +84,8 @@ export class Store {
     this.db = fs.existsSync(this.file)
       ? JSON.parse(fs.readFileSync(this.file, "utf8"))
       : { notebooks: [], view: { notebookId: null, pageId: null, updatedAt: null } };
+    // Older db.json files have no doubts field. Normalize once so every API response has an array.
+    for (const notebook of this.db.notebooks) for (const page of notebook.pages) page.doubts ??= [];
     if (this.db.notebooks.length === 0) this.seed();
   }
 
@@ -112,7 +125,36 @@ export class Store {
   }
 
   newPage(background: Background = "blank"): Page {
-    return { id: nanoid(10), background, snapshotVersion: 0, textBoxes: [], claudeLayer: [], updatedAt: now() };
+    return { id: nanoid(10), background, snapshotVersion: 0, textBoxes: [], doubts: [], claudeLayer: [], updatedAt: now() };
+  }
+
+  addDoubt(pageId: string, region: PageRegion): Doubt {
+    const found = this.findPage(pageId);
+    if (!found) throw new Error(`No page ${pageId}`);
+    const valid = [region.x, region.y, region.w, region.h].every(Number.isFinite) &&
+      region.w > 0 && region.h > 0 && region.x >= 0 && region.y >= 0 &&
+      region.x + region.w <= PAGE_W && region.y + region.h <= PAGE_H;
+    if (!valid) throw new RangeError(`Doubt region must fit within ${PAGE_W} x ${PAGE_H} page coordinates`);
+    const doubt: Doubt = { id: nanoid(10), pageId, region: { ...region }, createdAt: now() };
+    found.page.doubts.push(doubt);
+    found.page.updatedAt = now();
+    this.save();
+    this.emit({ type: "doubts", notebookId: found.notebook.id, pageId, doubts: found.page.doubts });
+    return doubt;
+  }
+
+  resolveDoubt(id: string): Doubt | undefined {
+    for (const notebook of this.db.notebooks) for (const page of notebook.pages) {
+      const doubt = page.doubts.find((d) => d.id === id);
+      if (!doubt) continue;
+      if (!doubt.resolvedAt) {
+        doubt.resolvedAt = now();
+        page.updatedAt = now();
+        this.save();
+        this.emit({ type: "doubts", notebookId: notebook.id, pageId: page.id, doubts: page.doubts });
+      }
+      return doubt;
+    }
   }
 
   createNotebook(title: string, pageCount = 1, background: Background = "blank"): Notebook {
@@ -229,4 +271,5 @@ export class Store {
 
 export type StoreEvent =
   | { type: "notebook"; notebookId: string }
-  | { type: "claudeLayer"; notebookId: string; pageId: string };
+  | { type: "claudeLayer"; notebookId: string; pageId: string }
+  | { type: "doubts"; notebookId: string; pageId: string; doubts: Doubt[] };

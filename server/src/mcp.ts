@@ -10,6 +10,7 @@ const INSTRUCTIONS = `ClaudeBook is the user's handwritten notebook app on iPad.
 Pages use a fixed coordinate space: x 0..${PAGE_W} left to right, y 0..${PAGE_H} top to bottom.
 Workflow: call get_current_page first (it shows what the user has open, with a labelled blue coordinate grid and the positions of recognized handwriting).
 When checking work or reading small handwriting, zoom into each region (the zoom parameter) before judging it; the full-page image is too small to read every symbol.
+When the user says to check their doubts, inspect the open doubts listed on the page, zoom into each marked region, explain it, and resolve_doubt only after addressing it.
 Use those coordinates to aim. Prefer simple shapes: an ellipse with padding around a mistake, an arrow pointing at it, short text next to it.
 Write equations and corrected working with "math" items (LaTeX), one line per item; use "text" items for words.
 The text font only has basic Latin letters, so any symbol, subscript or superscript goes in a math item: \\Rightarrow, \\ominus, \\ddagger, \\textcircled{5}, x_2.
@@ -45,6 +46,11 @@ export function buildMcpServer(store: Store) {
       `Notebook "${notebook.title}" (id ${notebook.id}), page ${index + 1} of ${notebook.pages.length} (page id ${page.id}).`,
       `Background: ${page.background}${page.pdf ? `, PDF page ${page.pdf.page}` : ""}. Your layer has ${page.claudeLayer.length} item(s).`,
     ];
+    const doubts = page.doubts.filter((d) => !d.resolvedAt);
+    if (doubts.length) {
+      lines.push("Open doubts: zoom into each marked region with view_page before explaining or resolving it (x, y, w, h):");
+      for (const d of doubts) lines.push(`- ${d.id}: [${d.region.x}, ${d.region.y}, ${d.region.w}, ${d.region.h}]`);
+    }
     if (page.snapshotVersion === 0) {
       lines.push(page.pdf ? "The user hasn't written on this page yet, so you only see the PDF." : "The app hasn't uploaded any ink for this page yet, so it looks empty.");
     }
@@ -171,6 +177,19 @@ export function buildMcpServer(store: Store) {
   );
 
   const background = z.enum(["blank", "lined", "grid", "dotted"]).optional();
+
+  server.registerTool(
+    "resolve_doubt",
+    {
+      title: "Resolve a marked doubt",
+      description: "Mark a doubt as resolved after zooming into its region and explaining it to the user.",
+      inputSchema: { id: z.string().min(1) },
+    },
+    async ({ id }) => {
+      const doubt = store.resolveDoubt(id);
+      return doubt ? text(`Resolved doubt ${doubt.id} on page ${doubt.pageId}.`) : fail("Doubt not found.");
+    },
+  );
 
   server.registerTool(
     "create_notebook",
