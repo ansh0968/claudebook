@@ -5,6 +5,7 @@ import path from "node:path";
 import { nanoid } from "nanoid";
 import type { Item } from "./items.js";
 import { translateItem } from "./items.js";
+import { renderHandwriting } from "./handwriting.js";
 
 // Every page uses the same logical coordinate space so Claude can reason in round numbers.
 // A4 ratio. The iPad app scales this to whatever size it draws at.
@@ -156,6 +157,30 @@ export class Store {
       }
       return doubt;
     }
+  }
+
+  searchNotes(query: string) {
+    const needle = query.trim().toLocaleLowerCase();
+    if (!needle) return [];
+    return this.db.notebooks.flatMap((notebook) => notebook.pages.flatMap((page, index) =>
+      page.textBoxes.filter((box) => box.text.toLocaleLowerCase().includes(needle)).map((box) => ({
+        notebookId: notebook.id, notebookTitle: notebook.title, pageId: page.id, pageNumber: index + 1, box,
+      })),
+    ));
+  }
+
+  revealHint(pageId: string, itemId: string) {
+    const found = this.findPage(pageId);
+    if (!found) return;
+    const item = found.page.claudeLayer.find((i) => i.id === itemId);
+    if (!item || item.type !== "hint") return;
+    if (!item.revealed) {
+      Object.assign(item, renderHandwriting(item.text, item.x, item.y, item.size ?? 32), { revealed: true });
+      found.page.updatedAt = now();
+      this.save();
+      this.emit({ type: "claudeLayer", notebookId: found.notebook.id, pageId });
+    }
+    return item;
   }
 
   createNotebook(title: string, pageCount = 1, background: Background = "blank"): Notebook {

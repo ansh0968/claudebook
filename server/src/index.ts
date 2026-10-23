@@ -75,6 +75,11 @@ api.use(requireToken, express.json({ limit: "25mb" }));
 
 api.get("/notebooks", (_req, res) => res.json({ notebooks: store.listNotebooks(), view: store.view() }));
 
+api.get("/search", (req, res) => {
+  if (typeof req.query.q !== "string" || !req.query.q.trim()) return res.status(400).json({ error: "q must be nonempty text" });
+  res.json({ results: store.searchNotes(req.query.q) });
+});
+
 api.post("/notebooks", (req, res) => {
   const { title, pages, background } = req.body as { title?: string; pages?: number; background?: Background };
   res.json(store.createNotebook(title || "Untitled", pages ?? 1, background ?? "blank"));
@@ -163,6 +168,11 @@ api.get("/pages/:id/claude.svg", (req, res) => {
 api.get("/pages/:id/claude", (req, res) => {
   const found = store.findPage(req.params.id);
   found ? res.json({ items: found.page.claudeLayer }) : res.status(404).end();
+});
+
+api.post("/pages/:id/hints/:itemId/reveal", (req, res) => {
+  const item = store.revealHint(req.params.id, req.params.itemId);
+  item ? res.json({ item }) : res.status(404).json({ error: "hint not found on this page" });
 });
 
 api.post("/pages/:id/doubts", (req, res) => {

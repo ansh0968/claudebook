@@ -33,6 +33,8 @@ export const ItemSchema = z.discriminatedUnion("type", [
     .describe("Typeset math from LaTeX, e.g. x = \\frac{-b \\pm \\sqrt{b^2-4ac}}{2a}. Use this for every equation and corrected working step, and for any symbol, subscript or charge. Chemistry works with mhchem: \\ce{H2SO4}, \\ce{OH-}, \\ce{A + B -> C}. x,y is the top-left, size is the line height, default 36. One line per item"),
   z.object({ type: z.literal("molecule"), smiles: z.string(), x: z.number(), y: z.number(), size: z.number().positive().optional(), color, group })
     .describe("Chemical structure from SMILES. x,y is the top-left; size is the longest side, default 180"),
+  z.object({ type: z.literal("hint"), x: z.number(), y: z.number(), text: z.string(), label: z.string().optional(), size: z.number().positive().optional(), revealed: z.boolean().optional(), color, group })
+    .describe("Hidden hint chip. The user can tap it to reveal text; label defaults to Hint"),
 ]);
 
 export type ItemInput = z.infer<typeof ItemSchema>;
@@ -45,6 +47,11 @@ export function prepareItems(items: ItemInput[]): Item[] {
     const base = { ...i, id: nanoid(8), createdAt: new Date().toISOString() };
     if (i.type === "text") return { ...base, ...renderHandwriting(i.text, i.x, i.y, i.size ?? 32) };
     if (i.type === "molecule") return { ...base, ...renderMolecule(i.smiles, i.x, i.y, i.size ?? 180) };
+    if (i.type === "hint") {
+      if (i.revealed) return { ...base, ...renderHandwriting(i.text, i.x, i.y, i.size ?? 32) };
+      const shape = renderHandwriting(i.label ?? "Hint", i.x + 12, i.y + 3, i.size ?? 32);
+      return { ...base, d: shape.d, w: shape.w + 24, h: (i.size ?? 32) + 6 };
+    }
     if (i.type !== "math") {
       if (i.type === "svg") pathBounds(i.d);
       return base;
@@ -94,14 +101,15 @@ export function itemBBox(item: Item): BBox {
     default: {
       const shape = item.d === undefined ? prepareItems([item])[0] : item;
       const box = shape.d ? pathBounds(shape.d) : { x: item.x, y: item.y, w: 0, h: 0 };
-      return pointBounds([[item.x, item.y], [item.x + (shape.w ?? 0), item.y + (shape.h ?? 0)], [box.x, box.y], [box.x + box.w, box.y + box.h]]);
+      return pointBounds([[item.x, item.y], [item.x + (shape.w ?? 0), item.y + (shape.h ?? 0)], [box.x, box.y], [box.x + box.w, box.y + box.h]], item.type === "hint" && !item.revealed ? 0.75 : 0);
     }
   }
 }
 
 /** A hidden hint's answer must never leak through the page description. */
 export function itemLabel(item: Item): string {
-  const value = item.type === "text" ? item.text : item.type === "math" ? item.latex
+  const value = item.type === "hint" ? (item.revealed ? item.text : item.label ?? "Hint")
+    : item.type === "text" ? item.text : item.type === "math" ? item.latex
     : item.type === "molecule" ? item.smiles : item.group ?? item.type;
   return value.replace(/\s+/g, " ").slice(0, 80);
 }
@@ -146,6 +154,11 @@ export function itemToSvg(item: ItemInput & { d?: string }): string {
     }
     case "svg":
       return `<path d="${esc(item.d)}" fill="${esc(item.fill ?? "none")}" ${stroke}/>`;
+    case "hint": {
+      const shape = item.d === undefined ? prepareItems([item])[0] : item as Item;
+      const label = shape.d ? `<path d="${esc(shape.d)}" fill="${c}"/>` : "";
+      return item.revealed ? label : `<rect x="${item.x}" y="${item.y}" width="${shape.w}" height="${shape.h}" rx="8" fill="${c}" fill-opacity="0.1" stroke="${c}" stroke-width="1.5"/>${label}`;
+    }
     case "molecule": {
       const shape = item.d === undefined ? renderMolecule(item.smiles, item.x, item.y, item.size ?? 180) : item;
       return shape.d ? `<path d="${esc(shape.d)}" fill="${c}"/>` : "";

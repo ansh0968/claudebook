@@ -57,10 +57,14 @@ export async function rasterizePdfPage(store: Store, file: string, page: number)
 }
 
 /** Compile Typst markup to PDF bytes. Throws with Typst's own error text on failure. */
-export async function compileTypst(source: string) {
+export async function compileTypst(source: string, assets: Record<string, Buffer> = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "claudebook-typst-"));
   try {
     fs.writeFileSync(path.join(dir, "main.typ"), source);
+    for (const [name, bytes] of Object.entries(assets)) {
+      if (!/^[a-zA-Z0-9_-]+\.(png|jpg|jpeg)$/i.test(name)) throw new Error("Invalid Typst asset name");
+      fs.writeFileSync(path.join(dir, name), bytes);
+    }
     try {
       await run(TYPST, ["compile", "--root", dir, "--diagnostic-format", "short", "main.typ", "out.pdf"], { cwd: dir, timeout: 30_000 });
     } catch (e) {

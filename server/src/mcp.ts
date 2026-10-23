@@ -5,6 +5,8 @@ import { ItemSchema, itemBBox, itemLabel, prepareItems, type Item } from "./item
 import { compileTypst, downloadPdf, savePdf } from "./pdf.js";
 import { clampRegion, renderPage, type Region } from "./render.js";
 import { PAGE_H, PAGE_W, type Page, type Store } from "./store.js";
+import { parsePageRegion } from "./regions.js";
+import { logMistake } from "./study.js";
 
 const INSTRUCTIONS = `ClaudeBook is the user's handwritten notebook app on iPad. You can see their pages and draw on them.
 Pages use a fixed coordinate space: x 0..${PAGE_W} left to right, y 0..${PAGE_H} top to bottom.
@@ -222,6 +224,43 @@ export function buildMcpServer(store: Store) {
     async ({ id }) => {
       const doubt = store.resolveDoubt(id);
       return doubt ? text(`Resolved doubt ${doubt.id} on page ${doubt.pageId}.`) : fail("Doubt not found.");
+    },
+  );
+
+  server.registerTool(
+    "search_notes",
+    {
+      title: "Search recognized handwriting",
+      description: "Find matching recognized handwriting across all notebooks (case insensitive). Returns notebook and page ids, page numbers and the matching text boxes in page coordinates. Use view_page with zoom to inspect a match.",
+      inputSchema: { query: z.string().trim().min(1) },
+      annotations: { readOnlyHint: true },
+    },
+    async ({ query }) => text(JSON.stringify({ results: store.searchNotes(query) })),
+  );
+
+  server.registerTool(
+    "log_mistake",
+    {
+      title: "Save a mistake and correction",
+      description: "Copy a marked region of the page with its correction into an Error Log notebook as a PDF. The crop includes the user's writing and Claude's marks. Use after explaining the correction.",
+      inputSchema: {
+        page_id: z.string().optional(),
+        region: z.object({ x: z.number().finite(), y: z.number().finite(), w: z.number().finite().positive(), h: z.number().finite().positive() }),
+        correction: z.string().trim().min(1).max(20000),
+        title: z.string().trim().min(1).max(200).optional(),
+      },
+    },
+    async ({ page_id, region, correction, title }) => {
+      const found = resolvePage(page_id);
+      if (!found) return fail("Page not found.");
+      const crop = parsePageRegion(region);
+      if (!crop) return fail(`Region must fit within ${PAGE_W} x ${PAGE_H} page coordinates.`);
+      try {
+        const result = await logMistake(store, found.page.id, crop, correction, title);
+        return text(`Saved to Error Log: ${JSON.stringify(result)}`);
+      } catch (e) {
+        return fail(`Couldn't save the mistake: ${(e as Error).message}`);
+      }
     },
   );
 
