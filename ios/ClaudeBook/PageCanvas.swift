@@ -20,6 +20,84 @@ enum NotebookLayout {
     static func page(forStrokeAt y: CGFloat, count: Int) -> Int {
         index(forY: y + gap / 2, count: count)
     }
+
+    /// A selection belongs to the page where the drag began. Clip at its edges, including page gaps.
+    static func region(from start: CGPoint, to end: CGPoint, count: Int) -> (Int, PageRegion)? {
+        guard count > 0, PageGeometry.rect.contains(CGPoint(x: start.x, y: start.y.truncatingRemainder(dividingBy: pitch))), start.y >= 0 else { return nil }
+        let index = Int(floor(start.y / pitch))
+        guard index < count else { return nil }
+        let page = CGRect(x: 0, y: offset(index), width: PageGeometry.width, height: PageGeometry.height)
+        let drag = CGRect(x: min(start.x, end.x), y: min(start.y, end.y),
+                          width: abs(end.x - start.x), height: abs(end.y - start.y))
+        let clipped = drag.intersection(page)
+        guard !clipped.isNull, clipped.width >= 15, clipped.height >= 15 else { return nil }
+        return (index, PageRegion(x: Double(clipped.minX), y: Double(clipped.minY - page.minY),
+                                  w: Double(clipped.width), h: Double(clipped.height)))
+    }
+}
+
+/// Lets only its controls take touches; PencilKit still receives ink and scroll gestures elsewhere.
+final class ControlOverlay: UIView {
+    override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
+        guard !isHidden, alpha > 0.01, isUserInteractionEnabled else { return nil }
+        for child in subviews.reversed() {
+            let target = child.hitTest(convert(point, to: child), with: event)
+            if let target { return target }
+        }
+        return nil
+    }
+}
+
+final class RegionSelectionView: UIView {
+    var onFinish: ((CGPoint, CGPoint) -> Void)?
+    var onAccessibleSelect: (() -> Void)?
+    private var start: CGPoint?
+    private var end: CGPoint?
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        backgroundColor = .clear
+        isMultipleTouchEnabled = false
+        accessibilityLabel = "Drag to select a question for Claude"
+        accessibilityIdentifier = "doubt.selection"
+        isAccessibilityElement = true
+        accessibilityTraits = .button
+        accessibilityHint = "Double tap to mark the visible part of the current page"
+    }
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func accessibilityActivate() -> Bool {
+        guard let onAccessibleSelect else { return false }
+        onAccessibleSelect()
+        return true
+    }
+
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+        guard let point = touches.first?.location(in: self) else { return }
+        start = point; end = point; setNeedsDisplay()
+    }
+    override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
+        end = touches.first?.location(in: self); setNeedsDisplay()
+    }
+    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
+        guard let start, let end = touches.first?.location(in: self) else { return }
+        self.start = nil; self.end = nil; setNeedsDisplay()
+        onFinish?(start, end)
+    }
+    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
+        start = nil; end = nil; setNeedsDisplay()
+    }
+    override func draw(_ rect: CGRect) {
+        guard let start, let end, let ctx = UIGraphicsGetCurrentContext() else { return }
+        let selected = CGRect(x: min(start.x, end.x), y: min(start.y, end.y),
+                              width: abs(end.x - start.x), height: abs(end.y - start.y))
+        ctx.setFillColor(UIColor(hex: "#D97757").withAlphaComponent(0.12).cgColor)
+        ctx.fill(selected)
+        ctx.setStrokeColor(UIColor(hex: "#D97757").cgColor)
+        ctx.setLineWidth(2)
+        ctx.setLineDash(phase: 0, lengths: [7, 5])
+        ctx.stroke(selected)
+    }
 }
 
 /// The whole notebook as one vertical scroll, like GoodNotes or Notes.
@@ -33,7 +111,9 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
     let canvas = PKCanvasView()
     let toolPicker = PKToolPicker()
     private let paperContainer = UIView()
-    private let claudeContainer = UIView()
+    private let claudeContainer = ControlOverlay()
+    private var hintButtons: [String: UIButton] = [:]
+    private var selectionOverlay: RegionSelectionView?
     private let footer = UILabel()
 
     private(set) var notebookId: String?
@@ -56,13 +136,16 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
     var onSyncState: ((String) -> Void)?
     var onPageChange: ((Int) -> Void)?
     var onPullToAdd: (() -> Void)?
+    var onDoubtRegion: ((String, PageRegion) -> Void)?
+    var onHintError: ((String) -> Void)?
+    var onSelectionError: (() -> Void)?
 
     private static let footerInset: CGFloat = 140
     private static let pullDistance: CGFloat = 70
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        view.backgroundColor = UIColor { $0.userInterfaceStyle == .dark ? UIColor(white: 0.06, alpha: 1) : UIColor(white: 0.91, alpha: 1) }
+        view.backgroundColor = UIColor { $0.userInterfaceStyle == .dark ? UIColor(hex: "#151A1D") : UIColor(hex: "#EDE8DF") }
 
         canvas.translatesAutoresizingMaskIntoConstraints = false
         canvas.backgroundColor = .clear
@@ -82,11 +165,11 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
             canvas.trailingAnchor.constraint(equalTo: view.trailingAnchor),
         ])
 
-        // Paper goes under PencilKit's own content view, Claude's layer above it. Neither takes touches.
+        // Paper goes under PencilKit's content; Claude's layer sits above it with only hint chips taking taps.
         for container in [paperContainer, claudeContainer] {
-            container.isUserInteractionEnabled = false
             container.backgroundColor = .clear
         }
+        paperContainer.isUserInteractionEnabled = false
         canvas.insertSubview(paperContainer, at: 0)
         canvas.addSubview(claudeContainer)
 
@@ -163,13 +246,14 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
             views.claude.removeFromSuperview()
             onScreen[id] = nil
         }
+        updateHintButtons()
     }
 
     private func makeViews(for page: Page) -> (paper: PaperView, claude: ClaudeLayerView) {
         let paper = PaperView(frame: PageGeometry.rect)
         paper.style = style(for: page)
         let claude = ClaudeLayerView(frame: PageGeometry.rect)
-        claude.update(items: page.claudeLayer, dark: dark)
+        claude.update(items: page.claudeLayer, dark: dark, doubts: page.doubts ?? [])
         paperContainer.addSubview(paper)
         claudeContainer.addSubview(claude)
         let views = (paper: paper, claude: claude)
@@ -299,8 +383,9 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
             style.dark = dark
             style.invertPDF = invertPDFs
             views.paper.style = style
-            views.claude.update(items: page.claudeLayer, dark: dark)
+            views.claude.update(items: page.claudeLayer, dark: dark, doubts: page.doubts ?? [])
         }
+        updateHintButtons()
     }
 
     // MARK: Notebook content
@@ -311,8 +396,9 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
         if !first && notebook.pages.map(\.id) == pages.map(\.id) {
             pages = notebook.pages
             for (id, views) in onScreen {
-                if let page = pages.first(where: { $0.id == id }) { views.claude.update(items: page.claudeLayer, dark: dark) }
+                if let page = pages.first(where: { $0.id == id }) { views.claude.update(items: page.claudeLayer, dark: dark, doubts: page.doubts ?? []) }
             }
+            updateHintButtons()
             return
         }
 
@@ -333,6 +419,8 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
             views.claude.removeFromSuperview()
         }
         onScreen = [:]
+        for button in hintButtons.values { button.removeFromSuperview() }
+        hintButtons = [:]
         layoutContent()
 
         if first {
@@ -357,8 +445,132 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
             guard let items = try? await API.current?.claudeItems(pageId: pageId),
                   let i = self.pages.firstIndex(where: { $0.id == pageId }) else { return }
             self.pages[i].claudeLayer = items
-            self.onScreen[pageId]?.claude.update(items: items, dark: self.dark)
+            self.onScreen[pageId]?.claude.update(items: items, dark: self.dark, doubts: self.pages[i].doubts ?? [])
+            self.updateHintButtons()
         }
+    }
+
+    func reloadDoubts(pageId: String) {
+        guard pages.contains(where: { $0.id == pageId }) else { return }
+        Task {
+            guard let doubts = try? await API.current?.doubts(pageId: pageId),
+                  let i = self.pages.firstIndex(where: { $0.id == pageId }) else { return }
+            self.pages[i].doubts = doubts
+            self.onScreen[pageId]?.claude.update(items: self.pages[i].claudeLayer, dark: self.dark, doubts: doubts)
+        }
+    }
+
+    func addDoubt(_ doubt: Doubt) {
+        guard let index = pages.firstIndex(where: { $0.id == doubt.pageId }) else { return }
+        var doubts = pages[index].doubts ?? []
+        doubts.removeAll { $0.id == doubt.id }
+        doubts.append(doubt)
+        pages[index].doubts = doubts
+        onScreen[doubt.pageId]?.claude.update(items: pages[index].claudeLayer, dark: dark, doubts: doubts)
+    }
+
+    /// Selection points live in screen coordinates. Convert through the scroll view so zoom and offsets
+    /// produce the same 1000 x 1414 page region that Claude sees.
+    func beginDoubtSelection() {
+        guard selectionOverlay == nil, !pages.isEmpty else { return }
+        canvas.setContentOffset(canvas.contentOffset, animated: false)
+        toolPicker.setVisible(false, forFirstResponder: canvas)
+        let overlay = RegionSelectionView(frame: canvas.frame)
+        overlay.onAccessibleSelect = { [weak self] in
+            guard let self, let page = self.currentPage else { return }
+            let s = self.canvas.zoomScale
+            guard s > 0 else { return }
+            let visible = CGRect(x: self.canvas.contentOffset.x / s, y: self.canvas.contentOffset.y / s,
+                                 width: self.canvas.bounds.width / s, height: self.canvas.bounds.height / s)
+            let pageRect = CGRect(x: 0, y: NotebookLayout.offset(self.currentIndex), width: PageGeometry.width, height: PageGeometry.height)
+            let selected = visible.intersection(pageRect)
+            guard !selected.isNull, selected.width >= 15, selected.height >= 15 else { return }
+            self.cancelDoubtSelection()
+            self.onDoubtRegion?(page.id, PageRegion(x: Double(selected.minX), y: Double(selected.minY - pageRect.minY),
+                                                  w: Double(selected.width), h: Double(selected.height)))
+        }
+        overlay.onFinish = { [weak self, weak overlay] start, end in
+            guard let self, let overlay else { return }
+            let a = self.paperContainer.convert(start, from: overlay)
+            let b = self.paperContainer.convert(end, from: overlay)
+            let scale = self.canvas.zoomScale
+            guard scale > 0 else { return }
+            let first = CGPoint(x: a.x / scale, y: a.y / scale)
+            let last = CGPoint(x: b.x / scale, y: b.y / scale)
+            guard let (pageIndex, region) = NotebookLayout.region(from: first, to: last, count: self.pages.count) else {
+                self.onSelectionError?()
+                return
+            }
+            self.cancelDoubtSelection()
+            self.onDoubtRegion?(self.pages[pageIndex].id, region)
+        }
+        overlay.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(overlay)
+        NSLayoutConstraint.activate([
+            overlay.topAnchor.constraint(equalTo: canvas.topAnchor),
+            overlay.bottomAnchor.constraint(equalTo: canvas.bottomAnchor),
+            overlay.leadingAnchor.constraint(equalTo: canvas.leadingAnchor),
+            overlay.trailingAnchor.constraint(equalTo: canvas.trailingAnchor),
+        ])
+        selectionOverlay = overlay
+    }
+
+    func cancelDoubtSelection() {
+        guard selectionOverlay != nil else { return }
+        selectionOverlay?.removeFromSuperview()
+        selectionOverlay = nil
+        toolPicker.setVisible(true, forFirstResponder: canvas)
+    }
+
+    private func updateHintButtons() {
+        guard canvas.zoomScale > 0 else { return }
+        let visible = pages.enumerated().filter { onScreen[$0.element.id] != nil }
+        var wanted = Set<String>()
+        for (index, page) in visible {
+            for item in page.claudeLayer where item.type == "hint" && item.revealed != true {
+                guard let x = item.x, let y = item.y else { continue }
+                let key = "\(page.id):\(item.id)"
+                wanted.insert(key)
+                let button: UIButton
+                if let existing = hintButtons[key] { button = existing } else {
+                    button = UIButton(type: .system)
+                    button.accessibilityIdentifier = "hint.\(item.id)"
+                    button.accessibilityHint = "Reveal Claude's hidden hint"
+                    button.addAction(UIAction { [weak self, weak button] _ in
+                        guard let api = API.current else { return }
+                        button?.isEnabled = false
+                        Task {
+                            defer { button?.isEnabled = true }
+                            do {
+                                let revealed = try await api.revealHint(pageId: page.id, itemId: item.id)
+                                self?.applyHint(revealed, pageId: page.id)
+                            } catch { self?.onHintError?(error.localizedDescription) }
+                        }
+                    }, for: .touchUpInside)
+                    claudeContainer.addSubview(button)
+                    hintButtons[key] = button
+                }
+                button.accessibilityLabel = item.label ?? "Hint"
+                let s = canvas.zoomScale
+                // The tiled layer draws the chip in page units. Its transparent target grows to 44pt.
+                let chip = CGRect(x: CGFloat(x) * s, y: (NotebookLayout.offset(index) + CGFloat(y)) * s,
+                                  width: CGFloat(item.w ?? 100) * s, height: CGFloat(item.h ?? 34) * s)
+                button.frame = chip.insetBy(dx: -max(0, (44 - chip.width) / 2), dy: -max(0, (44 - chip.height) / 2))
+            }
+        }
+        for key in hintButtons.keys.filter({ !wanted.contains($0) }) {
+            hintButtons[key]?.removeFromSuperview()
+            hintButtons[key] = nil
+        }
+    }
+
+    private func applyHint(_ item: ClaudeItem, pageId: String) {
+        guard let pageIndex = pages.firstIndex(where: { $0.id == pageId }),
+              let itemIndex = pages[pageIndex].claudeLayer.firstIndex(where: { $0.id == item.id }) else { return }
+        pages[pageIndex].claudeLayer[itemIndex] = item
+        onScreen[pageId]?.claude.update(items: pages[pageIndex].claudeLayer, dark: dark, doubts: pages[pageIndex].doubts ?? [])
+        updateHintButtons()
+        UIAccessibility.post(notification: .announcement, argument: item.text ?? "Hint revealed")
     }
 
     var currentPage: Page? { pages.indices.contains(currentIndex) ? pages[currentIndex] : nil }
