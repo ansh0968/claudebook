@@ -28,6 +28,7 @@ jobs:
       - name: Start a throwaway server
         working-directory: server
         run: |
+          brew install typst poppler
           npm ci
           npm run build
           CLAUDEBOOK_SECRET=$SECRET DATA_DIR=$RUNNER_TEMP/data nohup node dist/index.js > $RUNNER_TEMP/server.log 2>&1 &
@@ -56,6 +57,13 @@ jobs:
           sleep 8
           xcrun simctl io "$UDID" screenshot shots/1-library.png
           xcrun simctl terminate "$UDID" in.clarifiq.claudebook
+          # "Claude" makes a worksheet PDF; open it so the app has to render a PDF page.
+          printf '#set page(paper: "a4")\n= Practice sheet\n\n*1.* Solve $x^2 - 5x + 6 = 0$.\n#v(9cm)\n*2.* Sketch $y = sin x$ for $0 <= x <= 2 pi$.\n' > /tmp/sheet.typ
+          jq -n --rawfile t /tmp/sheet.typ '{jsonrpc:"2.0",id:2,method:"tools/call",params:{name:"create_pdf",arguments:{title:"Worksheet",typst:$t}}}' \
+            | curl -fsS -X POST "$BASE/mcp/$SECRET" -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' -d @- | jq -r '.result.content[0].text'
+          PDF_NB=$(curl -fsS -H "Authorization: Bearer $SECRET" $BASE/api/notebooks | jq -r '.notebooks[] | select(.title=="Worksheet") | .id')
+          PDF_PAGE=$(curl -fsS -H "Authorization: Bearer $SECRET" $BASE/api/notebooks/$PDF_NB | jq -r '.pages[0].id')
+          curl -fsS -X POST -H "Authorization: Bearer $SECRET" -H 'Content-Type: application/json' -d "{\"notebookId\":\"$PDF_NB\",\"pageId\":\"$PDF_PAGE\"}" $BASE/api/view; echo
           export SIMCTL_CHILD_CLAUDEBOOK_AUTOOPEN=1 SIMCTL_CHILD_CLAUDEBOOK_TEST_STROKE=1
           xcrun simctl launch "$UDID" in.clarifiq.claudebook
           sleep 10
@@ -66,6 +74,7 @@ jobs:
             {"type":"arrow","from":[850,300],"to":[640,560]},
             {"type":"text","x":560,"y":220,"text":"Claude was here","size":40},
             {"type":"highlight","x":80,"y":1000,"w":500,"h":60},
+            {"type":"math","latex":"x = \\frac{5 \\pm 1}{2} \\Rightarrow x \\in \\{2, 3\\}","x":120,"y":330,"size":40,"color":"#30A46C"},
             {"type":"path","points":[[100,1200],[250,1120],[400,1220],[550,1130],[700,1210]],"color":"#30A46C","width":5}]}}}'
           echo
           sleep 5
