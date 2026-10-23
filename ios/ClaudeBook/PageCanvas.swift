@@ -21,6 +21,12 @@ enum NotebookLayout {
         index(forY: y + gap / 2, count: count)
     }
 
+    /// The viewport's center determines the active page, so keep a search match at that center.
+    static func centeredTop(for region: PageRegion, onPage index: Int, viewportHeight: CGFloat, insetTop: CGFloat) -> CGFloat {
+        let center = min(PageGeometry.height - 1, max(0, CGFloat(region.y + region.h / 2)))
+        return offset(index) + center - viewportHeight / 2 + insetTop
+    }
+
     /// A selection belongs to the page where the drag began. Clip at its edges, including page gaps.
     static func region(from start: CGPoint, to end: CGPoint, count: Int) -> (Int, PageRegion)? {
         guard count > 0, PageGeometry.rect.contains(CGPoint(x: start.x, y: start.y.truncatingRemainder(dividingBy: pitch))), start.y >= 0 else { return nil }
@@ -129,6 +135,7 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
     private var loading = false
     private var lastWidth: CGFloat = 0
     private var pendingScroll: CGFloat?
+    private var pendingRegion: (pageIndex: Int, region: PageRegion)?
     private var pullArmed = false
     private(set) var dark = false
     private(set) var invertPDFs = true
@@ -282,6 +289,7 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
 
     /// Scroll so notebook y (page units) is at the top of the screen.
     func scroll(toY y: CGFloat, animated: Bool) {
+        pendingRegion = nil
         guard lastWidth > 0, !pages.isEmpty else { pendingScroll = y; return }
         let offset = clampedOffsetY(y * canvas.zoomScale - canvas.adjustedContentInset.top)
         canvas.setContentOffset(CGPoint(x: canvas.contentOffset.x, y: offset), animated: animated)
@@ -293,7 +301,27 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
         scroll(toY: NotebookLayout.offset(i), animated: animated)
     }
 
+    func scrollToRegion(pageIndex: Int, region: PageRegion) {
+        guard pages.indices.contains(pageIndex) else { return }
+        guard lastWidth > 0, canvas.zoomScale > 0 else {
+            pendingRegion = (pageIndex, region)
+            pendingScroll = nil
+            return
+        }
+        let scale = canvas.zoomScale
+        let top = NotebookLayout.centeredTop(for: region, onPage: pageIndex,
+                                             viewportHeight: canvas.bounds.height / scale,
+                                             insetTop: canvas.adjustedContentInset.top / scale)
+        scroll(toY: top, animated: false)
+    }
+
     private func applyPendingScroll() {
+        if let pendingRegion, lastWidth > 0, !pages.isEmpty {
+            self.pendingRegion = nil
+            scrollToRegion(pageIndex: pendingRegion.pageIndex, region: pendingRegion.region)
+            updateCurrentPage(force: true)
+            return
+        }
         guard let y = pendingScroll, lastWidth > 0, !pages.isEmpty else { return }
         pendingScroll = nil
         scroll(toY: y, animated: false)

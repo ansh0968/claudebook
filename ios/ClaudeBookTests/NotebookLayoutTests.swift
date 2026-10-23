@@ -3,6 +3,20 @@ import UIKit
 @testable import ClaudeBook
 
 final class NotebookLayoutTests: XCTestCase {
+    func testBottomSearchMatchKeepsViewportCenterOnMatchingPage() {
+        let region = PageRegion(x: 120, y: 1200, w: 650, h: 45)
+        let viewport: CGFloat = 1100
+        let inset: CGFloat = 16
+        let top = NotebookLayout.centeredTop(for: region, onPage: 0, viewportHeight: viewport, insetTop: inset)
+        let viewportCenter = top - inset + viewport / 2
+        XCTAssertEqual(viewportCenter, 1222.5, accuracy: 0.01)
+        XCTAssertEqual(NotebookLayout.index(forY: viewportCenter, count: 2), 0)
+        // Text recognition can return a box extending past the page; keep its center on the page.
+        let malformed = PageRegion(x: 10, y: 1400, w: 100, h: 200)
+        let clampedTop = NotebookLayout.centeredTop(for: malformed, onPage: 1, viewportHeight: viewport, insetTop: inset)
+        XCTAssertEqual(NotebookLayout.index(forY: clampedTop - inset + viewport / 2, count: 3), 1)
+    }
+
     func testSelectionUsesPageCoordinatesAfterScroll() throws {
         let top = NotebookLayout.offset(2)
         let (index, region) = try XCTUnwrap(NotebookLayout.region(

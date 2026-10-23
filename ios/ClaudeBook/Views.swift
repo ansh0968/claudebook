@@ -498,8 +498,11 @@ struct NotebookEditor: View {
         index = controller.currentIndex
         if !initialJumpDone, let initialPageId, let target = nb.pages.firstIndex(where: { $0.id == initialPageId }) {
             initialJumpDone = true
-            let offset = initialRegion.map { max(0, CGFloat($0.y) - 150) } ?? 0
-            controller.scroll(toY: NotebookLayout.offset(target) + offset, animated: false)
+            if let initialRegion {
+                controller.scrollToRegion(pageIndex: target, region: initialRegion)
+            } else {
+                controller.scrollTo(page: target, animated: false)
+            }
         }
         runTestHooks()
     }

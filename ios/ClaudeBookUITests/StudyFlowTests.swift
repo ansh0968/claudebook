@@ -69,7 +69,9 @@ final class StudyFlowTests: XCTestCase {
     func testHandwritingSearchOpensMatchingPage() async throws {
         let notebook = try await fixture()
         XCTAssertGreaterThanOrEqual(notebook.pages.count, 2)
-        let page = notebook.pages[1]
+        // A bottom-of-page match on a nonfinal page must keep Claude targeted at that page.
+        let page = notebook.pages[0]
+        try await api.setView(notebook: notebook.id, page: notebook.pages[1].id)
         let phrase = "nucleophilic substitution verification"
         try await api.seedHandwriting(pageId: page.id, text: phrase)
         let app = launch(autoopen: false)
@@ -87,6 +89,7 @@ final class StudyFlowTests: XCTestCase {
             return list.view.pageId == page.id ? list.view : nil
         }
         XCTAssertEqual(view.notebookId, notebook.id)
+        XCTAssertTrue(app.navigationBars["\(notebook.title) · 1/\(notebook.pages.count)"].waitForExistence(timeout: 5))
         try await api.seedHandwriting(pageId: page.id, text: nil)
     }
 
@@ -165,12 +168,12 @@ private struct SmokeAPI {
     }
 
     func setView(notebook: String, page: String) async throws {
-        let _: SmokeOK = try await request("view", method: "POST", body: ["notebookId": notebook, "pageId": page])
+        let _: SmokeView = try await request("view", method: "POST", body: ["notebookId": notebook, "pageId": page])
     }
 
     func seedHandwriting(pageId: String, text: String?) async throws {
         let png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/l9sAAAAASUVORK5CYII="
-        let boxes: [[String: Any]] = text.map { [["text": $0, "x": 120, "y": 200, "w": 650, "h": 45]] } ?? []
+        let boxes: [[String: Any]] = text.map { [["text": $0, "x": 120, "y": 1200, "w": 650, "h": 45]] } ?? []
         let _: SmokeOK = try await request("pages/\(pageId)/snapshot", method: "PUT", body: ["png": png, "textBoxes": boxes])
     }
 }
