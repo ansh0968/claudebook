@@ -1,9 +1,7 @@
 // Run against a local server: npx tsx src/doubts-selftest.ts
-import { execFileSync } from "node:child_process";
 import { once } from "node:events";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import sharp from "sharp";
 import WebSocket from "ws";
 
 const base = process.env.CLAUDEBOOK_URL ?? "http://localhost:8787";
@@ -32,11 +30,7 @@ function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message);
 }
 
-function available(binary: string) {
-  try { execFileSync(binary, [binary === "typst" ? "--version" : "-v"], { stdio: "ignore" }); return true; }
-  catch { return false; }
-}
-
+let socket: WebSocket | undefined;
 try {
   const made = await api("/notebooks", "POST", { title: `Study test ${Date.now()}` });
   assert(made.status === 200, "notebook creation failed");
@@ -44,7 +38,7 @@ try {
   const pageId = made.json.pages[0].id as string;
   await api("/view", "POST", { notebookId, pageId });
 
-  const socket = new WebSocket(`${base.replace(/^http/, "ws")}/live?token=${secret}`);
+  socket = new WebSocket(`${base.replace(/^http/, "ws")}/live?token=${secret}`);
   const hello = once(socket, "message", { signal: AbortSignal.timeout(5000) });
   await once(socket, "open", { signal: AbortSignal.timeout(5000) });
   await hello;
@@ -58,16 +52,23 @@ try {
   assert(live.type === "doubts" && live.pageId === pageId && live.doubts[0].id === doubtId, "doubt live event missing");
   const bad = await api(`/pages/${pageId}/doubts`, "POST", { region: { x: 999, y: 0, w: 10, h: 10 } });
   assert(bad.status === 400, "out-of-bounds doubt should fail");
+  assert((await api(`/pages/${pageId}/doubts`, "POST", { pageId: "other-page", region })).status === 400, "mismatched page id should fail");
+  assert((await api(`/pages/${pageId}/doubts`, "POST", { region: { ...region, w: 0 } })).status === 400, "zero-width doubt should fail");
+  assert((await api("/pages/missing/doubts")).status === 404, "unknown page should return 404");
   const page = await api(`/notebooks/${notebookId}`);
   assert(page.json.pages[0].doubts[0].id === doubtId, "doubt absent from notebook page");
   const described = await call("get_current_page");
   assert(described.includes(doubtId) && described.includes("zoom into each"), "Claude was not told to zoom into the doubt");
+  const resolvedEvent = once(socket, "message", { signal: AbortSignal.timeout(5000) });
   await call("resolve_doubt", { id: doubtId });
+  const [resolvedRaw] = await resolvedEvent;
+  assert(JSON.parse(resolvedRaw.toString()).doubts[0].resolvedAt, "doubt resolution live event missing");
   const open = await api(`/pages/${pageId}/doubts?status=open`);
   assert(open.json.doubts.length === 0, "resolved doubt still open");
   socket.close();
 
   console.log("doubt selftest passed");
 } finally {
+  socket?.close();
   await client.close();
 }
