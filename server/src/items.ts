@@ -17,6 +17,8 @@ export const ItemSchema = z.discriminatedUnion("type", [
     .describe("Freehand stroke through the points; smooth defaults true, false joins points with straight segments"),
   z.object({ type: z.literal("line"), from: pt, to: pt, color, width, dashed: z.boolean().optional(), group }),
   z.object({ type: z.literal("arrow"), from: pt, to: pt, color, width, group }),
+  z.object({ type: z.literal("curved_arrow"), from: pt, to: pt, bend: z.number().optional(), half_head: z.boolean().optional(), color, width, group })
+    .describe("Quadratic curved arrow. Signed bend offsets its control point; half_head draws one fishhook barb"),
   z.object({ type: z.literal("ellipse"), center: pt, rx: z.number(), ry: z.number().optional(), color, width, fill: z.string().optional(), group })
     .describe("Circle or ellipse. Great for circling mistakes: wrap the text box with some padding"),
   z.object({ type: z.literal("rect"), x: z.number(), y: z.number(), w: z.number(), h: z.number(), color, width, fill: z.string().optional(), group }),
@@ -81,6 +83,7 @@ export function itemBBox(item: Item): BBox {
     case "path": return pathBounds(pathData(item), padding);
     case "line": return pointBounds([item.from, item.to], padding);
     case "arrow": return pathBounds(arrowPath(item.from, item.to, item.width), padding);
+    case "curved_arrow": return pathBounds(arrowPath(item.from, item.to, item.width, item.bend ?? 40, item.half_head), padding);
     case "ellipse": return pointBounds([[item.center[0] - item.rx, item.center[1] - (item.ry ?? item.rx)], [item.center[0] + item.rx, item.center[1] + (item.ry ?? item.rx)]], padding);
     case "rect": case "highlight": return pointBounds([[item.x, item.y], [item.x + item.w, item.y + item.h]], padding);
     case "svg": return pathBounds(item.d, padding);
@@ -122,6 +125,8 @@ export function itemToSvg(item: ItemInput & { d?: string }): string {
       return `<line x1="${item.from[0]}" y1="${item.from[1]}" x2="${item.to[0]}" y2="${item.to[1]}" ${stroke}${item.dashed ? ' stroke-dasharray="10 8"' : ""}/>`;
     case "arrow":
       return `<path d="${arrowPath(item.from, item.to, w)}" fill="none" ${stroke}/>`;
+    case "curved_arrow":
+      return `<path d="${arrowPath(item.from, item.to, w, item.bend ?? 40, item.half_head)}" fill="none" ${stroke}/>`;
     case "ellipse":
       return `<ellipse cx="${item.center[0]}" cy="${item.center[1]}" rx="${item.rx}" ry="${item.ry ?? item.rx}" fill="${esc(item.fill ?? "none")}" ${stroke}/>`;
     case "rect":
