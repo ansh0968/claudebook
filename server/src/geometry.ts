@@ -5,9 +5,14 @@ export interface BBox { x: number; y: number; w: number; h: number }
 
 export function pointBounds(points: Point[], padding = 0): BBox {
   if (!points.length) return { x: 0, y: 0, w: 0, h: 0 };
-  const xs = points.map(([x]) => x), ys = points.map(([, y]) => y);
-  const x = Math.min(...xs) - padding, y = Math.min(...ys) - padding;
-  return { x, y, w: Math.max(...xs) + padding - x, h: Math.max(...ys) + padding - y };
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  // A long imported SVG/freehand path can exceed the argument limit of
+  // Math.min(...points), so reduce bounds without spreading the coordinates.
+  for (const [x, y] of points) {
+    minX = Math.min(minX, x); minY = Math.min(minY, y);
+    maxX = Math.max(maxX, x); maxY = Math.max(maxY, y);
+  }
+  return { x: minX - padding, y: minY - padding, w: maxX - minX + 2 * padding, h: maxY - minY + 2 * padding };
 }
 
 /** Bounds of the actual curve, including extrema between its end points. */

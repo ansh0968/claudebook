@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { itemBBox, prepareItems, translateItem, type Item, type ItemInput } from "./items.js";
+import { pointBounds } from "./geometry.js";
 
 const inputs: ItemInput[] = [
   { type: "path", points: [[40, 160], [90, 110], [140, 160]], smooth: false, group: "geometry" },
@@ -15,6 +16,7 @@ const inputs: ItemInput[] = [
   { type: "math", x: 650, y: 210, latex: "x^2" },
 ];
 const near = (actual: number, expected: number) => assert.ok(Math.abs(actual - expected) < 0.025, `${actual} != ${expected}`);
+assert.deepEqual(pointBounds(Array.from({ length: 150_000 }, (_, i) => [i, i % 2])), { x: 0, y: 0, w: 149_999, h: 1 });
 assert.deepEqual(itemBBox(prepareItems([{ type: "line", from: [10, 20], to: [30, 40] }])[0]), { x: 8.5, y: 18.5, w: 23, h: 23 });
 assert.deepEqual(itemBBox(prepareItems([{ type: "rect", x: 10, y: 20, w: 30, h: 40 }])[0]), { x: 8.5, y: 18.5, w: 33, h: 43 });
 assert.deepEqual(itemBBox(prepareItems([{ type: "highlight", x: 10, y: 20, w: 30, h: 40 }])[0]), { x: 10, y: 20, w: 30, h: 40 });
