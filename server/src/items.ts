@@ -116,13 +116,18 @@ export function itemLabel(item: Item): string {
 
 /** Translate the prepared outline instead of re-typesetting and changing its geometry. */
 export function translateItem(item: Item, dx: number, dy: number): Item {
+  if (![dx, dy].every(Number.isFinite)) throw new Error("Move offsets must be finite numbers");
   const point = ([x, y]: Point): Point => [x + dx, y + dy];
   const moved = { ...item };
   if ("x" in moved) { moved.x += dx; moved.y += dy; }
   if ("from" in moved) { moved.from = point(moved.from); moved.to = point(moved.to); }
   if (moved.type === "ellipse") moved.center = point(moved.center);
   if (moved.type === "path") moved.points = moved.points.map(point);
-  if (moved.d) moved.d = svgpath(moved.d).translate(dx, dy).round(4).toString();
+  if (moved.d) {
+    const outline = svgpath(moved.d);
+    if ("err" in outline && outline.err) throw new Error(`Invalid SVG path: ${outline.err}`);
+    moved.d = outline.translate(dx, dy).round(4).toString();
+  }
   return moved;
 }
 

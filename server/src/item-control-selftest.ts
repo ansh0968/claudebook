@@ -17,6 +17,10 @@ const inputs: ItemInput[] = [
 ];
 const near = (actual: number, expected: number) => assert.ok(Math.abs(actual - expected) < 0.025, `${actual} != ${expected}`);
 assert.deepEqual(pointBounds(Array.from({ length: 150_000 }, (_, i) => [i, i % 2])), { x: 0, y: 0, w: 149_999, h: 1 });
+const legacy = { type: "svg", d: "M broken", id: "legacy", createdAt: "old" } as Item;
+assert.throws(() => translateItem(legacy, 10, 20), /Invalid SVG/);
+assert.throws(() => translateItem(legacy, Infinity, 20), /finite/);
+assert.equal(legacy.d, "M broken");
 assert.deepEqual(itemBBox(prepareItems([{ type: "line", from: [10, 20], to: [30, 40] }])[0]), { x: 8.5, y: 18.5, w: 23, h: 23 });
 assert.deepEqual(itemBBox(prepareItems([{ type: "rect", x: 10, y: 20, w: 30, h: 40 }])[0]), { x: 8.5, y: 18.5, w: 33, h: 43 });
 assert.deepEqual(itemBBox(prepareItems([{ type: "highlight", x: 10, y: 20, w: 30, h: 40 }])[0]), { x: 10, y: 20, w: 30, h: 40 });
