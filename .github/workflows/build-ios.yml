@@ -8,6 +8,9 @@ on:
     paths: ["ios/**", ".github/workflows/build-ios.yml"]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: macos-15
@@ -24,6 +27,7 @@ jobs:
           set -o pipefail
           xcodebuild -project ClaudeBook.xcodeproj -scheme ClaudeBook -configuration Release \
             -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath build \
+            MARKETING_VERSION=0.1.$GITHUB_RUN_NUMBER CURRENT_PROJECT_VERSION=$GITHUB_RUN_NUMBER \
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" build | tee build.log | grep -E "error:|warning: .*Swift|BUILD" || true
           test -d build/Build/Products/Release-iphoneos/ClaudeBook.app
       - name: Package IPA
@@ -41,3 +45,28 @@ jobs:
         with:
           name: build-log
           path: ios/build.log
+      # Stable download link for the iPad, plus a SideStore/AltStore source so updates show up in SideStore:
+      #   https://github.com/<repo>/releases/latest/download/ClaudeBook.ipa
+      #   https://github.com/<repo>/releases/latest/download/source.json
+      - name: Publish as the latest release
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        working-directory: ios
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION=0.1.$GITHUB_RUN_NUMBER
+          BASE=https://github.com/$GITHUB_REPOSITORY/releases/latest/download
+          jq -n --arg v "$VERSION" --arg date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --argjson size "$(stat -f%z ClaudeBook.ipa)" \
+            --arg url "$BASE/ClaudeBook.ipa" --arg sha "${GITHUB_SHA::7}" '{
+              name: "ClaudeBook", identifier: "in.clarifiq.claudebook.source",
+              apps: [{
+                name: "ClaudeBook", bundleIdentifier: "in.clarifiq.claudebook", developerName: "Sufi",
+                localizedDescription: "Handwritten notebooks that Claude can see and draw on.",
+                iconURL: "https://github.githubassets.com/images/modules/logos_page/GitHub-Mark.png",
+                versions: [{ version: $v, buildVersion: ($v | split(".") | last), date: $date, size: $size, downloadURL: $url, localizedDescription: ("Build " + $sha) }]
+              }],
+              news: []
+            }' > source.json
+          gh release delete latest -y --cleanup-tag 2>/dev/null || true
+          gh release create latest ClaudeBook.ipa source.json --target "$GITHUB_SHA" \
+            --title "ClaudeBook $VERSION" --notes "Latest iPad build ($VERSION, ${GITHUB_SHA::7})."
