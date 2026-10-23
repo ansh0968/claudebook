@@ -12,6 +12,7 @@ struct ClaudeBookApp: App {
         WindowGroup {
             RootView()
                 .environmentObject(live)
+                .onAppear { live.start() }
                 .onChange(of: scenePhase) { _, phase in
                     if phase == .active { live.start() } else { live.stop() }
                 }
@@ -235,9 +236,18 @@ struct NotebookEditor: View {
             .onAppear {
                 controller.onSyncState = { s in sync = s }
                 live.onEvent = { e in
+                    // (Re)connected: catch up on anything Claude drew while we weren't listening.
+                    if e.type == "hello" { controller.reloadClaudeLayer(); return }
                     guard e.notebookId == notebookId else { return }
                     if e.type == "claudeLayer", e.pageId == controller.page?.id { controller.reloadClaudeLayer() }
                     if e.type == "notebook" { Task { await load(keepPage: true) } }
+                }
+            }
+            .task {
+                // Fallback for when the live connection is down: poll Claude's layer every few seconds.
+                while !Task.isCancelled {
+                    try? await Task.sleep(for: .seconds(8))
+                    if !live.connected { controller.reloadClaudeLayer() }
                 }
             }
             .onDisappear { controller.flush() }

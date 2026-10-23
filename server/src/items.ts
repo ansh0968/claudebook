@@ -3,6 +3,7 @@
 import { nanoid } from "nanoid";
 import { z } from "zod";
 import { renderMath } from "./math.js";
+import { renderHandwriting } from "./handwriting.js";
 
 const pt = z.tuple([z.number(), z.number()]).describe("[x, y] in page coordinates");
 const color = z.string().optional().describe("CSS color, default Claude orange #D97757. Use red #E5484D for mistakes, green #30A46C for corrections");
@@ -34,6 +35,7 @@ export type Item = ItemInput & { id: string; createdAt: string; d?: string; w?: 
 export function prepareItems(items: ItemInput[]): Item[] {
   return items.map((i) => {
     const base = { ...i, id: nanoid(8), createdAt: new Date().toISOString() };
+    if (i.type === "text") return { ...base, ...renderHandwriting(i.text, i.x, i.y, i.size ?? 32) };
     if (i.type !== "math") return base;
     try {
       return { ...base, ...renderMath(i.latex, i.x, i.y, i.size ?? 36) };
@@ -84,6 +86,8 @@ export function itemToSvg(item: ItemInput & { d?: string }): string {
     case "highlight":
       return `<rect x="${item.x}" y="${item.y}" width="${item.w}" height="${item.h}" fill="${esc(item.color ?? "#FFE066")}" fill-opacity="0.45"/>`;
     case "text": {
+      const shape = "d" in item && typeof item.d === "string" ? item : renderHandwriting(item.text, item.x, item.y, item.size ?? 32);
+      if (shape.d) return `<path d="${esc(shape.d)}" fill="${c}"/>`;
       const size = item.size ?? 32;
       const lines = item.text.split("\n").map((l, i) => `<tspan x="${item.x}" dy="${i === 0 ? size * 0.8 : size}">${esc(l)}</tspan>`);
       return `<text x="${item.x}" y="${item.y}" font-family="Caveat, 'Comic Neue', 'DejaVu Sans', sans-serif" font-size="${size}" fill="${c}">${lines.join("")}</text>`;

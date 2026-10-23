@@ -162,7 +162,15 @@ final class LiveConnection: ObservableObject {
     }
 
     private func connect() {
-        guard running, let url = API.current?.liveURL else { return }
+        guard running else { return }
+        // Not set up yet (first launch sits on the setup screen): keep checking until there are credentials.
+        guard let url = API.current?.liveURL else {
+            Task { @MainActor in
+                try? await Task.sleep(for: .seconds(2))
+                self.connect()
+            }
+            return
+        }
         let task = URLSession.shared.webSocketTask(with: url)
         self.task = task
         task.resume()

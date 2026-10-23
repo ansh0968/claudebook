@@ -170,6 +170,13 @@ enum ClaudeRenderer {
             ctx.setFillColor(UIColor(hex: item.color ?? "#FFE066").withAlphaComponent(0.45).cgColor)
             ctx.fill(r)
         case "text":
+            // The server ships the handwriting as outlines so both sides draw identical shapes.
+            if let d = item.d, !d.isEmpty {
+                ctx.addPath(SVGPath.parse(d))
+                ctx.setFillColor(color.cgColor)
+                ctx.fillPath()
+                return
+            }
             guard let text = item.text, let x = item.x, let y = item.y else { return }
             let size = item.size ?? 32
             let font = UIFont(name: "Noteworthy-Light", size: size * 0.8) ?? .systemFont(ofSize: size * 0.8)

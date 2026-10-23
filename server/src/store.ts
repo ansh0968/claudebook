@@ -188,6 +188,22 @@ export class Store {
     fs.writeFileSync(this.drawingPath(pageId), data);
   }
 
+  /** Rewrite stored Claude items in place (one-off upgrades at startup). Returns how many changed. */
+  upgradeItems(fn: (item: Item) => Item | undefined) {
+    let changed = 0;
+    for (const nb of this.db.notebooks) {
+      for (const page of nb.pages) {
+        page.claudeLayer = page.claudeLayer.map((item) => {
+          const next = fn(item);
+          if (next) changed++;
+          return next ?? item;
+        });
+      }
+    }
+    if (changed) this.save();
+    return changed;
+  }
+
   addClaudeItems(pageId: string, items: Item[]) {
     const found = this.findPage(pageId);
     if (!found) throw new Error(`No page ${pageId}`);
