@@ -20,11 +20,11 @@ export const ItemSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("highlight"), x: z.number(), y: z.number(), w: z.number(), h: z.number(), color: z.string().optional() })
     .describe("Translucent marker over a region, default yellow"),
   z.object({ type: z.literal("text"), x: z.number(), y: z.number(), text: z.string(), size: z.number().optional(), color })
-    .describe("Handwritten-style text. x,y is the top-left. size is the line height, default 32. Use \\n for new lines"),
+    .describe("Handwritten-style text, basic Latin letters, digits and punctuation only (put symbols, sub/superscripts and formulas in a math item). x,y is the top-left. size is the line height, default 32; lowercase text is roughly 0.35*size wide per character. Use \\n for new lines"),
   z.object({ type: z.literal("svg"), d: z.string(), color, width, fill: z.string().optional() })
     .describe("Raw SVG path data in page coordinates, for figures and diagrams"),
   z.object({ type: z.literal("math"), latex: z.string(), x: z.number(), y: z.number(), size: z.number().optional(), color })
-    .describe("Typeset math from LaTeX, e.g. x = \\frac{-b \\pm \\sqrt{b^2-4ac}}{2a}. Use this for every equation and corrected working step. x,y is the top-left, size is the line height, default 36. One line per item"),
+    .describe("Typeset math from LaTeX, e.g. x = \\frac{-b \\pm \\sqrt{b^2-4ac}}{2a}. Use this for every equation and corrected working step, and for any symbol, subscript or charge. Chemistry works with mhchem: \\ce{H2SO4}, \\ce{OH-}, \\ce{A + B -> C}. x,y is the top-left, size is the line height, default 36. One line per item"),
 ]);
 
 export type ItemInput = z.infer<typeof ItemSchema>;
