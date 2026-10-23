@@ -100,3 +100,11 @@ export function renderHandwriting(text: string, x: number, y: number, size = 32)
   });
   return { d: parts.filter(Boolean).join(" "), w: Math.ceil(w), h: Math.ceil(lines.length * size) };
 }
+
+/** Legacy notes must remain readable and must never stop the server starting.
+ * The caller retains the original text; only its missing visual outline gets a label.
+ */
+export function renderLegacyHandwriting(text: string, x: number, y: number, size = 32) {
+  try { return { ...renderHandwriting(text, x, y, size), unsupported: false }; }
+  catch { return { ...renderHandwriting("[unsupported text]", x, y, size), unsupported: true }; }
+}

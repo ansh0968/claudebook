@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { renderHandwriting } from "./handwriting.js";
+import { renderHandwriting, renderLegacyHandwriting } from "./handwriting.js";
 
 // Rendering throws rather than emitting glyph zero; this exercises every
 // required symbol through the same font selection used by saved page outlines.
@@ -16,4 +16,8 @@ assert.equal(renderHandwriting("OH⁻", 0, 0).d, renderHandwriting("OH^-", 0, 0)
 assert.ok(renderHandwriting("SO_{4}^{2-}", 0, 0).w > 0);
 assert.equal(renderHandwriting("first\nsecond", 0, 0, 36).h, 72);
 assert.throws(() => renderHandwriting("\u{10FFFF}", 0, 0), /No text font supports.*U\+10FFFF/);
+assert.equal(renderLegacyHandwriting("Hello", 0, 0).unsupported, false);
+const legacy = renderLegacyHandwriting("\u{10FFFF}", 0, 0);
+assert.equal(legacy.unsupported, true);
+assert.equal(legacy.d, renderHandwriting("[unsupported text]", 0, 0).d);
 console.log("[font] Unicode fallbacks, scripts and unsupported-character errors passed");
