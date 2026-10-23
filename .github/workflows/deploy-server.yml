@@ -3,8 +3,16 @@ name: Deploy server
 # Manual only until the first deploy is verified against the services already on the box.
 on:
   workflow_dispatch:
+    inputs:
+      reveal_secret:
+        description: "Print the app secret, encrypted to the maintainer's age key"
+        type: boolean
+        default: false
 
 concurrency: deploy-server
+
+env:
+  OPS_RECIPIENT: age1a9yamstrp6nka68la6hh6xrecxn74atuxag9l68k5etgp4zq04ss0rr0hv
 
 jobs:
   test:
@@ -37,12 +45,18 @@ jobs:
           mkdir -p ~/.ssh
           echo "$KEY" > ~/.ssh/id && chmod 600 ~/.ssh/id
           ssh-keyscan -H "$HOST" >> ~/.ssh/known_hosts 2>/dev/null
-          SSH="ssh -i ~/.ssh/id $USER@$HOST"
-          $SSH "mkdir -p ~/claudebook"
-          rsync -az --delete -e "ssh -i ~/.ssh/id" --exclude node_modules --exclude dist server deploy "$USER@$HOST:~/claudebook/" --filter='P deploy/data' --filter='P deploy/.env'
-          printf 'CLAUDEBOOK_SECRET=%s\nDOMAIN=book.clarifiq.in\n' "$CLAUDEBOOK_SECRET" | $SSH "umask 077 && cat > ~/claudebook/deploy/.env"
-          $SSH "bash ~/claudebook/deploy/setup-server.sh"
-      - name: Health check
+          SSH="ssh -i $HOME/.ssh/id -o BatchMode=yes $USER@$HOST"
+          tar czf - --exclude node_modules --exclude dist server deploy | $SSH "mkdir -p ~/claudebook && tar xzf - -C ~/claudebook"
+          printf '%s' "$CLAUDEBOOK_SECRET" | $SSH 'CLAUDEBOOK_SECRET=$(cat) bash ~/claudebook/deploy/setup-server.sh'
+      - name: Reveal app secret (encrypted)
+        if: inputs.reveal_secret
+        env:
+          HOST: ${{ secrets.SERVER_HOST }}
+          USER: ${{ secrets.SERVER_USER }}
+        run: |
+          curl -fsSL https://github.com/FiloSottile/age/releases/download/v1.2.1/age-v1.2.1-linux-amd64.tar.gz | tar xz -C /tmp
+          ssh -i ~/.ssh/id -o BatchMode=yes "$USER@$HOST" "grep '^CLAUDEBOOK_SECRET=' ~/claudebook/deploy/.env" | /tmp/age/age -r "$OPS_RECIPIENT" -a
+      - name: Health check over HTTPS
         run: |
           for i in $(seq 1 20); do
             curl -fsS https://book.clarifiq.in/health && exit 0

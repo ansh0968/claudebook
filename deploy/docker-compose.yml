@@ -1,27 +1,15 @@
+# Only the ClaudeBook API runs here. The host's existing nginx terminates HTTPS and proxies to it,
+# so nothing else on the box (other sites, bots, game servers) is touched.
+name: claudebook
+
 services:
   server:
     build: ../server
+    image: claudebook-server:latest
     restart: unless-stopped
     environment:
       CLAUDEBOOK_SECRET: ${CLAUDEBOOK_SECRET:?set CLAUDEBOOK_SECRET in deploy/.env}
-    volumes:
-      - ./data:/data
-
-  caddy:
-    image: caddy:2.8
-    restart: unless-stopped
     ports:
-      - "80:80"
-      - "443:443"
-    environment:
-      DOMAIN: ${DOMAIN:-book.clarifiq.in}
+      - "127.0.0.1:8787:8787"
     volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      - caddy_data:/data
-      - caddy_config:/config
-    depends_on:
-      - server
-
-volumes:
-  caddy_data:
-  caddy_config:
+      - ./data:/data:Z
