@@ -1,0 +1,44 @@
+name: Server ops
+
+# Runs one script from deploy/ops/ on the Oracle server. Output is encrypted to the
+# maintainer's age key before it reaches the (public) log, so nothing about the server leaks.
+on:
+  workflow_dispatch:
+    inputs:
+      task:
+        description: "Script name in deploy/ops (without .sh)"
+        required: true
+        default: inspect
+
+concurrency: server-ops
+
+env:
+  OPS_RECIPIENT: age1a9yamstrp6nka68la6hh6xrecxn74atuxag9l68k5etgp4zq04ss0rr0hv
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run ${{ inputs.task }} on the server
+        env:
+          HOST: ${{ secrets.SERVER_HOST }}
+          USER: ${{ secrets.SERVER_USER }}
+          KEY: ${{ secrets.SERVER_SSH_KEY }}
+          TASK: ${{ inputs.task }}
+        run: |
+          case "$TASK" in *[!a-z0-9-]*) echo "bad task name"; exit 1;; esac
+          test -f "deploy/ops/$TASK.sh"
+          sudo apt-get install -y -qq age >/dev/null
+          mkdir -p ~/.ssh
+          echo "$KEY" > ~/.ssh/id && chmod 600 ~/.ssh/id
+          ssh-keyscan -H "$HOST" >> ~/.ssh/known_hosts 2>/dev/null
+          set +e
+          ssh -i ~/.ssh/id -o BatchMode=yes "$USER@$HOST" 'bash -s' < "deploy/ops/$TASK.sh" > out.txt 2>&1
+          status=$?
+          set -e
+          echo "exit status: $status"
+          echo "----- BEGIN ENCRYPTED OUTPUT -----"
+          age -r "$OPS_RECIPIENT" -a out.txt
+          echo "----- END ENCRYPTED OUTPUT -----"
+          exit $status

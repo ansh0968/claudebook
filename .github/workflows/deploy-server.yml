@@ -1,9 +1,7 @@
 name: Deploy server
 
+# Manual only until the first deploy is verified against the services already on the box.
 on:
-  push:
-    branches: [main]
-    paths: ["server/**", "deploy/**", ".github/workflows/deploy-server.yml"]
   workflow_dispatch:
 
 concurrency: deploy-server
