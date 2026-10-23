@@ -1,7 +1,7 @@
 // The tools Claude sees once ClaudeBook is added as a connector in the Claude app.
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { ItemSchema, prepareItems } from "./items.js";
+import { ItemSchema, itemBBox, itemLabel, prepareItems, type Item } from "./items.js";
 import { compileTypst, downloadPdf, savePdf } from "./pdf.js";
 import { clampRegion, renderPage, type Region } from "./render.js";
 import { PAGE_H, PAGE_W, type Page, type Store } from "./store.js";
@@ -13,16 +13,19 @@ When checking work or reading small handwriting, zoom into each region (the zoom
 When the user says to check their doubts, inspect the open doubts listed on the page, zoom into each marked region, explain it, and resolve_doubt only after addressing it.
 Use those coordinates to aim. Prefer simple shapes: an ellipse with padding around a mistake, an arrow pointing at it, short text next to it.
 Write equations and corrected working with "math" items (LaTeX), one line per item; use "text" items for words.
-The text font only has basic Latin letters, so any symbol, subscript or superscript goes in a math item: \\Rightarrow, \\ominus, \\ddagger, \\textcircled{5}, x_2.
+Text supports Unicode symbols with font fallbacks, Unicode sub/superscripts and inline scripts such as H_2O, OH^- and x^{2}. If a text character is unsupported the draw fails clearly; use math for that symbol.
 For chemistry use mhchem inside math items: \\ce{H2O}, \\ce{OH-}, \\ce{SO4^2-}, \\ce{^{14}_{6}C}, \\ce{A + B -> C}, \\ce{A <=> B}.
 Your drawings live on a separate layer the user can hide or undo, so don't be shy, but keep the page readable and never cover the user's writing with text.
 After drawing, call view_page to check the result and fix anything that landed in the wrong place.
+Draw results and page descriptions list item ids, labels and bounding boxes. Use erase_my_drawings with ids or group to remove selected items, and move_items with ids, dx, dy to reposition them. Name related drawings with an item group.
+Use curved_arrow for reaction mechanisms (signed bend, half_head for a fishhook), path smooth:false for straight segments, and molecule with SMILES for chemical structures. Hints are hidden until the user taps their chip.
 To give the user something to write on (worksheets, notes, practice questions), use create_pdf; to bring in an existing PDF from the web, use import_pdf_from_url.`;
 
 type ToolResult = { content: ({ type: "text"; text: string } | { type: "image"; data: string; mimeType: string })[]; isError?: boolean };
 
 const text = (t: string): ToolResult => ({ content: [{ type: "text", text: t }] });
 const fail = (t: string): ToolResult => ({ content: [{ type: "text", text: t }], isError: true });
+const describeItem = (item: Item) => ({ id: item.id, type: item.type, label: itemLabel(item), bbox: itemBBox(item), ...(item.group !== undefined ? { group: item.group } : {}) });
 
 export function buildMcpServer(store: Store) {
   const server = new McpServer({ name: "claudebook", version: "0.1.0" }, { instructions: INSTRUCTIONS });
@@ -61,6 +64,10 @@ export function buildMcpServer(store: Store) {
     if (boxes.length) {
       lines.push("Recognized handwriting (x, y, w, h):");
       for (const b of boxes) lines.push(`- [${Math.round(b.x)}, ${Math.round(b.y)}, ${Math.round(b.w)}, ${Math.round(b.h)}] ${b.text}`);
+    }
+    if (page.claudeLayer.length) {
+      lines.push("Your existing items (bbox is {x,y,w,h} in page units):");
+      for (const item of page.claudeLayer) lines.push(JSON.stringify(describeItem(item)));
     }
     return lines.join("\n");
   }
@@ -133,7 +140,7 @@ export function buildMcpServer(store: Store) {
     "draw_on_page",
     {
       title: "Draw on a page",
-      description: `Add ink to a page on your own layer: circles, arrows, lines, freehand paths, highlights, handwritten text, typeset math (LaTeX, the way to write equations and corrections) or SVG paths. Coordinates are 0..${PAGE_W} x 0..${PAGE_H}. Defaults to the page the user has open.`,
+      description: `Add ink to a page on your own layer: circles, straight or curved arrows, lines, paths, highlights, text, LaTeX math, SMILES molecules, hidden hints or SVG paths. Returns item ids and bounding boxes. Coordinates are 0..${PAGE_W} x 0..${PAGE_H}. Defaults to the open page.`,
       inputSchema: {
         items: z.array(ItemSchema).min(1),
         page_id: z.string().optional(),
@@ -151,7 +158,7 @@ export function buildMcpServer(store: Store) {
         return fail(`${(e as Error).message}. Nothing was drawn.`);
       }
       store.addClaudeItems(found.page.id, stamped);
-      return text(`Drew ${items.length} item(s) on page ${found.index + 1} of "${found.notebook.title}". Call view_page to check placement.`);
+      return text(JSON.stringify({ message: `Drew ${items.length} item(s) on page ${found.index + 1} of "${found.notebook.title}". Call view_page to check placement.`, page_id: found.page.id, items: stamped.map(describeItem) }));
     },
   );
 
@@ -159,20 +166,47 @@ export function buildMcpServer(store: Store) {
     "erase_my_drawings",
     {
       title: "Erase Claude's drawings",
-      description: "Remove your most recent items from a page (count), or everything you drew there when count is omitted. Never touches the user's ink.",
+      description: "Remove selected items by ids and/or group, the most recent items by count, or all your drawings when no selector is supplied. ids and group match either selector; count cannot be combined with them. Never touches the user's ink.",
       inputSchema: {
         count: z.number().int().min(1).optional(),
+        ids: z.array(z.string()).min(1).optional(),
+        group: z.string().min(1).optional(),
         page_id: z.string().optional(),
         notebook_id: z.string().optional(),
         page_number: z.number().int().min(1).optional(),
       },
       annotations: { destructiveHint: true },
     },
-    async ({ count, page_id, notebook_id, page_number }) => {
+    async ({ count, ids, group, page_id, notebook_id, page_number }) => {
+      if (count !== undefined && (ids !== undefined || group !== undefined)) return fail("Choose count or ids/group, not both. Nothing was erased.");
       const found = resolvePage(page_id, notebook_id, page_number);
       if (!found) return fail("Page not found.");
-      const n = store.removeClaudeItems(found.page.id, count);
+      const n = ids !== undefined || group !== undefined
+        ? store.removeClaudeItemsByIds(found.page.id, ids ?? [], group)
+        : store.removeClaudeItems(found.page.id, count);
       return text(`Removed ${n} item(s).`);
+    },
+  );
+
+  server.registerTool(
+    "move_items",
+    {
+      title: "Move Claude's drawings",
+      description: "Translate selected item ids by dx,dy page units. Preserves item ids, groups and appearance. Unknown ids are ignored. Returns moved ids and their new bounding boxes.",
+      inputSchema: {
+        ids: z.array(z.string()).min(1), dx: z.number(), dy: z.number(),
+        page_id: z.string().optional(), notebook_id: z.string().optional(), page_number: z.number().int().min(1).optional(),
+      },
+    },
+    async ({ ids, dx, dy, page_id, notebook_id, page_number }) => {
+      const found = resolvePage(page_id, notebook_id, page_number);
+      if (!found) return fail("Page not found.");
+      try {
+        const moved = store.moveClaudeItems(found.page.id, ids, dx, dy);
+        return text(JSON.stringify({ message: `Moved ${moved.length} item(s).`, page_id: found.page.id, items: moved.map(describeItem) }));
+      } catch (error) {
+        return fail(`${(error as Error).message}. Nothing was moved.`);
+      }
     },
   );
 

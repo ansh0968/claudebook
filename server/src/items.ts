@@ -4,39 +4,45 @@ import { nanoid } from "nanoid";
 import { z } from "zod";
 import { renderMath } from "./math.js";
 import { renderHandwriting } from "./handwriting.js";
+import svgpath from "svgpath";
+import { arrowPath, pathBounds, pointBounds, type BBox, type Point } from "./geometry.js";
 
 const pt = z.tuple([z.number(), z.number()]).describe("[x, y] in page coordinates");
 const color = z.string().optional().describe("CSS color, default Claude orange #D97757. Use red #E5484D for mistakes, green #30A46C for corrections");
-const width = z.number().optional().describe("Stroke width in page units, default 3");
+const width = z.number().positive().optional().describe("Stroke width in page units, default 3");
+const group = z.string().optional().describe("Optional name for related items, so they can be erased together");
 
 export const ItemSchema = z.discriminatedUnion("type", [
-  z.object({ type: z.literal("path"), points: z.array(pt).min(2), color, width, closed: z.boolean().optional() })
-    .describe("Freehand stroke through the points, smoothed"),
-  z.object({ type: z.literal("line"), from: pt, to: pt, color, width, dashed: z.boolean().optional() }),
-  z.object({ type: z.literal("arrow"), from: pt, to: pt, color, width }),
-  z.object({ type: z.literal("ellipse"), center: pt, rx: z.number(), ry: z.number().optional(), color, width, fill: z.string().optional() })
+  z.object({ type: z.literal("path"), points: z.array(pt).min(2), color, width, closed: z.boolean().optional(), smooth: z.boolean().optional(), group })
+    .describe("Freehand stroke through the points; smooth defaults true, false joins points with straight segments"),
+  z.object({ type: z.literal("line"), from: pt, to: pt, color, width, dashed: z.boolean().optional(), group }),
+  z.object({ type: z.literal("arrow"), from: pt, to: pt, color, width, group }),
+  z.object({ type: z.literal("ellipse"), center: pt, rx: z.number(), ry: z.number().optional(), color, width, fill: z.string().optional(), group })
     .describe("Circle or ellipse. Great for circling mistakes: wrap the text box with some padding"),
-  z.object({ type: z.literal("rect"), x: z.number(), y: z.number(), w: z.number(), h: z.number(), color, width, fill: z.string().optional() }),
-  z.object({ type: z.literal("highlight"), x: z.number(), y: z.number(), w: z.number(), h: z.number(), color: z.string().optional() })
+  z.object({ type: z.literal("rect"), x: z.number(), y: z.number(), w: z.number(), h: z.number(), color, width, fill: z.string().optional(), group }),
+  z.object({ type: z.literal("highlight"), x: z.number(), y: z.number(), w: z.number(), h: z.number(), color: z.string().optional(), group })
     .describe("Translucent marker over a region, default yellow"),
-  z.object({ type: z.literal("text"), x: z.number(), y: z.number(), text: z.string(), size: z.number().optional(), color })
-    .describe("Handwritten-style text, basic Latin letters, digits and punctuation only (put symbols, sub/superscripts and formulas in a math item). x,y is the top-left. size is the line height, default 32; lowercase text is roughly 0.35*size wide per character. Use \\n for new lines"),
-  z.object({ type: z.literal("svg"), d: z.string(), color, width, fill: z.string().optional() })
+  z.object({ type: z.literal("text"), x: z.number(), y: z.number(), text: z.string(), size: z.number().optional(), color, group })
+    .describe("Handwritten-style text with Unicode symbol fallback. _2 and ^- make single-character scripts; _{...} and ^{...} make longer scripts. x,y is the top-left. size is line height, default 32. Use \\n for new lines"),
+  z.object({ type: z.literal("svg"), d: z.string(), color, width, fill: z.string().optional(), group })
     .describe("Raw SVG path data in page coordinates, for figures and diagrams"),
-  z.object({ type: z.literal("math"), latex: z.string(), x: z.number(), y: z.number(), size: z.number().optional(), color })
+  z.object({ type: z.literal("math"), latex: z.string(), x: z.number(), y: z.number(), size: z.number().optional(), color, group })
     .describe("Typeset math from LaTeX, e.g. x = \\frac{-b \\pm \\sqrt{b^2-4ac}}{2a}. Use this for every equation and corrected working step, and for any symbol, subscript or charge. Chemistry works with mhchem: \\ce{H2SO4}, \\ce{OH-}, \\ce{A + B -> C}. x,y is the top-left, size is the line height, default 36. One line per item"),
 ]);
 
 export type ItemInput = z.infer<typeof ItemSchema>;
-/** Stored items. Math items also carry the typeset outline (`d`) and its box (`w`, `h`) in page coordinates. */
+/** Stored items carry generated outline d and dimensions where appropriate. */
 export type Item = ItemInput & { id: string; createdAt: string; d?: string; w?: number; h?: number };
 
-/** Stamp ids and typeset any math. Throws on bad LaTeX so nothing half-drawn lands on the page. */
+/** Stamp ids and prepare outlines atomically before anything lands on the page. */
 export function prepareItems(items: ItemInput[]): Item[] {
   return items.map((i) => {
     const base = { ...i, id: nanoid(8), createdAt: new Date().toISOString() };
     if (i.type === "text") return { ...base, ...renderHandwriting(i.text, i.x, i.y, i.size ?? 32) };
-    if (i.type !== "math") return base;
+    if (i.type !== "math") {
+      if (i.type === "svg") pathBounds(i.d);
+      return base;
+    }
     try {
       return { ...base, ...renderMath(i.latex, i.x, i.y, i.size ?? 36) };
     } catch (e) {
@@ -51,7 +57,7 @@ const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
 
 /** Catmull-Rom through the points, as cubic beziers. Makes Claude's strokes look like ink, not polylines. */
 function smoothPath(points: [number, number][], closed = false) {
-  if (points.length < 3) return `M${points.map((p) => p.join(",")).join(" L")}`;
+  if (points.length < 3) return `M${points.map((p) => p.join(",")).join(" L")}${closed ? " Z" : ""}`;
   const pts = closed ? [points[points.length - 1], ...points, points[0], points[1]] : [points[0], ...points, points[points.length - 1]];
   let d = `M${pts[1][0]},${pts[1][1]}`;
   for (let i = 1; i < pts.length - 2; i++) {
@@ -63,22 +69,59 @@ function smoothPath(points: [number, number][], closed = false) {
   return closed ? d + " Z" : d;
 }
 
+function pathData(item: Extract<ItemInput, { type: "path" }>) {
+  return item.smooth === false ? `M${item.points.map((p) => p.join(",")).join(" L")}${item.closed ? " Z" : ""}` : smoothPath(item.points, item.closed);
+}
+
+/** Boxes include stroke thickness and curve extrema, in fixed page coordinates. */
+export function itemBBox(item: Item): BBox {
+  const stroked = ["path", "line", "arrow", "curved_arrow", "ellipse", "rect", "svg"].includes(item.type);
+  const padding = stroked ? (("width" in item ? item.width : undefined) ?? 3) / 2 : 0;
+  switch (item.type) {
+    case "path": return pathBounds(pathData(item), padding);
+    case "line": return pointBounds([item.from, item.to], padding);
+    case "arrow": return pathBounds(arrowPath(item.from, item.to, item.width), padding);
+    case "ellipse": return pointBounds([[item.center[0] - item.rx, item.center[1] - (item.ry ?? item.rx)], [item.center[0] + item.rx, item.center[1] + (item.ry ?? item.rx)]], padding);
+    case "rect": case "highlight": return pointBounds([[item.x, item.y], [item.x + item.w, item.y + item.h]], padding);
+    case "svg": return pathBounds(item.d, padding);
+    default: {
+      const shape = item.d === undefined ? prepareItems([item])[0] : item;
+      const box = shape.d ? pathBounds(shape.d) : { x: item.x, y: item.y, w: 0, h: 0 };
+      return pointBounds([[item.x, item.y], [item.x + (shape.w ?? 0), item.y + (shape.h ?? 0)], [box.x, box.y], [box.x + box.w, box.y + box.h]]);
+    }
+  }
+}
+
+/** A hidden hint's answer must never leak through the page description. */
+export function itemLabel(item: Item): string {
+  const value = item.type === "text" ? item.text : item.type === "math" ? item.latex
+    : item.group ?? item.type;
+  return value.replace(/\s+/g, " ").slice(0, 80);
+}
+
+/** Translate the prepared outline instead of re-typesetting and changing its geometry. */
+export function translateItem(item: Item, dx: number, dy: number): Item {
+  const point = ([x, y]: Point): Point => [x + dx, y + dy];
+  const moved = { ...item };
+  if ("x" in moved) { moved.x += dx; moved.y += dy; }
+  if ("from" in moved) { moved.from = point(moved.from); moved.to = point(moved.to); }
+  if (moved.type === "ellipse") moved.center = point(moved.center);
+  if (moved.type === "path") moved.points = moved.points.map(point);
+  if (moved.d) moved.d = svgpath(moved.d).translate(dx, dy).round(4).toString();
+  return moved;
+}
+
 export function itemToSvg(item: ItemInput & { d?: string }): string {
   const c = esc(item.color ?? DEFAULT_COLOR);
   const w = "width" in item && item.width ? item.width : 3;
   const stroke = `stroke="${c}" stroke-width="${w}" stroke-linecap="round" stroke-linejoin="round"`;
   switch (item.type) {
     case "path":
-      return `<path d="${smoothPath(item.points, item.closed)}" fill="none" ${stroke}/>`;
+      return `<path d="${pathData(item)}" fill="none" ${stroke}/>`;
     case "line":
       return `<line x1="${item.from[0]}" y1="${item.from[1]}" x2="${item.to[0]}" y2="${item.to[1]}" ${stroke}${item.dashed ? ' stroke-dasharray="10 8"' : ""}/>`;
-    case "arrow": {
-      const [x1, y1] = item.from, [x2, y2] = item.to;
-      const a = Math.atan2(y2 - y1, x2 - x1), head = 10 + w * 2;
-      const h1 = [x2 - head * Math.cos(a - 0.45), y2 - head * Math.sin(a - 0.45)];
-      const h2 = [x2 - head * Math.cos(a + 0.45), y2 - head * Math.sin(a + 0.45)];
-      return `<path d="M${x1},${y1} L${x2},${y2} M${h1.join(",")} L${x2},${y2} L${h2.join(",")}" fill="none" ${stroke}/>`;
-    }
+    case "arrow":
+      return `<path d="${arrowPath(item.from, item.to, w)}" fill="none" ${stroke}/>`;
     case "ellipse":
       return `<ellipse cx="${item.center[0]}" cy="${item.center[1]}" rx="${item.rx}" ry="${item.ry ?? item.rx}" fill="${esc(item.fill ?? "none")}" ${stroke}/>`;
     case "rect":

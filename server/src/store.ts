@@ -4,6 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { nanoid } from "nanoid";
 import type { Item } from "./items.js";
+import { translateItem } from "./items.js";
 
 // Every page uses the same logical coordinate space so Claude can reason in round numbers.
 // A4 ratio. The iPad app scales this to whatever size it draws at.
@@ -266,6 +267,39 @@ export class Store {
     this.save();
     this.emit({ type: "claudeLayer", notebookId: found.notebook.id, pageId });
     return removed;
+  }
+
+  /** Target ids and a named group without affecting neighboring items. */
+  removeClaudeItemsByIds(pageId: string, ids: string[], group?: string) {
+    const found = this.findPage(pageId);
+    if (!found) throw new Error(`No page ${pageId}`);
+    const selected = new Set(ids);
+    const before = found.page.claudeLayer.length;
+    found.page.claudeLayer = found.page.claudeLayer.filter((item) => !selected.has(item.id) && !(group !== undefined && item.group === group));
+    const removed = before - found.page.claudeLayer.length;
+    if (removed) {
+      found.page.updatedAt = now();
+      this.save();
+      this.emit({ type: "claudeLayer", notebookId: found.notebook.id, pageId });
+    }
+    return removed;
+  }
+
+  moveClaudeItems(pageId: string, ids: string[], dx: number, dy: number): Item[] {
+    const found = this.findPage(pageId);
+    if (!found) throw new Error(`No page ${pageId}`);
+    if (![dx, dy].every(Number.isFinite)) throw new Error("Move offsets must be finite numbers");
+    const selected = new Set(ids);
+    // Prepare every translation first so a malformed legacy path cannot leave a partial move.
+    const moved = found.page.claudeLayer.filter((item) => selected.has(item.id)).map((item) => translateItem(item, dx, dy));
+    if (moved.length) {
+      const byId = new Map(moved.map((item) => [item.id, item]));
+      found.page.claudeLayer = found.page.claudeLayer.map((item) => byId.get(item.id) ?? item);
+      found.page.updatedAt = now();
+      this.save();
+      this.emit({ type: "claudeLayer", notebookId: found.notebook.id, pageId });
+    }
+    return moved;
   }
 }
 
