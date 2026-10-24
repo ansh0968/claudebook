@@ -8,7 +8,9 @@ on:
     paths: ["ios/**", ".github/workflows/ios-smoke.yml"]
   workflow_dispatch:
 
-concurrency: ios-smoke
+concurrency:
+  group: ios-smoke-${{ github.ref }}
+  cancel-in-progress: false
 
 permissions:
   contents: write
@@ -204,4 +206,13 @@ jobs:
           cd "$RUNNER_TEMP/smoke-pub"
           git add .
           git -c user.name=claudebook-ci -c user.email=ci@users.noreply.github.com commit -qm "Screenshots for ${GITHUB_SHA::7}"
-          git push origin HEAD:ci-screenshots
+          # Other branches may publish while this simulator is running. Rebase
+          # only our new run directory onto the latest screenshots, then retry.
+          for attempt in 1 2 3 4 5; do
+            git fetch origin refs/heads/ci-screenshots:refs/remotes/origin/ci-screenshots
+            git -c user.name=claudebook-ci -c user.email=ci@users.noreply.github.com rebase origin/ci-screenshots
+            if git push origin HEAD:ci-screenshots; then exit 0; fi
+            sleep "$attempt"
+          done
+          echo "Could not publish screenshots after five concurrent-update retries" >&2
+          exit 1
