@@ -145,6 +145,8 @@ jobs:
             -destination "id=$UDID" -derivedDataPath test-build -resultBundlePath TestResults.xcresult \
             -parallel-testing-enabled NO CODE_SIGNING_ALLOWED=NO test > ui-test.log 2>&1 \
             || { tail -150 ui-test.log; exit 1; }
+          # CRUD UI tests deliberately empty the disposable library; restore study fixtures.
+          node ../scripts/smoke-fixture.mjs
           node ../scripts/smoke-fixture.mjs reveal
           xcrun simctl terminate "$UDID" in.clarifiq.claudebook || true
           xcrun simctl launch "$UDID" in.clarifiq.claudebook
