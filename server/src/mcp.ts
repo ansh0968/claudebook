@@ -21,7 +21,8 @@ Your drawings live on a separate layer the user can hide or undo, so don't be sh
 Every draw returns each item's id and bbox, plus per-item warnings (bad LaTeX, unknown keys, off-page): read them, they mean an item was skipped or misplaced. x,y on text and math is the top-left unless you set anchor. Use dry_run to measure before placing, and offset to shift a whole batch.
 After drawing, call view_page to check the result and fix anything that landed in the wrong place.
 Page descriptions list item ids, labels and bounding boxes. Use erase_my_drawings with ids or group to remove selected items, move_items with ids, dx, dy to reposition them, and copy_items to duplicate them. Name related drawings with an item group.
-Use curved_arrow for reaction mechanisms (signed bend, half_head for a fishhook), path smooth:false for straight segments, and molecule with SMILES for chemical structures. Hints are hidden until the user taps their chip.
+Use curved_arrow (alias curly) for reaction mechanisms: {type:"curly",from:[100,200],to:[250,200],bend:-60,head:"half"}. head:"full" draws an electron pair; half_head:true remains supported.
+Use molecule with SMILES for structures: {type:"molecule",smiles:"CC(=O)O",x:100,y:200,size:180,show_carbons:true,explicit_h:true}. Results include atoms (index to [x,y]) and elements maps; use these coordinates as arrow endpoints. Use path smooth:false for straight segments. Hints are hidden until the user taps their chip.
 To give the user something to write on (worksheets, notes, practice questions), use create_pdf; to bring in an existing PDF from the web, use import_pdf_from_url.`;
 
 type ToolResult = { content: ({ type: "text"; text: string } | { type: "image"; data: string; mimeType: string })[]; isError?: boolean };
@@ -32,7 +33,7 @@ function ago(iso: string) {
   const s = Math.max(0, Math.round((Date.now() - Date.parse(iso)) / 1000));
   return s < 90 ? `${s}s ago` : s < 5400 ? `${Math.round(s / 60)} min ago` : s < 172800 ? `${Math.round(s / 3600)} h ago` : `${Math.round(s / 86400)} days ago`;
 }
-const describeItem = (item: Item) => ({ id: item.id, type: item.type, label: itemLabel(item), bbox: itemBBox(item), ...(item.group !== undefined ? { group: item.group } : {}) });
+const describeItem = (item: Item) => ({ id: item.id, type: item.type, label: itemLabel(item), bbox: itemBBox(item), ...(item.group !== undefined ? { group: item.group } : {}), ...(item.atoms ? { atoms: item.atoms, elements: item.elements } : {}) });
 
 export function buildMcpServer(store: Store) {
   const server = new McpServer({ name: "claudebook", version: "0.1.0" }, { instructions: INSTRUCTIONS });

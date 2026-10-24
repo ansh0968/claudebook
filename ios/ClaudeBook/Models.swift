@@ -71,12 +71,18 @@ struct ClaudeItem: Codable, Identifiable, Hashable {
     var headFilled: Bool?
     /// Arrowheads the server computed for arrow, path and svg items, in page coordinates.
     var headD: String?
+    var showCarbons: Bool?
+    var explicitH: Bool?
+    var atoms: [String: [Double]]?
+    var elements: [String: String]?
 
     enum CodingKeys: String, CodingKey {
-        case id, type, points, from, to, center, rx, ry, x, y, w, h, text, size, color, width, fill, d, closed, dashed, latex, smooth, bend, group, label, revealed, smiles, head
+        case id, type, points, from, to, center, rx, ry, x, y, w, h, text, size, color, width, fill, d, closed, dashed, latex, smooth, bend, group, label, revealed, smiles, head, atoms, elements
         case halfHead = "half_head"
         case headFilled = "head_filled"
         case headD = "head_d"
+        case showCarbons = "show_carbons"
+        case explicitH = "explicit_h"
     }
 }
 

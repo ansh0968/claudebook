@@ -64,6 +64,10 @@ export function pathBounds(d: string, padding = 0): BBox {
 }
 
 export function arrowPath(from: Point, to: Point, width = 3, bend?: number, halfHead = false): string {
+  if (bend !== undefined) {
+    const paths = curvedArrowPaths(from, to, width, bend, halfHead);
+    return paths.shaft + paths.head;
+  }
   const [x1, y1] = from, [x2, y2] = to;
   const dx = x2 - x1, dy = y2 - y1, length = Math.hypot(dx, dy);
   // Coincident endpoints have no meaningful tangent, so draw only the point.
@@ -200,4 +204,18 @@ export function headsFor(d: string, mode: HeadMode, width = 3, filled = false): 
   if (mode === "start" || mode === "both") parts.push(arrowHead(ends.start.tip, ends.start.angle, width, filled));
   if (mode === "end" || mode === "both") parts.push(arrowHead(ends.end.tip, ends.end.angle, width, filled));
   return parts.join("");
+}
+
+/** Filled chemistry heads share arrowHead geometry; the shaft ends at the head base. */
+export function curvedArrowPaths(from: Point, to: Point, width = 3, bend = 40, halfHead = false) {
+  const dx = to[0] - from[0], dy = to[1] - from[1], length = Math.hypot(dx, dy);
+  if (!length) return { shaft: `M${from}L${to}`, head: "" };
+  const control: Point = [(from[0] + to[0]) / 2 - dy / length * bend, (from[1] + to[1]) / 2 + dx / length * bend];
+  const angle = Math.atan2(to[1] - control[1], to[0] - control[0]);
+  const full = arrowHead(to, angle, width, true);
+  // Extract the same base corners used by the shared full head for a single filled barb.
+  const corners = flattenPath(full)[0];
+  const base: Point = [(corners[1][0] + corners[2][0]) / 2, (corners[1][1] + corners[2][1]) / 2];
+  const outside = bend >= 0 ? corners[1] : corners[2];
+  return { shaft: `M${from}Q${control} ${base}`, head: halfHead ? `M${to}L${base}L${outside}Z` : full };
 }

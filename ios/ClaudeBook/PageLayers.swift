@@ -310,25 +310,13 @@ enum ClaudeRenderer {
             ctx.addLine(to: b)
             ctx.addLine(to: CGPoint(x: b.x - head * cos(angle + 0.45), y: b.y - head * sin(angle + 0.45)))
             ctx.strokePath()
-        case "curved_arrow":
-            guard let a = pt(item.from), let b = pt(item.to) else { return }
-            let dx = b.x - a.x, dy = b.y - a.y
-            let length = hypot(dx, dy)
-            guard length > 0 else { return }
-            let bend = CGFloat(item.bend ?? 40)
-            let normal = CGPoint(x: -dy / length, y: dx / length)
-            let control = CGPoint(x: (a.x + b.x) / 2 + normal.x * bend,
-                                  y: (a.y + b.y) / 2 + normal.y * bend)
-            ctx.move(to: a)
-            ctx.addQuadCurve(to: b, control: control)
-            let angle = atan2(b.y - control.y, b.x - control.x)
-            let head = CGFloat(10 + (item.width ?? 3) * 2)
-            let barbs = [-0.45, 0.45].map { offset in
-                CGPoint(x: b.x - head * cos(angle + offset), y: b.y - head * sin(angle + offset))
-            }
-            let selected = item.halfHead == true ? [barbs[bend >= 0 ? 1 : 0]] : barbs
-            for barb in selected { ctx.move(to: barb); ctx.addLine(to: b) }
+        case "curved_arrow", "curly":
+            guard let d = item.d else { return }
+            ctx.setLineCap(.butt)
+            ctx.addPath(outline(item, d))
             ctx.strokePath()
+            ctx.setLineCap(.round)
+            heads()
         case "ellipse":
             guard let c = pt(item.center), let rx = item.rx else { return }
             let ry = item.ry ?? rx

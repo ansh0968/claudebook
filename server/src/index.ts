@@ -7,6 +7,7 @@ import express, { type NextFunction, type Request, type Response } from "express
 import { WebSocketServer, type WebSocket } from "ws";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { renderLegacyHandwriting } from "./handwriting.js";
+import { prepareItems } from "./items.js";
 import { buildMcpServer } from "./mcp.js";
 import { PDF_ID, pdfPath, savePdf } from "./pdf.js";
 import { claudeLayerSvg, renderPage } from "./render.js";
@@ -25,6 +26,11 @@ if (SECRET.length < 16) {
 const store = new Store(DATA_DIR);
 // Text drawn before handwriting outlines existed gets them now, so the app renders it in the same font.
 const upgraded = store.upgradeItems((item) => {
+  // Legacy mechanisms gain the same prepared geometry as newly drawn chemistry arrows.
+  if ((item.type === "curved_arrow" || item.type === "curly") && !item.d) {
+    const [prepared] = prepareItems([item]);
+    return { ...prepared, id: item.id, createdAt: item.createdAt };
+  }
   if (item.type !== "text" || item.d) return;
   const { unsupported, ...outline } = renderLegacyHandwriting(item.text, item.x, item.y, item.size ?? 32);
   if (unsupported) console.warn(`Text item ${item.id} needs a supported font; original text was preserved.`);
