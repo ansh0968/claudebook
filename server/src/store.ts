@@ -104,13 +104,14 @@ export class Store {
     fs.mkdirSync(this.drawingsDir, { recursive: true });
     fs.mkdirSync(this.snapshotsDir, { recursive: true });
     fs.mkdirSync(this.pdfDir, { recursive: true });
-    this.db = fs.existsSync(this.file)
+    const existingDatabase = fs.existsSync(this.file);
+    this.db = existingDatabase
       ? JSON.parse(fs.readFileSync(this.file, "utf8"))
       : { notebooks: [], folders: [], view: { notebookId: null, pageId: null, updatedAt: null } };
     this.db.folders ??= [];
     // Older db.json files have no doubts field. Normalize once so every API response has an array.
     for (const notebook of this.db.notebooks) for (const page of notebook.pages) page.doubts ??= [];
-    if (this.db.notebooks.length === 0) this.seed();
+    if (!existingDatabase) this.seed();
   }
 
   private seed() {
@@ -171,13 +172,9 @@ export class Store {
     const nb = this.getNotebook(id);
     if (!nb) return false;
     this.db.notebooks = this.db.notebooks.filter((n) => n.id !== id);
-    for (const page of nb.pages) {
-      fs.rmSync(this.snapshotPath(page.id), { force: true });
-      fs.rmSync(this.drawingPath(page.id), { force: true });
-    }
     if (this.db.view.notebookId === id) this.db.view = { notebookId: null, pageId: null, updatedAt: now() };
-    if (this.db.notebooks.length === 0) this.seed();
     this.save();
+    for (const page of nb.pages) this.removePageFiles(page.id);
     this.emit({ type: "notebook", notebookId: id });
     return true;
   }
@@ -292,6 +289,114 @@ export class Store {
     }
   }
 
+  private selectedPages(ids: string[]) {
+    if (!ids.length || ids.length > 5000 || new Set(ids).size !== ids.length) throw new Error("Choose 1-5000 distinct page ids. Nothing was changed.");
+    return ids.map(id => {
+      const found = this.findPage(id);
+      if (!found) throw new Error(`Page not found: ${id}. Nothing was changed.`);
+      return found;
+    });
+  }
+
+  private removePageFiles(id: string) {
+    // Metadata is authoritative. A locked cache file must not turn a completed
+    // deletion into a reported failure or make the notebook reappear on restart.
+    for (const file of [this.snapshotPath(id), this.drawingPath(id)]) {
+      try { fs.rmSync(file, { force: true }); }
+      catch (e) { console.warn(`Could not remove deleted page cache ${id}: ${(e as Error).message}`); }
+    }
+  }
+
+  private insertionCount(afterPage: number | undefined, count: number) {
+    const at = afterPage ?? count;
+    if (!Number.isInteger(at) || at < 0 || at > count) throw new Error(`after_page must be an integer from 0 to ${count}. Nothing was changed.`);
+    return at;
+  }
+
+  /** Preserve the selected page by id through reorders and cross-notebook moves. */
+  private finishPageChange(notebooks: Notebook[], fallbackIndex = 0) {
+    const previous = this.db.view;
+    const current = previous.pageId ? this.findPage(previous.pageId) : undefined;
+    const nb = current?.notebook ?? (previous.notebookId ? this.getNotebook(previous.notebookId) : undefined);
+    const page = current?.page ?? nb?.pages[Math.min(fallbackIndex, Math.max(0, nb.pages.length - 1))];
+    const notebookId = nb?.id ?? null, pageId = page?.id ?? null;
+    const changed = notebookId !== previous.notebookId || pageId !== previous.pageId;
+    if (changed) this.db.view = { notebookId, pageId, updatedAt: now() };
+    for (const notebook of notebooks) notebook.updatedAt = now();
+    this.save();
+    for (const notebook of notebooks) this.emit({ type: "notebook", notebookId: notebook.id });
+    if (changed && notebookId && pageId) this.openPage(notebookId, pageId);
+  }
+
+  /** Remove exactly these pages, including ink. Empty notebooks stay empty. */
+  deletePages(notebookId: string, ids: string[]): Notebook {
+    const nb = this.getNotebook(notebookId);
+    if (!nb) throw new Error("Notebook not found. Nothing was changed.");
+    const selected = this.selectedPages(ids);
+    if (selected.some(p => p.notebook.id !== nb.id)) throw new Error("All deleted page ids must belong to this notebook. Nothing was changed.");
+    const currentIndex = nb.pages.findIndex(p => p.id === this.db.view.pageId), chosen = new Set(ids);
+    const survivingBefore = nb.pages.slice(0, Math.max(0, currentIndex)).filter(p => !chosen.has(p.id)).length;
+    nb.pages = nb.pages.filter(p => !chosen.has(p.id));
+    this.finishPageChange([nb], survivingBefore);
+    for (const { page } of selected) this.removePageFiles(page.id);
+    return nb;
+  }
+
+  reorderPages(notebookId: string, ids: string[]): Notebook {
+    const nb = this.getNotebook(notebookId);
+    if (!nb) throw new Error("Notebook not found. Nothing was changed.");
+    const byId = new Map(nb.pages.map(p => [p.id, p]));
+    if (ids.length !== nb.pages.length || new Set(ids).size !== ids.length || ids.some(id => !byId.has(id))) throw new Error("page_ids must list every existing page exactly once. Nothing was changed.");
+    nb.pages = ids.map(id => byId.get(id)!);
+    this.finishPageChange([nb]);
+    return nb;
+  }
+
+  movePages(ids: string[], targetNotebookId: string, afterPage?: number) {
+    const selected = this.selectedPages(ids), target = this.getNotebook(targetNotebookId);
+    if (!target) throw new Error("Target notebook not found. Nothing was changed.");
+    const chosen = new Set(ids), remaining = target.pages.filter(p => !chosen.has(p.id));
+    const at = this.insertionCount(afterPage, remaining.length);
+    const affected = [...new Set([...selected.map(p => p.notebook), target])];
+    for (const nb of affected) nb.pages = nb.pages.filter(p => !chosen.has(p.id));
+    const pages = selected.map(p => p.page);
+    target.pages.splice(at, 0, ...pages);
+    this.finishPageChange(affected);
+    return { notebook: target, pages };
+  }
+
+  duplicatePages(ids: string[], targetNotebookId?: string, afterPage?: number) {
+    const selected = this.selectedPages(ids), target = this.getNotebook(targetNotebookId ?? selected[0].notebook.id);
+    if (!target) throw new Error("Target notebook not found. Nothing was changed.");
+    const at = this.insertionCount(afterPage, target.pages.length), copiedFiles: string[] = [];
+    let pages: Page[];
+    try {
+      pages = selected.map(({ page }) => {
+        const copy = structuredClone(page);
+        copy.id = nanoid(10); copy.updatedAt = now();
+        const itemIds = new Map(copy.claudeLayer.map(i => [i.id, nanoid(8)]));
+        for (const item of copy.claudeLayer) {
+          item.id = itemIds.get(item.id)!; item.createdAt = now();
+          if ("axes" in item && item.axes && itemIds.has(item.axes)) item.axes = itemIds.get(item.axes)!;
+        }
+        copy.doubts = copy.doubts.map(d => ({ ...d, id: nanoid(10), pageId: copy.id, createdAt: now() }));
+        for (const file of [this.snapshotPath.bind(this), this.drawingPath.bind(this)]) {
+          if (fs.existsSync(file(page.id))) {
+            fs.copyFileSync(file(page.id), file(copy.id));
+            copiedFiles.push(file(copy.id));
+          }
+        }
+        return copy;
+      });
+    } catch (e) {
+      for (const file of copiedFiles) fs.rmSync(file, { force: true });
+      throw e;
+    }
+    target.pages.splice(at, 0, ...pages);
+    this.finishPageChange([target]);
+    return { notebook: target, pages };
+  }
+
   newPage(background: Background = "blank"): Page {
     return { id: nanoid(10), background, snapshotVersion: 0, textBoxes: [], doubts: [], claudeLayer: [], updatedAt: now() };
   }
@@ -384,7 +489,8 @@ export class Store {
   insertPages(notebookId: string, pages: Page[], afterIndex?: number) {
     const nb = this.getNotebook(notebookId);
     if (!nb) throw new Error(`No notebook ${notebookId}`);
-    const at = afterIndex === undefined ? nb.pages.length : Math.min(nb.pages.length, afterIndex + 1);
+    if (afterIndex !== undefined && (!Number.isInteger(afterIndex) || afterIndex < -1 || afterIndex >= nb.pages.length)) throw new Error(`afterIndex must be from -1 to ${nb.pages.length - 1}`);
+    const at = afterIndex === undefined ? nb.pages.length : afterIndex + 1;
     nb.pages.splice(at, 0, ...pages);
     nb.updatedAt = now();
     this.save();
@@ -397,6 +503,7 @@ export class Store {
   }
 
   setView(notebookId: string, pageId: string) {
+    if (this.findPage(pageId)?.notebook.id !== notebookId) throw new Error("Page does not belong to this notebook");
     this.db.view = { notebookId, pageId, updatedAt: now() };
     this.save();
   }

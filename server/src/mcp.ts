@@ -9,6 +9,7 @@ import { clampRegion, renderPage, type Region } from "./render.js";
 import { PAGE_H, PAGE_W, type Notebook, type Page, type Store } from "./store.js";
 import { parsePageRegion } from "./regions.js";
 import { logMistake } from "./study.js";
+import { registerPageTools } from "./page-management.js";
 
 const INSTRUCTIONS = `ClaudeBook is the user's handwritten notebook app on iPad. You can see their pages and draw on them.
 Pages use a fixed coordinate space: x 0..${PAGE_W} left to right, y 0..${PAGE_H} top to bottom.
@@ -33,6 +34,7 @@ To give the user something to write on (worksheets, notes, practice questions), 
 PDF-backed pages include their own text with page-coordinate line boxes, filtered when zoomed. This is separate from recognized handwriting; scanned pages may have no text layer.
 create_pdf ships these exact Typst imports offline (Typst 0.13.1):
 ${TYPST_IMPORTS}
+Notebook/page management: use list_pages to get stable page ids, delete_pages to remove requested pages (including user ink), reorder_pages with a complete ordered id list, duplicate_pages for independent copies, and move_pages to move existing page ids to another notebook. after_page counts target pages before insertion (0=front, default=end), after removal for moves. For a notebook the user explicitly wants deleted, use delete_notebook with direct:true; otherwise omit direct to request iPad confirmation. Empty notebooks can be refilled with add_pages.
 Example drawing: #canvas({ draw.line((0,0),(2,1)); draw.circle((1,1),radius:0.4) }). Chemistry: #ch("H2O").
 The library is organised in folders (list_notebooks shows them). Put new notebooks and PDFs in the folder that fits with the folder parameter, and file notebooks with move_notebook. Scratch pads are temporary and delete themselves a week after their last edit unless the user keeps them.`;
 
@@ -48,13 +50,14 @@ const describeItem = (item: Item) => ({ id: item.id, type: item.type, label: ite
 
 export function buildMcpServer(store: Store) {
   const server = new McpServer({ name: "claudebook", version: "0.1.0" }, { instructions: INSTRUCTIONS });
+  registerPageTools(server, store);
 
   /** Resolve a page from optional ids, falling back to whatever the user has open. */
   function resolvePage(pageId?: string, notebookId?: string, pageNumber?: number) {
     if (pageId) return store.findPage(pageId);
     const nbId = notebookId ?? store.view().notebookId;
     const nb = nbId ? store.getNotebook(nbId) : undefined;
-    if (!nb) return;
+    if (!nb || !nb.pages.length) return;
     if (pageNumber !== undefined) {
       const page = nb.pages[pageNumber - 1];
       return page && { notebook: nb, page, index: pageNumber - 1 };
@@ -458,11 +461,18 @@ export function buildMcpServer(store: Store) {
     "delete_notebook",
     {
       title: "Delete a notebook",
-      description: "Ask the user to delete a notebook. Their iPad shows a confirmation; nothing is deleted unless they tap Delete there. Tell the user to confirm on the iPad.",
-      inputSchema: { notebook_id: z.string() },
+      description: 'Delete a notebook and all its pages/ink. Set direct:true when the user explicitly requested deletion; it works even when the iPad is closed. Omit direct to request iPad confirmation instead. Example: {notebook_id:"book-id",direct:true}.',
+      inputSchema: { notebook_id: z.string(), direct: z.boolean().optional().describe("Delete now when the user explicitly requested it; default asks on iPad") },
       annotations: { destructiveHint: true },
     },
-    async ({ notebook_id }) => {
+    async ({ notebook_id, direct }) => {
+      if (direct) {
+        const notebook = store.getNotebook(notebook_id);
+        if (!notebook) return fail("Notebook not found.");
+        const pages = notebook.pages.length;
+        store.deleteNotebook(notebook_id);
+        return text(JSON.stringify({ deleted_notebook_id: notebook_id, pages_deleted: pages, view: store.view() }));
+      }
       const nb = store.requestDelete(notebook_id);
       if (!nb) return fail("Notebook not found.");
       return text(`Asked the user to confirm deleting "${nb.title}" (${nb.pages.length} page(s)) on their iPad. It is only deleted if they tap Delete there; list_notebooks shows it as waiting until then.`);

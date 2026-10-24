@@ -9,6 +9,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { renderLegacyHandwriting } from "./handwriting.js";
 import { prepareItems } from "./items.js";
 import { buildMcpServer } from "./mcp.js";
+import { registerPageRoutes } from "./page-management.js";
 import { PDF_ID, pdfPath, savePdf } from "./pdf.js";
 import { claudeLayerSvg, renderPage } from "./render.js";
 import { Store, type Background, type Notebook, type TextBox } from "./store.js";
@@ -89,6 +90,7 @@ app.all("/mcp/:secret", (_req, res) => res.status(405).set("Allow", "POST").end(
 // --- REST API for the iPad app and the web viewer ---
 const api = express.Router();
 api.use(requireToken, express.json({ limit: "25mb" }));
+registerPageRoutes(api, store);
 
 /** Notebooks as the app sees them: scratch pads carry the time they'll delete themselves. */
 const withExpiry = (nb: Notebook) => (nb.scratch ? { ...nb, expiresAt: store.scratchExpiry(nb) } : nb);
@@ -204,18 +206,22 @@ api.delete("/notebooks/:id", (req, res) => {
 api.post("/notebooks/:id/pages", (req, res) => {
   const { count, afterIndex, background } = req.body as { count?: number; afterIndex?: number; background?: Background };
   try {
+    if (count !== undefined && (!Number.isInteger(count) || count < 1 || count > 100)) return res.status(400).json({ error: "count must be an integer from 1 to 100" });
+    if (background !== undefined && !["blank", "lined", "grid", "dotted"].includes(background)) return res.status(400).json({ error: "invalid background" });
     const pages = Array.from({ length: count ?? 1 }, () => store.newPage(background ?? "blank"));
     store.insertPages(req.params.id, pages, afterIndex);
     res.json({ pages });
   } catch (e) {
-    res.status(404).json({ error: String(e) });
+    res.status(400).json({ error: String(e) });
   }
 });
 
 /** The app reports what's on screen so Claude knows what "this page" means. */
 api.post("/view", (req, res) => {
   const { notebookId, pageId } = req.body as { notebookId: string; pageId: string };
-  if (!store.findPage(pageId)) return res.status(404).json({ error: "no such page" });
+  const found = store.findPage(pageId);
+  if (!found) return res.status(404).json({ error: "no such page" });
+  if (found.notebook.id !== notebookId) return res.status(400).json({ error: "page does not belong to this notebook" });
   store.setView(notebookId, pageId);
   res.json(store.view());
 });
@@ -241,6 +247,7 @@ api.put("/pages/:id/drawing", express.raw({ type: "*/*", limit: "50mb" }), (req,
 });
 
 api.get("/pages/:id/drawing", (req, res) => {
+  if (!store.findPage(req.params.id)) return res.status(404).end();
   const file = store.drawingPath(req.params.id);
   fs.existsSync(file) ? res.type("application/octet-stream").sendFile(file) : res.status(404).end();
 });
