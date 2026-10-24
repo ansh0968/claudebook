@@ -3,6 +3,8 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { LooseItemSchema, itemBBox, itemLabel, moleculeAtomsForDisplay, offPageWarning, prepareBatch, translateItem, type Item, type ItemWarning } from "./items.js";
 import { compileTypst, downloadPdf, savePdf } from "./pdf.js";
+import { pdfTextPage, describePdfText } from "./pdf-text.js";
+import { TYPST_IMPORTS } from "./typst-packages.js";
 import { clampRegion, renderPage, type Region } from "./render.js";
 import { PAGE_H, PAGE_W, type Page, type Store } from "./store.js";
 import { parsePageRegion } from "./regions.js";
@@ -27,7 +29,11 @@ Graphs: define {type:"axes",origin:[300,650],xrange:[-2,5],yrange:[-1,4],unit:60
 Angles use page coordinates: {type:"angle",vertex:[300,650],from:[400,650],to:[360,570],radius:30,label:"θ"}; right_angle:true forces a square (automatic near 90°). Without axes, point.at also uses page coordinates.
 Physics: rect, ellipse, text, math, molecule and svg accept rotation in clockwise screen degrees about the positioned bbox centre; e.g. {type:"rect",x:200,y:400,w:100,h:60,rotation:30}. Text/math anchors apply before rotation: {type:"text",x:500,y:500,text:"block",anchor:"center",rotation:30}. Pattern fills on rect/ellipse/svg: {type:"rect",x:600,y:400,w:200,h:150,fill_pattern:"cross",pattern_spacing:25}; cross uses ⊗ (into page), dot uses ⊙ (out), hatch uses parallel lines with pattern_angle (default 45; e.g. pattern_angle:30). Patterns clip to the shape and work with normal fill and rotation; fill without color keeps the shape outline hidden.
 Draw springs: {type:"spring",from:[100,400],to:[400,400],coils:6,amplitude:15}. Draw floors/walls/inclines: {type:"ground",from:[100,600],to:[650,350],side:"below",hatch_length:14,spacing:12}; side can also be above/left/right.
-To give the user something to write on (worksheets, notes, practice questions), use create_pdf; to bring in an existing PDF from the web, use import_pdf_from_url.`;
+To give the user something to write on (worksheets, notes, practice questions), use create_pdf; to bring in an existing PDF from the web, use import_pdf_from_url.
+PDF-backed pages include their own text with page-coordinate line boxes, filtered when zoomed. This is separate from recognized handwriting; scanned pages may have no text layer.
+create_pdf ships these exact Typst imports offline (Typst 0.13.1):
+${TYPST_IMPORTS}
+Example drawing: #canvas({ draw.line((0,0),(2,1)); draw.circle((1,1),radius:0.4) }). Chemistry: #ch("H2O").`;
 
 type ToolResult = { content: ({ type: "text"; text: string } | { type: "image"; data: string; mimeType: string })[]; isError?: boolean };
 
@@ -55,7 +61,7 @@ export function buildMcpServer(store: Store) {
     return store.view().pageId ? store.findPage(store.view().pageId!) : { notebook: nb, page: nb.pages[0], index: 0 };
   }
 
-  function describe(found: { notebook: { title: string; id: string; pages: Page[] }; page: Page; index: number }, region?: Region) {
+  async function describe(found: { notebook: { title: string; id: string; pages: Page[] }; page: Page; index: number }, region?: Region) {
     const { notebook, page, index } = found;
     const lines = [
       `Notebook "${notebook.title}" (id ${notebook.id}), page ${index + 1} of ${notebook.pages.length} (page id ${page.id}).`,
@@ -67,6 +73,10 @@ export function buildMcpServer(store: Store) {
       for (const d of doubts) lines.push(`- ${d.id}: [${d.region.x}, ${d.region.y}, ${d.region.w}, ${d.region.h}]`);
     }
     lines.push(syncStatus(page));
+    if (page.pdf) {
+      try { lines.push(...describePdfText(await pdfTextPage(store, page.pdf.file, page.pdf.page), region)); }
+      catch (error) { lines.push(`PDF text unavailable: ${(error as Error).message}`); }
+    }
     // When zoomed, only list handwriting that overlaps the zoomed area.
     const boxes = region
       ? page.textBoxes.filter((b) => b.x < region.x + region.w && b.x + b.w > region.x && b.y < region.y + region.h && b.y + b.h > region.y)
@@ -97,7 +107,7 @@ export function buildMcpServer(store: Store) {
   async function pageWithImage(found: NonNullable<ReturnType<typeof resolvePage>>, grid: boolean, zoom?: Region): Promise<ToolResult> {
     const region = zoom && clampRegion(zoom);
     const png = await renderPage(store, found.page, { grid, region });
-    let text = describe(found, region);
+    let text = await describe(found, region);
     if (region) text += `\nZoomed into x ${region.x}..${region.x + region.w}, y ${region.y}..${region.y + region.h}; grid labels are still page coordinates.`;
     return { content: [{ type: "text", text }, { type: "image", data: png.toString("base64"), mimeType: "image/png" }] };
   }
@@ -435,8 +445,9 @@ export function buildMcpServer(store: Store) {
       description:
         "Typeset a document and drop it into ClaudeBook as notebook pages the user can write on. Use it for worksheets, revision notes and practice questions. " +
         "Write Typst markup, not LaTeX (math is $x^2$ inline or $ x = (-b plus.minus sqrt(b^2 - 4a c)) / (2a) $ on its own line, #pagebreak() for new pages). " +
-        "Pages are A4. Leave generous blank space under each question for handwriting, e.g. #v(6cm). Makes a new notebook unless notebook_id is given (then pages are appended).",
-      inputSchema: { title: z.string(), typst: z.string().describe("Complete Typst source"), notebook_id: z.string().optional() },
+        "Pages are A4. Leave generous blank space under each question for handwriting, e.g. #v(6cm). Makes a new notebook unless notebook_id is given (then pages are appended). " +
+        `Offline packages (exact imports):\n${TYPST_IMPORTS}\nExample: #canvas({ draw.line((0,0),(2,1)); draw.circle((1,1),radius:0.4) }). PDF text with coordinates appears in view_page/get_current_page.`,
+      inputSchema: { title: z.string(), typst: z.string().describe(`Complete Typst source. Offline package imports:\n${TYPST_IMPORTS}`), notebook_id: z.string().optional() },
     },
     async ({ title, typst, notebook_id }) => {
       const prefixed = !/#set page\(/.test(typst);

@@ -11,6 +11,8 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    env:
+      TYPST_PACKAGE_CACHE_PATH: ${{ runner.temp }}/typst-packages
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -22,6 +24,8 @@ jobs:
           sudo apt-get install -y -qq poppler-utils
           curl -fsSL https://github.com/typst/typst/releases/download/v0.13.1/typst-x86_64-unknown-linux-musl.tar.xz | tar xJ -C "$RUNNER_TEMP"
           sudo mv "$RUNNER_TEMP/typst-x86_64-unknown-linux-musl/typst" /usr/local/bin/
+      - name: Warm pinned Typst packages and their dependencies
+        run: typst compile server/typst-packages.typ "$RUNNER_TEMP/typst-packages.pdf"
       - name: Build and exercise a disposable server
         working-directory: server
         env:
@@ -35,3 +39,8 @@ jobs:
           trap 'kill "$SERVER_PID"' EXIT
           for i in $(seq 1 30); do curl -fsS http://localhost:8787/health && break; sleep 1; done
           npm test
+      - name: Prove the runtime image compiles packages offline
+        run: |
+          docker build -t claudebook-offline-test server
+          docker run --rm --network none --entrypoint typst claudebook-offline-test \
+            compile /opt/typst-packages.typ /tmp/packages.pdf
