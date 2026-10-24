@@ -87,14 +87,48 @@ struct API {
         try decode(Notebook.self, await request("notebooks/\(id)"))
     }
 
-    func createNotebook(title: String, background: PageBackground) async throws -> Notebook {
-        struct Body: Encodable { var title: String; var pages: Int; var background: PageBackground }
-        return try decode(Notebook.self, await request("notebooks", method: "POST", json: Body(title: title, pages: 1, background: background)))
+    func createNotebook(title: String, background: PageBackground, folderId: String? = nil, scratch: Bool = false) async throws -> Notebook {
+        struct Body: Encodable { var title: String; var pages: Int; var background: PageBackground; var folderId: String?; var scratch: Bool? }
+        let body = Body(title: title, pages: 1, background: background, folderId: folderId, scratch: scratch ? true : nil)
+        return try decode(Notebook.self, await request("notebooks", method: "POST", json: body))
     }
 
     func renameNotebook(_ id: String, title: String) async throws {
         struct Body: Encodable { var title: String }
         _ = try await request("notebooks/\(id)", method: "PATCH", json: Body(title: title))
+    }
+
+    /// nil moves the notebook to the top level.
+    func moveNotebook(_ id: String, to folderId: String?) async throws {
+        struct Body: Encodable { var folderId: String }
+        _ = try await request("notebooks/\(id)", method: "PATCH", json: Body(folderId: folderId ?? ""))
+    }
+
+    /// Turns a scratch pad into a normal notebook so it's never deleted.
+    func keepScratchPad(_ id: String, title: String, folderId: String?) async throws {
+        struct Body: Encodable { var title: String; var folderId: String; var scratch = false }
+        _ = try await request("notebooks/\(id)", method: "PATCH", json: Body(title: title, folderId: folderId ?? ""))
+    }
+
+    func createFolder(name: String, parentId: String?) async throws -> Folder {
+        struct Body: Encodable { var name: String; var parentId: String? }
+        return try decode(Folder.self, await request("folders", method: "POST", json: Body(name: name, parentId: parentId)))
+    }
+
+    func renameFolder(_ id: String, name: String) async throws {
+        struct Body: Encodable { var name: String }
+        _ = try await request("folders/\(id)", method: "PATCH", json: Body(name: name))
+    }
+
+    /// nil moves the folder to the top level.
+    func moveFolder(_ id: String, to parentId: String?) async throws {
+        struct Body: Encodable { var parentId: String }
+        _ = try await request("folders/\(id)", method: "PATCH", json: Body(parentId: parentId ?? ""))
+    }
+
+    /// Notebooks and folders inside move up to the deleted folder's parent.
+    func deleteFolder(_ id: String) async throws {
+        _ = try await request("folders/\(id)", method: "DELETE")
     }
 
     func deleteNotebook(_ id: String) async throws {
@@ -124,8 +158,10 @@ struct API {
         do { return try await request("pages/\(pageId)/drawing") } catch let e as APIError where e.status == 404 { return nil }
     }
 
-    func importPDF(_ data: Data, title: String) async throws -> Notebook {
-        try decode(Notebook.self, await request("notebooks/import-pdf", method: "POST", body: data, contentType: "application/pdf", query: [URLQueryItem(name: "title", value: title)]))
+    func importPDF(_ data: Data, title: String, folderId: String? = nil) async throws -> Notebook {
+        var query = [URLQueryItem(name: "title", value: title)]
+        if let folderId { query.append(URLQueryItem(name: "folderId", value: folderId)) }
+        return try decode(Notebook.self, await request("notebooks/import-pdf", method: "POST", body: data, contentType: "application/pdf", query: query))
     }
 
     func pdf(file: String) async throws -> Data {

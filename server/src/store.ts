@@ -52,7 +52,22 @@ export interface Notebook {
   pages: Page[];
   createdAt: string;
   updatedAt: string;
+  /** Unset means the notebook sits at the top level of the library. */
+  folderId?: string;
+  /** Scratch pads delete themselves SCRATCH_TTL_MS after their last edit unless the user keeps them. */
+  scratch?: boolean;
 }
+
+export interface Folder {
+  id: string;
+  name: string;
+  /** Unset means a top-level folder. */
+  parentId?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export const SCRATCH_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 export interface ViewState {
   notebookId: string | null;
@@ -62,6 +77,7 @@ export interface ViewState {
 
 interface DB {
   notebooks: Notebook[];
+  folders: Folder[];
   view: ViewState;
 }
 
@@ -85,14 +101,15 @@ export class Store {
     fs.mkdirSync(this.pdfDir, { recursive: true });
     this.db = fs.existsSync(this.file)
       ? JSON.parse(fs.readFileSync(this.file, "utf8"))
-      : { notebooks: [], view: { notebookId: null, pageId: null, updatedAt: null } };
+      : { notebooks: [], folders: [], view: { notebookId: null, pageId: null, updatedAt: null } };
+    this.db.folders ??= [];
     // Older db.json files have no doubts field. Normalize once so every API response has an array.
     for (const notebook of this.db.notebooks) for (const page of notebook.pages) page.doubts ??= [];
     if (this.db.notebooks.length === 0) this.seed();
   }
 
   private seed() {
-    const nb = this.createNotebook("Scratchpad", 1, "grid");
+    const nb = this.createNotebook("First notebook", 1, "grid");
     this.setView(nb.id, nb.pages[0].id);
   }
 
@@ -117,13 +134,7 @@ export class Store {
 
   /** Rename a notebook. Returns undefined if it doesn't exist. */
   renameNotebook(id: string, title: string) {
-    const nb = this.getNotebook(id);
-    if (!nb) return;
-    nb.title = title;
-    nb.updatedAt = now();
-    this.save();
-    this.emit({ type: "notebook", notebookId: id });
-    return nb;
+    return this.updateNotebook(id, { title });
   }
 
   /** Remove a notebook and its page files. PDFs stay, since another notebook may share one. */
@@ -144,6 +155,105 @@ export class Store {
 
   getNotebook(id: string) {
     return this.db.notebooks.find((n) => n.id === id);
+  }
+
+  /** Latest change to the notebook or any of its pages. ISO strings sort by time. */
+  lastActivity(nb: Notebook) {
+    return nb.pages.reduce((latest, p) => (p.updatedAt > latest ? p.updatedAt : latest), nb.updatedAt);
+  }
+
+  /** When a scratch pad will delete itself, or undefined for normal notebooks. */
+  scratchExpiry(nb: Notebook) {
+    return nb.scratch ? new Date(Date.parse(this.lastActivity(nb)) + SCRATCH_TTL_MS).toISOString() : undefined;
+  }
+
+  /** Move a notebook into a folder (null = top level), rename it, or keep a scratch pad for good. */
+  updateNotebook(id: string, changes: { title?: string; folderId?: string | null; scratch?: false }) {
+    const nb = this.getNotebook(id);
+    if (!nb) return;
+    if (changes.folderId && !this.getFolder(changes.folderId)) throw new RangeError(`No folder ${changes.folderId}`);
+    if (changes.title !== undefined) nb.title = changes.title;
+    if (changes.folderId !== undefined) {
+      if (changes.folderId) nb.folderId = changes.folderId;
+      else delete nb.folderId;
+    }
+    if (changes.scratch === false) delete nb.scratch;
+    // Filing a notebook away isn't an edit, so it shouldn't jump to the front of "recent".
+    if (changes.title !== undefined || changes.scratch === false) nb.updatedAt = now();
+    this.save();
+    this.emit({ type: "notebook", notebookId: id });
+    return nb;
+  }
+
+  /** Delete scratch pads nobody has touched for a week. Skips the one the user is looking at right now. */
+  purgeExpiredScratchPads(at = Date.now()) {
+    const recentlyViewed = this.db.view.updatedAt && at - Date.parse(this.db.view.updatedAt) < 60 * 60 * 1000 ? this.db.view.notebookId : null;
+    const expired = this.db.notebooks.filter((nb) => nb.scratch && nb.id !== recentlyViewed && Date.parse(this.scratchExpiry(nb)!) <= at);
+    for (const nb of expired) this.deleteNotebook(nb.id);
+    return expired.map((nb) => nb.title);
+  }
+
+  listFolders() {
+    return this.db.folders;
+  }
+
+  getFolder(id: string) {
+    return this.db.folders.find((f) => f.id === id);
+  }
+
+  /** Folder names from the top level down, e.g. ["Chemistry", "Organic"]. */
+  folderPath(id: string | undefined): string[] {
+    const names: string[] = [];
+    for (let f = id ? this.getFolder(id) : undefined; f; f = f.parentId ? this.getFolder(f.parentId) : undefined) names.unshift(f.name);
+    return names;
+  }
+
+  createFolder(name: string, parentId?: string) {
+    if (parentId && !this.getFolder(parentId)) throw new RangeError(`No folder ${parentId}`);
+    const folder: Folder = { id: nanoid(10), name, ...(parentId ? { parentId } : {}), createdAt: now(), updatedAt: now() };
+    this.db.folders.push(folder);
+    this.save();
+    this.emit({ type: "folders" });
+    return folder;
+  }
+
+  /** Rename a folder or move it under another one (null = top level). Refuses to move a folder inside itself. */
+  updateFolder(id: string, changes: { name?: string; parentId?: string | null }) {
+    const folder = this.getFolder(id);
+    if (!folder) return;
+    if (changes.parentId) {
+      if (!this.getFolder(changes.parentId)) throw new RangeError(`No folder ${changes.parentId}`);
+      for (let f = this.getFolder(changes.parentId); f; f = f.parentId ? this.getFolder(f.parentId) : undefined) {
+        if (f.id === id) throw new RangeError("A folder can't go inside itself");
+      }
+    }
+    if (changes.name !== undefined) folder.name = changes.name;
+    if (changes.parentId !== undefined) {
+      if (changes.parentId) folder.parentId = changes.parentId;
+      else delete folder.parentId;
+    }
+    folder.updatedAt = now();
+    this.save();
+    this.emit({ type: "folders" });
+    return folder;
+  }
+
+  /** Remove a folder without losing anything: its notebooks and subfolders move up to its parent. */
+  deleteFolder(id: string) {
+    const folder = this.getFolder(id);
+    if (!folder) return false;
+    this.db.folders = this.db.folders.filter((f) => f.id !== id);
+    for (const f of this.db.folders) if (f.parentId === id) {
+      if (folder.parentId) f.parentId = folder.parentId;
+      else delete f.parentId;
+    }
+    for (const nb of this.db.notebooks) if (nb.folderId === id) {
+      if (folder.parentId) nb.folderId = folder.parentId;
+      else delete nb.folderId;
+    }
+    this.save();
+    this.emit({ type: "folders" });
+    return true;
   }
 
   findPage(pageId: string): { notebook: Notebook; page: Page; index: number } | undefined {
@@ -210,13 +320,16 @@ export class Store {
     return item;
   }
 
-  createNotebook(title: string, pageCount = 1, background: Background = "blank"): Notebook {
+  createNotebook(title: string, pageCount = 1, background: Background = "blank", options: { folderId?: string; scratch?: boolean } = {}): Notebook {
+    if (options.folderId && !this.getFolder(options.folderId)) throw new RangeError(`No folder ${options.folderId}`);
     const nb: Notebook = {
       id: nanoid(10),
       title,
       pages: Array.from({ length: Math.max(1, pageCount) }, () => this.newPage(background)),
       createdAt: now(),
       updatedAt: now(),
+      ...(options.folderId ? { folderId: options.folderId } : {}),
+      ...(options.scratch ? { scratch: true } : {}),
     };
     this.db.notebooks.push(nb);
     this.save();
@@ -225,13 +338,13 @@ export class Store {
   }
 
   /** One page per PDF page. Appends to `notebookId` if given, else makes a new notebook titled `title`. */
-  addPdfPages(file: string, count: number, title: string, notebookId?: string) {
+  addPdfPages(file: string, count: number, title: string, notebookId?: string, folderId?: string) {
     const pages = Array.from({ length: count }, (_, i) => ({ ...this.newPage("blank"), pdf: { file, page: i + 1 } }));
     if (notebookId) {
       const at = this.insertPages(notebookId, pages);
       return { notebook: this.getNotebook(notebookId)!, firstIndex: at };
     }
-    const nb = this.createNotebook(title, 1);
+    const nb = this.createNotebook(title, 1, "blank", { folderId });
     nb.pages = pages;
     this.save();
     this.emit({ type: "notebook", notebookId: nb.id });
@@ -357,5 +470,6 @@ export class Store {
 
 export type StoreEvent =
   | { type: "notebook"; notebookId: string }
+  | { type: "folders" }
   | { type: "claudeLayer"; notebookId: string; pageId: string }
   | { type: "doubts"; notebookId: string; pageId: string; doubts: Doubt[] };
