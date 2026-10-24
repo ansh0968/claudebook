@@ -8,7 +8,8 @@ on:
     paths: ["ios/**", ".github/workflows/ios-smoke.yml"]
   workflow_dispatch:
 
-concurrency: ios-smoke
+# One queue per branch, so runs dispatched on different feature branches don't cancel each other.
+concurrency: ios-smoke-${{ github.ref_name }}
 
 permissions:
   contents: write
@@ -189,8 +190,11 @@ jobs:
           [ -d shots ] || exit 0
           cp -R shots $RUNNER_TEMP/shots
           cd $RUNNER_TEMP && rm -rf pub && mkdir pub && cd pub
-          git init -q -b ci-screenshots
+          # main keeps the ci-screenshots branch; other branches get ci-screenshots-<branch> so parallel runs don't overwrite each other.
+          TARGET=ci-screenshots
+          [ "$GITHUB_REF_NAME" = main ] || TARGET="ci-screenshots-${GITHUB_REF_NAME//\//-}"
+          git init -q -b "$TARGET"
           cp ../shots/*.png .
           echo "Smoke test for ${GITHUB_SHA::7}, run $GITHUB_RUN_ID" > README.md
           git add . && git -c user.name=claudebook-ci -c user.email=ci@users.noreply.github.com commit -qm "Screenshots for ${GITHUB_SHA::7}"
-          git push -qf "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" ci-screenshots
+          git push -qf "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" "$TARGET"
