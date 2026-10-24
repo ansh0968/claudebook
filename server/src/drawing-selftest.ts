@@ -5,7 +5,7 @@ import path from "node:path";
 import sharp from "sharp";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { arrowPath, pathBounds } from "./geometry.js";
+import { arrowPath, curvedArrowPaths, pathBounds } from "./geometry.js";
 import { ItemSchema, itemBBox, itemLabel, itemToSvg, prepareItems, translateItem, type Item, type ItemInput } from "./items.js";
 import { renderMolecule } from "./molecule.js";
 
@@ -25,13 +25,14 @@ assert.match(itemToSvg({ type: "path", points: [[0, 0], [10, 10]], closed: true 
 
 for (const bend of [-70, 0, 70]) {
   const curve = arrowPath([0, 0], [100, 0], 3, bend);
-  assert.match(curve, new RegExp(`Q50,${bend} 100,0`));
-  assert.equal((curve.match(/M/g) ?? []).length, 3);
+  assert.match(curve, new RegExp(`Q50,${bend} `));
+  assert.equal((curve.match(/M/g) ?? []).length, 2);
+  assert.ok(curve.endsWith("Z"), "Chemistry heads are filled triangles");
   const fishhook = arrowPath([0, 0], [100, 0], 3, bend, true);
   assert.equal((fishhook.match(/M/g) ?? []).length, 2);
-  const tangent = Math.atan2(-bend, 50), angle = tangent + (bend >= 0 ? 0.45 : -0.45);
-  const barb = fishhook.split("M")[2].split("L")[0].split(",").map(Number);
-  near(barb[0], 100 - 16 * Math.cos(angle)); near(barb[1], -16 * Math.sin(angle));
+  const paths = curvedArrowPaths([0, 0], [100, 0], 3, bend, true);
+  assert.ok(paths.head.startsWith("M100,0L"));
+  assert.ok(!paths.shaft.endsWith("100,0"), "Shaft stops before the tip");
 }
 assert.doesNotMatch(arrowPath([10, 10], [10, 10], 3, 40, true), /NaN|Infinity/);
 

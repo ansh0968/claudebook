@@ -6,7 +6,7 @@ import { renderMath } from "./math.js";
 import { renderHandwriting } from "./handwriting.js";
 import { renderMolecule } from "./molecule.js";
 import svgpath from "svgpath";
-import { arrowHead, arrowPath, headsFor, pathBounds, pointBounds, type BBox, type HeadMode, type Point } from "./geometry.js";
+import { arrowHead, arrowPath, curvedArrowPaths, headsFor, pathBounds, pointBounds, type BBox, type HeadMode, type Point } from "./geometry.js";
 import { PAGE_H, PAGE_W } from "./store.js";
 
 const pt = z.tuple([z.number(), z.number()]).describe("[x, y] in page coordinates");
@@ -20,14 +20,18 @@ const fill = z.string().optional().describe("Fill color. Without a color, a fill
 const anchor = z.enum(["top-left", "top-center", "top-right", "left-center", "center", "right-center", "bottom-left", "bottom-center", "bottom-right"]).optional()
   .describe("Which point of the item x,y names, default top-left. The stored x,y and bbox are always the top-left");
 
+const chemistryArrow = { from: pt, to: pt, bend: z.number().optional().describe("Signed curve bend, default 40"), head: z.enum(["full", "half"]).optional().describe('Filled electron-pair or fishhook head, default full. Example: head:"half"'), half_head: z.boolean().optional().describe('Legacy alias for head:"half"'), color, width, group };
+
 export const ItemSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("path"), points: z.array(pt).min(2), color, width, closed: z.boolean().optional(), smooth: z.boolean().optional(), dashed, head: head("none"), head_filled: headFilled, group })
     .describe("Freehand stroke through the points; smooth defaults true, false joins points with straight segments"),
   z.object({ type: z.literal("line"), from: pt, to: pt, color, width, dashed: z.boolean().optional(), group }),
   z.object({ type: z.literal("arrow"), from: pt, to: pt, color, width, dashed, head: head("end"), head_filled: headFilled, group })
     .describe("Straight arrow. head: \"both\" for dimension lines (λ, R, lengths)"),
-  z.object({ type: z.literal("curved_arrow"), from: pt, to: pt, bend: z.number().optional(), half_head: z.boolean().optional(), color, width, group })
-    .describe("Quadratic curved arrow. Signed bend offsets its control point; half_head draws one fishhook barb"),
+  z.object({ type: z.literal("curved_arrow"), ...chemistryArrow })
+    .describe('Chemistry arrow with a filled head aligned to the curve tangent. Example: {type:"curved_arrow",from:[100,200],to:[250,200],bend:-60,head:"full"}'),
+  z.object({ type: z.literal("curly"), ...chemistryArrow })
+    .describe('Alias stored as curved_arrow. Example: {type:"curly",from:[100,200],to:[250,200],head:"half"}'),
   z.object({ type: z.literal("ellipse"), center: pt, rx: z.number(), ry: z.number().optional(), color, width, fill, group })
     .describe("Circle or ellipse. Great for circling mistakes: wrap the text box with some padding"),
   z.object({ type: z.literal("rect"), x: z.number(), y: z.number(), w: z.number(), h: z.number(), color, width, fill, group }),
@@ -39,15 +43,15 @@ export const ItemSchema = z.discriminatedUnion("type", [
     .describe("Raw SVG path data in page coordinates, for figures and diagrams"),
   z.object({ type: z.literal("math"), latex: z.string(), x: z.number(), y: z.number(), size: z.number().optional(), color, anchor, group })
     .describe("Typeset math from LaTeX, e.g. x = \\frac{-b \\pm \\sqrt{b^2-4ac}}{2a}. Use this for every equation and corrected working step, and for any symbol, subscript or charge. Chemistry works with mhchem: \\ce{H2SO4}, \\ce{OH-}, \\ce{A + B -> C}. x,y is the top-left, size is the line height, default 36; one line is about 0.55 x size tall, fractions and matrices more. Arrow labels: \\xrightarrow[below]{above} or \\ce{A ->[above][below] B}. One line per item"),
-  z.object({ type: z.literal("molecule"), smiles: z.string(), x: z.number(), y: z.number(), size: z.number().positive().optional(), color, group })
-    .describe("Chemical structure from SMILES. x,y is the top-left; size is the longest side, default 180"),
+  z.object({ type: z.literal("molecule"), smiles: z.string(), x: z.number(), y: z.number(), size: z.number().positive().optional(), show_carbons: z.boolean().optional().describe('Label every carbon. Example: show_carbons:true'), explicit_h: z.boolean().optional().describe('Draw every hydrogen atom and bond. Example: explicit_h:true'), color, group })
+    .describe('Chemical structure from SMILES. Returns atoms (index to [x,y]) and elements maps in page units. x,y is top-left; size is longest side, default 180. Example: {type:"molecule",smiles:"CC(=O)O",x:100,y:200,show_carbons:true}'),
   z.object({ type: z.literal("hint"), x: z.number(), y: z.number(), text: z.string(), label: z.string().optional(), size: z.number().positive().optional(), revealed: z.boolean().optional(), color, group })
     .describe("Hidden hint chip. The user can tap it to reveal text; label defaults to Hint"),
 ]);
 
 export type ItemInput = z.infer<typeof ItemSchema>;
 /** Stored items carry generated outline d, arrowhead outline head_d and dimensions where appropriate. */
-export type Item = ItemInput & { id: string; createdAt: string; d?: string; w?: number; h?: number; head_d?: string };
+export type Item = ItemInput & { id: string; createdAt: string; d?: string; w?: number; h?: number; head_d?: string; head_filled?: boolean; atoms?: Record<string, Point>; elements?: Record<string, string> };
 
 /** Fractions of the item's width and height that each anchor sits at. */
 const ANCHORS: Record<NonNullable<z.infer<typeof anchor>>, [number, number]> = {
@@ -90,8 +94,13 @@ export function prepareItems(items: ItemInput[]): Item[] {
     // The iPad's path parser has no arcs, so store SVG paths with arcs already turned into curves.
     const i = input.type === "svg" ? { ...input, d: normalizeSvg(input.d) } : input;
     const base = withHeads({ ...i, id: nanoid(8), createdAt: new Date().toISOString() });
+    if (i.type === "curly" || i.type === "curved_arrow") {
+      const head = i.head ?? (i.half_head ? "half" : "full");
+      const paths = curvedArrowPaths(i.from, i.to, i.width ?? 3, i.bend ?? 40, head === "half");
+      return { ...i, id: base.id, createdAt: base.createdAt, type: "curved_arrow" as const, head, d: paths.shaft, head_d: paths.head, head_filled: true };
+    }
     if (i.type === "text") return anchored(base as typeof i & { id: string; createdAt: string }, renderHandwriting(i.text, i.x, i.y, i.size ?? 32)) as Item;
-    if (i.type === "molecule") return { ...base, ...renderMolecule(i.smiles, i.x, i.y, i.size ?? 180) };
+    if (i.type === "molecule") return { ...base, ...renderMolecule(i.smiles, i.x, i.y, i.size ?? 180, i) };
     if (i.type === "hint") {
       if (i.revealed) return { ...base, ...renderHandwriting(i.text, i.x, i.y, i.size ?? 32) };
       const shape = renderHandwriting(i.label ?? "Hint", i.x + 12, i.y + 3, i.size ?? 32);
@@ -191,7 +200,10 @@ export function itemBBox(item: Item): BBox {
     case "path": return pathBounds(pathData(item) + (item.head_d ?? ""), padding);
     case "line": return pointBounds([item.from, item.to], padding);
     case "arrow": return pathBounds(item.head_d !== undefined || item.head === "none" ? `M${item.from.join(",")}L${item.to.join(",")}${item.head_d ?? ""}` : arrowPath(item.from, item.to, item.width), (item.width ?? 3) / 2);
-    case "curved_arrow": return pathBounds(arrowPath(item.from, item.to, item.width, item.bend ?? 40, item.half_head), padding);
+    case "curly": case "curved_arrow": {
+      const shape = item.d === undefined ? prepareItems([item])[0] : item;
+      return pathBounds((shape.d ?? "") + (shape.head_d ?? ""), padding);
+    }
     case "ellipse": return pointBounds([[item.center[0] - item.rx, item.center[1] - (item.ry ?? item.rx)], [item.center[0] + item.rx, item.center[1] + (item.ry ?? item.rx)]], padding);
     case "rect": case "highlight": return pointBounds([[item.x, item.y], [item.x + item.w, item.y + item.h]], padding);
     case "svg": return pathBounds(item.d + (item.head_d ?? ""), item.head_d ? Math.max(padding, (item.width ?? 3) / 2) : padding);
@@ -220,6 +232,7 @@ export function translateItem(item: Item, dx: number, dy: number): Item {
   if ("from" in moved) { moved.from = point(moved.from); moved.to = point(moved.to); }
   if (moved.type === "ellipse") moved.center = point(moved.center);
   if (moved.type === "path") moved.points = moved.points.map(point);
+  if (moved.atoms) moved.atoms = Object.fromEntries(Object.entries(moved.atoms).map(([id, at]) => [id, point(at)]));
   for (const key of ["d", "head_d"] as const) {
     if (!moved[key]) continue;
     const outline = svgpath(moved[key]);
@@ -232,7 +245,7 @@ export function translateItem(item: Item, dx: number, dy: number): Item {
   return moved;
 }
 
-export function itemToSvg(item: ItemInput & { d?: string; head_d?: string }): string {
+export function itemToSvg(item: ItemInput & { d?: string; head_d?: string; head_filled?: boolean }): string {
   const c = esc(item.color ?? DEFAULT_COLOR);
   const w = "width" in item && item.width ? item.width : 3;
   const strokeOf = (color: string) => `stroke="${color}" stroke-width="${w}" stroke-linecap="round" stroke-linejoin="round"`;
@@ -249,8 +262,10 @@ export function itemToSvg(item: ItemInput & { d?: string; head_d?: string }): st
       // Arrows drawn before head_d existed keep their original single-path shape.
       if (item.head_d === undefined && item.head === undefined) return `<path d="${arrowPath(item.from, item.to, w)}" fill="none" ${stroke}${dash}/>`;
       return `<path d="M${item.from.join(",")}L${item.to.join(",")}" fill="none" ${stroke}${dash}/>${heads}`;
-    case "curved_arrow":
-      return `<path d="${arrowPath(item.from, item.to, w, item.bend ?? 40, item.half_head)}" fill="none" ${stroke}/>`;
+    case "curly": case "curved_arrow": {
+      if (item.d === undefined) return itemToSvg(prepareItems([item])[0]);
+      return `<path d="${item.d}" fill="none" ${stroke.replace('stroke-linecap="round"', 'stroke-linecap="butt"')}/>${heads}`;
+    }
     case "ellipse":
       return `<ellipse cx="${item.center[0]}" cy="${item.center[1]}" rx="${item.rx}" ry="${item.ry ?? item.rx}" fill="${esc(item.fill ?? "none")}" ${outlined(item) ? stroke : 'stroke="none"'}/>`;
     case "rect":
@@ -272,7 +287,7 @@ export function itemToSvg(item: ItemInput & { d?: string; head_d?: string }): st
       return item.revealed ? label : `<rect x="${item.x}" y="${item.y}" width="${shape.w}" height="${shape.h}" rx="8" fill="${c}" fill-opacity="0.1" stroke="${c}" stroke-width="1.5"/>${label}`;
     }
     case "molecule": {
-      const shape = item.d === undefined ? renderMolecule(item.smiles, item.x, item.y, item.size ?? 180) : item;
+      const shape = item.d === undefined ? renderMolecule(item.smiles, item.x, item.y, item.size ?? 180, item) : item;
       return shape.d ? `<path d="${esc(shape.d)}" fill="${c}"/>` : "";
     }
     case "math":
