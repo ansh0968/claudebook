@@ -3,6 +3,8 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { LooseItemSchema, itemBBox, itemLabel, offPageWarning, prepareBatch, translateItem, type Item, type ItemWarning } from "./items.js";
 import { compileTypst, downloadPdf, savePdf } from "./pdf.js";
+import { pdfTextPage, describePdfText } from "./pdf-text.js";
+import { TYPST_IMPORTS } from "./typst-packages.js";
 import { clampRegion, renderPage, type Region } from "./render.js";
 import { PAGE_H, PAGE_W, type Page, type Store } from "./store.js";
 import { parsePageRegion } from "./regions.js";
@@ -22,7 +24,11 @@ Every draw returns each item's id and bbox, plus per-item warnings (bad LaTeX, u
 After drawing, call view_page to check the result and fix anything that landed in the wrong place.
 Page descriptions list item ids, labels and bounding boxes. Use erase_my_drawings with ids or group to remove selected items, move_items with ids, dx, dy to reposition them, and copy_items to duplicate them. Name related drawings with an item group.
 Use curved_arrow for reaction mechanisms (signed bend, half_head for a fishhook), path smooth:false for straight segments, and molecule with SMILES for chemical structures. Hints are hidden until the user taps their chip.
-To give the user something to write on (worksheets, notes, practice questions), use create_pdf; to bring in an existing PDF from the web, use import_pdf_from_url.`;
+To give the user something to write on (worksheets, notes, practice questions), use create_pdf; to bring in an existing PDF from the web, use import_pdf_from_url.
+PDF-backed pages include their own text with page-coordinate line boxes, filtered when zoomed. This is separate from recognized handwriting; scanned pages may have no text layer.
+create_pdf ships these exact Typst imports offline (Typst 0.13.1):
+${TYPST_IMPORTS}
+Example drawing: #canvas({ draw.line((0,0),(2,1)); draw.circle((1,1),radius:0.4) }). Chemistry: #ch("H2O").`;
 
 type ToolResult = { content: ({ type: "text"; text: string } | { type: "image"; data: string; mimeType: string })[]; isError?: boolean };
 
@@ -50,7 +56,7 @@ export function buildMcpServer(store: Store) {
     return store.view().pageId ? store.findPage(store.view().pageId!) : { notebook: nb, page: nb.pages[0], index: 0 };
   }
 
-  function describe(found: { notebook: { title: string; id: string; pages: Page[] }; page: Page; index: number }, region?: Region) {
+  async function describe(found: { notebook: { title: string; id: string; pages: Page[] }; page: Page; index: number }, region?: Region) {
     const { notebook, page, index } = found;
     const lines = [
       `Notebook "${notebook.title}" (id ${notebook.id}), page ${index + 1} of ${notebook.pages.length} (page id ${page.id}).`,
@@ -62,6 +68,10 @@ export function buildMcpServer(store: Store) {
       for (const d of doubts) lines.push(`- ${d.id}: [${d.region.x}, ${d.region.y}, ${d.region.w}, ${d.region.h}]`);
     }
     lines.push(syncStatus(page));
+    if (page.pdf) {
+      try { lines.push(...describePdfText(await pdfTextPage(store, page.pdf.file, page.pdf.page), region)); }
+      catch (error) { lines.push(`PDF text unavailable: ${(error as Error).message}`); }
+    }
     // When zoomed, only list handwriting that overlaps the zoomed area.
     const boxes = region
       ? page.textBoxes.filter((b) => b.x < region.x + region.w && b.x + b.w > region.x && b.y < region.y + region.h && b.y + b.h > region.y)
@@ -92,7 +102,7 @@ export function buildMcpServer(store: Store) {
   async function pageWithImage(found: NonNullable<ReturnType<typeof resolvePage>>, grid: boolean, zoom?: Region): Promise<ToolResult> {
     const region = zoom && clampRegion(zoom);
     const png = await renderPage(store, found.page, { grid, region });
-    let text = describe(found, region);
+    let text = await describe(found, region);
     if (region) text += `\nZoomed into x ${region.x}..${region.x + region.w}, y ${region.y}..${region.y + region.h}; grid labels are still page coordinates.`;
     return { content: [{ type: "text", text }, { type: "image", data: png.toString("base64"), mimeType: "image/png" }] };
   }
@@ -430,8 +440,9 @@ export function buildMcpServer(store: Store) {
       description:
         "Typeset a document and drop it into ClaudeBook as notebook pages the user can write on. Use it for worksheets, revision notes and practice questions. " +
         "Write Typst markup, not LaTeX (math is $x^2$ inline or $ x = (-b plus.minus sqrt(b^2 - 4a c)) / (2a) $ on its own line, #pagebreak() for new pages). " +
-        "Pages are A4. Leave generous blank space under each question for handwriting, e.g. #v(6cm). Makes a new notebook unless notebook_id is given (then pages are appended).",
-      inputSchema: { title: z.string(), typst: z.string().describe("Complete Typst source"), notebook_id: z.string().optional() },
+        "Pages are A4. Leave generous blank space under each question for handwriting, e.g. #v(6cm). Makes a new notebook unless notebook_id is given (then pages are appended). " +
+        `Offline packages (exact imports):\n${TYPST_IMPORTS}\nExample: #canvas({ draw.line((0,0),(2,1)); draw.circle((1,1),radius:0.4) }). PDF text with coordinates appears in view_page/get_current_page.`,
+      inputSchema: { title: z.string(), typst: z.string().describe(`Complete Typst source. Offline package imports:\n${TYPST_IMPORTS}`), notebook_id: z.string().optional() },
     },
     async ({ title, typst, notebook_id }) => {
       const prefixed = !/#set page\(/.test(typst);
