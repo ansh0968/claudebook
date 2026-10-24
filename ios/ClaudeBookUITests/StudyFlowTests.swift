@@ -296,6 +296,8 @@ final class StudyFlowTests: XCTestCase {
     private func requireCRUDReady(_ element: XCUIElement, timeout: TimeInterval = 12) throws {
         let ready = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == true AND enabled == true AND hittable == true"), object: element)
         guard XCTWaiter.wait(for: [ready], timeout: timeout) == .completed else {
+            // The smoke log is all CI evidence we can read, so record what was on screen instead.
+            print("UI hierarchy when \(element) was not ready:\n\(XCUIApplication().debugDescription)")
             XCTFail("Control did not become ready: \(element)")
             throw SmokeError.timeout
         }
