@@ -55,6 +55,8 @@ assert.ok(Math.abs(display["1"][0] - 120) < 1e-10 && Math.abs(display["1"][1] - 
 assert.deepEqual(rotated.atoms, storedAtoms, "Displaying rotated atoms must not change stored coordinates");
 assert.equal(moleculeAtomsForDisplay(molecule), molecule.atoms);
 assert.equal(moleculeAtomsForDisplay({ ...rotated, rotation: 0 }), rotated.atoms);
+assert.deepEqual(moleculeAtomsForDisplay({ ...rotated, rotation: 1e308 }), moleculeAtomsForDisplay({ ...rotated, rotation: 1e308 % 360 }));
+assert.ok(Object.values(moleculeAtomsForDisplay({ ...rotated, rotation: 1e308 })!).flat().every(Number.isFinite));
 // Physics translates its rotation centre alongside the prepared geometry.
 const shifted = { ...translateItem(rotated, 25, -12), rotation: rotated.rotation, rotation_center: [125, 88] as Point };
 const shiftedDisplay = moleculeAtomsForDisplay(shifted)!;

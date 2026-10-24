@@ -3,5 +3,6 @@ let libraryJSON = #"{"id":"combined","title":"Kept notes","pages":[],"createdAt"
 let libraryNotebook = try JSONDecoder().decode(Notebook.self, from: Data(libraryJSON.utf8))
 assert(libraryNotebook.folderId == "chemistry" && libraryNotebook.isScratch && libraryNotebook.expiryDate != nil)
 assert(libraryNotebook.deleteRequestedAt == "2026-10-24T01:00:00Z")
-assert(try JSONDecoder().decode(Notebook.self, from: JSONEncoder().encode(libraryNotebook)) == libraryNotebook)
+let libraryRoundTrip = try JSONDecoder().decode(Notebook.self, from: JSONEncoder().encode(libraryNotebook))
+assert(libraryRoundTrip == libraryNotebook)
 print("Combined folders, scratch expiry and pending deletion notebook model passed")
