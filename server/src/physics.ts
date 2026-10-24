@@ -1,6 +1,6 @@
 import { z } from "zod";
 import svgpath from "svgpath";
-import { pathBounds, pointBounds, type BBox, type Point } from "./geometry.js";
+import { pathBounds, pointBounds, strokePolyline, type BBox, type Point } from "./geometry.js";
 import type { Part } from "./parts.js";
 
 const pt = z.tuple([z.number(), z.number()]);
@@ -12,9 +12,9 @@ export const patternFields = {
   pattern_angle: z.number().optional().describe('Hatch angle in clockwise screen degrees, default 45. Example: pattern_angle:30'),
 };
 export const PhysicsSchemas = [
-  z.object({ type: z.literal("spring"), from: pt, to: pt, coils: z.number().int().min(1).max(100).optional(), amplitude: z.number().positive().optional(), ...style })
+  z.object({ type: z.literal("spring"), from: pt, to: pt, coils: z.number().int().min(1).max(100).optional().describe('Zigzag coils, default 6. Example: coils:8'), amplitude: z.number().positive().optional().describe('Coil amplitude in page units, default 15. Example: amplitude:12'), ...style })
     .describe('Zigzag spring with straight end leads, coils default 6, amplitude default 15 page units. Example: {type:"spring",from:[100,400],to:[400,400],coils:6,amplitude:15}'),
-  z.object({ type: z.literal("ground"), from: pt, to: pt, side: z.enum(["below", "above", "left", "right"]).optional(), hatch_length: z.number().positive().optional(), spacing: z.number().positive().optional(), ...style })
+  z.object({ type: z.literal("ground"), from: pt, to: pt, side: z.enum(["below", "above", "left", "right"]).optional().describe('Screen side for hatching, default below. Example: side:"left"'), hatch_length: z.number().positive().optional().describe('Hatch length in page units, default 14. Example: hatch_length:18'), spacing: z.number().positive().optional().describe('Distance between hatches, default 12. Example: spacing:16'), ...style })
     .describe('Surface with diagonal hatching on the requested screen side, including slanted inclines. side defaults below, hatch_length 14, spacing 12. Example: {type:"ground",from:[100,600],to:[650,350],side:"below"}'),
 ] as const;
 export type PhysicsInput = z.infer<typeof PhysicsSchemas[number]>;
@@ -30,14 +30,17 @@ export function preparePhysics(i: PhysicsInput): Part[] {
     const points: Point[] = [i.from, at(lead)];
     for (let n = 0; n < coils * 2; n++) points.push(at(lead + (length - lead * 2) * (n + 0.5) / (coils * 2), n % 2 ? -amplitude : amplitude));
     points.push(at(length - lead), i.to);
-    d = path(points);
+    // Use the common filled stroke geometry on both renderers, including the leads.
+    return [{ d: strokePolyline(points, i.width ?? 3), fill: i.color ?? "#D97757" }];
   } else {
     const spacing = i.spacing ?? 12, hatch = i.hatch_length ?? 14;
     if (length / spacing > 2000) throw new Error("Ground spacing produces more than 2000 hatch marks");
     const direction: Point = ({ below: [0, 1], above: [0, -1], left: [-1, 0], right: [1, 0] } as Record<string, Point>)[i.side ?? "below"];
     const sign = nx * direction[0] + ny * direction[1] >= 0 ? 1 : -1;
+    const alongSign = ux * direction[0] + uy * direction[1] >= 0 ? 1 : -1;
     d = path([i.from, i.to]);
-    for (let t = spacing / 2; t <= length; t += spacing) d += path([at(t), at(t - hatch * 0.5, sign * hatch * Math.sqrt(3) / 2)]);
+    // Both components project toward the requested screen side, even on steep slopes.
+    for (let t = spacing / 2; t <= length; t += spacing) d += path([at(t), at(t + alongSign * hatch * 0.5, sign * hatch * Math.sqrt(3) / 2)]);
   }
   return [{ d, stroke: i.color ?? "#D97757", width: i.width ?? 3 }];
 }
@@ -51,7 +54,7 @@ export function rectOutline(x: number, y: number, w: number, h: number): string 
   if (w < 0 || h < 0) throw new Error("Patterned rectangles need non-negative dimensions");
   return `M${x + r},${y}H${x + w - r}Q${x + w},${y} ${x + w},${y + r}V${y + h - r}Q${x + w},${y + h} ${x + w - r},${y + h}H${x + r}Q${x},${y + h} ${x},${y + h - r}V${y + r}Q${x},${y} ${x + r},${y}Z`;
 }
-export function patternParts(outline: string, pattern: "cross" | "dot" | "hatch", spacing = 20, angle = 45, color = "#D97757", width = 3, fill = "none"): Part[] {
+export function patternParts(outline: string, pattern: "cross" | "dot" | "hatch", spacing = 20, angle = 45, color = "#D97757", width = 3, fill = "none", outlined = true, dash?: number[]): Part[] {
   // Prepared paths use cubics so the generic iPad path parser needs no arc special case.
   outline = svgpath(outline).unarc().toString();
   const b = pathBounds(outline), parts: Part[] = [{ d: outline, fill }];
@@ -78,7 +81,7 @@ export function patternParts(outline: string, pattern: "cross" | "dot" | "hatch"
     if (rings) parts.push({ d: rings + symbols, stroke: color, width: 1.2, clip: outline });
     if (dots) parts.push({ d: dots, fill: color, clip: outline });
   }
-  parts.push({ d: outline, stroke: color, width });
+  if (outlined) parts.push({ d: outline, stroke: color, width, ...(dash ? { dash } : {}) });
   return parts;
 }
 export function rotatedBBox(b: BBox, degrees: number, center: Point = [b.x + b.w / 2, b.y + b.h / 2]): BBox {

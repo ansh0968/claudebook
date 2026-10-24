@@ -5,7 +5,8 @@ import path from "node:path";
 import sharp from "sharp";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { ItemSchema, itemBBox, itemToSvg, prepareItems, translateItem, type ItemInput } from "./items.js";
+import { ItemSchema, itemBBox, itemToSvg, prepareBatch, prepareItems, translateItem, type ItemInput } from "./items.js";
+import { flattenPath } from "./geometry.js";
 
 const near = (a: number, b: number, tolerance = 0.025) => assert.ok(Math.abs(a - b) < tolerance, `${a} != ${b}`);
 const inputs: ItemInput[] = [
@@ -37,8 +38,8 @@ for (const item of items.slice(7)) {
   assert.ok(item.parts!.some(p => p.clip));
   assert.match(itemToSvg(item), /clipPath/);
 }
-for (const side of ["below", "above", "left", "right"] as const) {
-  const from: [number, number] = [200, 200], to: [number, number] = side === "left" || side === "right" ? [230, 400] : [400, 250];
+for (const side of ["below", "above", "left", "right"] as const) for (const delta of [[200, 50], [20, 200], [-200, 50], [20, -200], [0, 200], [200, 0]]) {
+  const from: [number, number] = [400, 400], to: [number, number] = [from[0] + delta[0], from[1] + delta[1]];
   const ground = prepareItems([{ type: "ground", from, to, side }])[0];
   const segments = [...ground.parts![0].d.matchAll(/M([\d.e+-]+),([\d.e+-]+)L([\d.e+-]+),([\d.e+-]+)/g)].slice(1);
   for (const s of segments) {
@@ -46,12 +47,39 @@ for (const side of ["below", "above", "left", "right"] as const) {
     assert.ok(side === "below" ? dy > 0 : side === "above" ? dy < 0 : side === "left" ? dx < 0 : dx > 0);
   }
 }
+for (const type of ["text", "math"] as const) for (const anchor of ["top-left", "top-center", "top-right", "left-center", "center", "right-center", "bottom-left", "bottom-center", "bottom-right"] as const) {
+  const input = type === "text" ? { type, x: 500, y: 500, text: "Anchor test", anchor } : { type, x: 500, y: 500, latex: "\\frac{x^2}{2}", anchor };
+  const plain = prepareItems([input])[0], rotated = prepareItems([{ ...input, rotation: 30 }])[0];
+  const b = itemBBox(plain), r = itemBBox(rotated);
+  near(rotated.rotation_center![0], b.x + b.w / 2); near(rotated.rotation_center![1], b.y + b.h / 2);
+  near(r.w, b.w * Math.cos(radians) + b.h * Math.sin(radians));
+  near(r.h, b.w * Math.sin(radians) + b.h * Math.cos(radians));
+  assert.equal("anchor" in rotated, false);
+  const moved = itemBBox(translateItem(rotated, 17, -23));
+  near(moved.x, r.x + 17); near(moved.y, r.y - 23);
+}
+for (const shape of [{ type: "rect", x: 100, y: 100, w: 100, h: 80 }, { type: "ellipse", center: [150, 140], rx: 50, ry: 40 }, { type: "svg", d: "M100,100h100v80h-100Z" }] as ItemInput[]) {
+  const item = prepareItems([{ ...shape, fill: "blue", fill_pattern: "cross", rotation: 30 } as ItemInput])[0];
+  assert.ok(item.parts!.some(p => p.fill === "blue"));
+  assert.ok(item.parts!.filter(p => p.stroke).every(p => p.clip), "fill without color must not gain a shape outline");
+  const b = itemBBox(prepareItems([{ ...shape, fill: "blue" } as ItemInput])[0]);
+  near(item.rotation_center![0], b.x + b.w / 2); near(item.rotation_center![1], b.y + b.h / 2);
+}
+const patternedHead = prepareItems([{ type: "svg", d: "M100,100h100v80h-100Z", fill_pattern: "hatch", dashed: true, head: "both", head_filled: true, rotation: 20 }])[0];
+assert.ok(patternedHead.parts!.some(p => p.d === patternedHead.head_d && p.fill === "#D97757" && !p.dash));
+assert.ok(patternedHead.parts!.some(p => p.dash?.join() === "10,8"));
+const spring = prepareItems([{ type: "spring", from: [100, 100], to: [400, 100] }])[0];
+assert.ok(spring.parts![0].fill && !spring.parts![0].stroke);
+const springPoints = flattenPath(spring.parts![0].d).flat();
+near(Math.min(...springPoints.map(p => p[0])), 100); near(Math.max(...springPoints.map(p => p[0])), 400);
+const partial = prepareBatch([{ type: "spring", from: [10, 10], to: [10, 10] }, { type: "rect", x: 100, y: 100, w: 80, h: 60, rotation: 30 }]);
+assert.equal(partial.items.length, 1); assert.equal(partial.warnings.length, 1); assert.match(partial.warnings[0].warning, /endpoints/);
 assert.throws(() => prepareItems([{ type: "spring", from: [10, 10], to: [10, 10] }]), /endpoints/);
 assert.throws(() => prepareItems([{ type: "rect", x: 0, y: 0, w: 1000, h: 1000, fill_pattern: "cross", pattern_spacing: 0.001 }]), /10000/);
 const output = path.join(process.env.CLAUDEBOOK_TEST_ARTIFACTS ?? os.tmpdir(), "claudebook-physics.png");
 fs.mkdirSync(path.dirname(output), { recursive: true });
 await sharp(Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="1000"><rect width="1000" height="1000" fill="white"/>${items.map(itemToSvg).join("")}</svg>`)).png().toFile(output);
-console.log(`[physics] rotations, all patterns, spring, ground sides, bbox corners and translations passed; preview ${output}`);
+console.log(`[physics] rotations + all anchors, fill-only patterns, SVG heads/dashes, spring leads, all ground sides/slopes, bbox corners and translations passed; preview ${output}`);
 
 if (process.env.CLAUDEBOOK_SECRET) {
   const client = new Client({ name: "physics-selftest", version: "1" });

@@ -25,7 +25,7 @@ if (scene === "physics") {
     { type: "ground", from: [90, 400], to: [90, 690], side: "left", color: "black" },
     { type: "rect", x: 350, y: 400, w: 180, h: 110, rotation: -30, fill: "#DCE8F5", color: "black" },
     { type: "spring", from: [90, 600], to: [360, 443], coils: 7, amplitude: 14, color: "#3B82F6" },
-    { type: "text", x: 380, y: 345, text: "block", rotation: -30, color: "black" },
+    { type: "text", x: 425, y: 365, text: "block", anchor: "center", rotation: -30, color: "black" },
     { type: "math", x: 680, y: 400, latex: "F = kx", rotation: 30 },
     { type: "rect", x: 100, y: 900, w: 200, h: 160, fill_pattern: "cross", pattern_spacing: 25, rotation: 30, fill: "#EBF2F9", color: "#253A46" },
     { type: "ellipse", center: [500, 980], rx: 100, ry: 65, fill_pattern: "dot", rotation: -20, color: "#253A46" },

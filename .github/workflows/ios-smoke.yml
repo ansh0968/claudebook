@@ -177,6 +177,8 @@ jobs:
       - name: Physics acceptance scene
         working-directory: ios
         run: |
+          cat ClaudeBook/Models.swift ../scripts/test-physics-models.swift > "$RUNNER_TEMP/physics-model-test.swift"
+          swift "$RUNNER_TEMP/physics-model-test.swift"
           UDID=$(xcrun simctl list devices available -j | jq -r '[.devices[][] | select(.name | test("iPad Pro"))][0].udid')
           xcrun simctl terminate "$UDID" in.clarifiq.claudebook || true
           node ../scripts/physics-fixture.mjs
@@ -208,10 +210,14 @@ jobs:
         working-directory: ios
         run: |
           [ -d shots ] || exit 0
-          cp -R shots $RUNNER_TEMP/shots
-          cd $RUNNER_TEMP && rm -rf pub && mkdir pub && cd pub
-          git init -q -b ci-screenshots
-          cp ../shots/*.png .
-          echo "Smoke test for ${GITHUB_SHA::7}, run $GITHUB_RUN_ID" > README.md
-          git add . && git -c user.name=claudebook-ci -c user.email=ci@users.noreply.github.com commit -qm "Screenshots for ${GITHUB_SHA::7}"
-          git push -qf "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" ci-screenshots
+          # Keep each branch/run's evidence without replacing previous smoke results.
+          git fetch origin refs/heads/ci-screenshots:refs/remotes/origin/ci-screenshots
+          git worktree add "$RUNNER_TEMP/smoke-pub" origin/ci-screenshots
+          TARGET="$RUNNER_TEMP/smoke-pub/runs/${GITHUB_REF_NAME//\//-}/$GITHUB_RUN_ID"
+          mkdir -p "$TARGET"
+          cp shots/*.png "$TARGET/"
+          echo "Smoke test for $GITHUB_SHA, run $GITHUB_RUN_ID" > "$TARGET/README.md"
+          cd "$RUNNER_TEMP/smoke-pub"
+          git add .
+          git -c user.name=claudebook-ci -c user.email=ci@users.noreply.github.com commit -qm "Screenshots for ${GITHUB_SHA::7}"
+          git push origin HEAD:ci-screenshots
