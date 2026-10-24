@@ -8,12 +8,15 @@ import { renderMolecule } from "./molecule.js";
 import svgpath from "svgpath";
 import { arrowPath, pathBounds, pointBounds, type BBox, type Point } from "./geometry.js";
 
-const pt = z.tuple([z.number(), z.number()]).describe("[x, y] in page coordinates");
+// A plain length-2 array rather than z.tuple: tuples become `items: [...]` in JSON Schema,
+// which ChatGPT's connector rejects (it wants `items` to be one schema).
+const pt = z.array(z.number()).length(2).describe("[x, y] in page coordinates") as unknown as z.ZodType<Point>;
 const color = z.string().optional().describe("CSS color, default Claude orange #D97757. Use red #E5484D for mistakes, green #30A46C for corrections");
 const width = z.number().positive().optional().describe("Stroke width in page units, default 3");
 const group = z.string().optional().describe("Optional name for related items, so they can be erased together");
 
-export const ItemSchema = z.discriminatedUnion("type", [
+// z.union, not discriminatedUnion: the latter becomes `oneOf`, and OpenAI's tool schemas only take `anyOf`.
+export const ItemSchema = z.union([
   z.object({ type: z.literal("path"), points: z.array(pt).min(2), color, width, closed: z.boolean().optional(), smooth: z.boolean().optional(), group })
     .describe("Freehand stroke through the points; smooth defaults true, false joins points with straight segments"),
   z.object({ type: z.literal("line"), from: pt, to: pt, color, width, dashed: z.boolean().optional(), group }),
