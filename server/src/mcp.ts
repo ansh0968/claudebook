@@ -1,7 +1,7 @@
 // The tools Claude sees once ClaudeBook is added as a connector in the Claude app.
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { LooseItemSchema, itemBBox, itemLabel, offPageWarning, prepareBatch, translateItem, type Item, type ItemWarning } from "./items.js";
+import { LooseItemSchema, itemBBox, itemLabel, moleculeAtomsForDisplay, offPageWarning, prepareBatch, translateItem, type Item, type ItemWarning } from "./items.js";
 import { compileTypst, downloadPdf, savePdf } from "./pdf.js";
 import { clampRegion, renderPage, type Region } from "./render.js";
 import { PAGE_H, PAGE_W, type Page, type Store } from "./store.js";
@@ -33,7 +33,7 @@ function ago(iso: string) {
   const s = Math.max(0, Math.round((Date.now() - Date.parse(iso)) / 1000));
   return s < 90 ? `${s}s ago` : s < 5400 ? `${Math.round(s / 60)} min ago` : s < 172800 ? `${Math.round(s / 3600)} h ago` : `${Math.round(s / 86400)} days ago`;
 }
-const describeItem = (item: Item) => ({ id: item.id, type: item.type, label: itemLabel(item), bbox: itemBBox(item), ...(item.group !== undefined ? { group: item.group } : {}), ...(item.atoms ? { atoms: item.atoms, elements: item.elements } : {}) });
+const describeItem = (item: Item) => ({ id: item.id, type: item.type, label: itemLabel(item), bbox: itemBBox(item), ...(item.group !== undefined ? { group: item.group } : {}), ...(item.atoms ? { atoms: moleculeAtomsForDisplay(item), elements: item.elements } : {}) });
 
 export function buildMcpServer(store: Store) {
   const server = new McpServer({ name: "claudebook", version: "0.1.0" }, { instructions: INSTRUCTIONS });

@@ -53,6 +53,18 @@ export type ItemInput = z.infer<typeof ItemSchema>;
 /** Stored items carry generated outline d, arrowhead outline head_d and dimensions where appropriate. */
 export type Item = ItemInput & { id: string; createdAt: string; d?: string; w?: number; h?: number; head_d?: string; head_filled?: boolean; atoms?: Record<string, Point>; elements?: Record<string, string> };
 
+/** Expose atom targets where the rendered molecule is, while keeping stored coordinates unrotated.
+ * Rotation metadata is optional so this composes with the separate physics drawing feature.
+ */
+export function moleculeAtomsForDisplay(item: Item & { rotation?: number; rotation_center?: Point }): Record<string, Point> | undefined {
+  if (!item.atoms || !item.rotation || !item.rotation_center) return item.atoms;
+  const angle = item.rotation * Math.PI / 180, cos = Math.cos(angle), sin = Math.sin(angle);
+  const [cx, cy] = item.rotation_center;
+  return Object.fromEntries(Object.entries(item.atoms).map(([id, [x, y]]) => [id,
+    [cx + (x - cx) * cos - (y - cy) * sin, cy + (x - cx) * sin + (y - cy) * cos] as Point,
+  ]));
+}
+
 /** Fractions of the item's width and height that each anchor sits at. */
 const ANCHORS: Record<NonNullable<z.infer<typeof anchor>>, [number, number]> = {
   "top-left": [0, 0], "top-center": [0.5, 0], "top-right": [1, 0], "left-center": [0, 0.5], center: [0.5, 0.5],
