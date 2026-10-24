@@ -115,6 +115,33 @@ export class Store {
     return this.db.notebooks;
   }
 
+  /** Rename a notebook. Returns undefined if it doesn't exist. */
+  renameNotebook(id: string, title: string) {
+    const nb = this.getNotebook(id);
+    if (!nb) return;
+    nb.title = title;
+    nb.updatedAt = now();
+    this.save();
+    this.emit({ type: "notebook", notebookId: id });
+    return nb;
+  }
+
+  /** Remove a notebook and its page files. PDFs stay, since another notebook may share one. */
+  deleteNotebook(id: string) {
+    const nb = this.getNotebook(id);
+    if (!nb) return false;
+    this.db.notebooks = this.db.notebooks.filter((n) => n.id !== id);
+    for (const page of nb.pages) {
+      fs.rmSync(this.snapshotPath(page.id), { force: true });
+      fs.rmSync(this.drawingPath(page.id), { force: true });
+    }
+    if (this.db.view.notebookId === id) this.db.view = { notebookId: null, pageId: null, updatedAt: now() };
+    if (this.db.notebooks.length === 0) this.seed();
+    this.save();
+    this.emit({ type: "notebook", notebookId: id });
+    return true;
+  }
+
   getNotebook(id: string) {
     return this.db.notebooks.find((n) => n.id === id);
   }

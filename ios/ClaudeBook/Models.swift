@@ -97,6 +97,17 @@ struct Notebook: Codable, Identifiable, Hashable {
     var pages: [Page]
     var createdAt: String
     var updatedAt: String
+
+    /// Latest change to the notebook or any page (ink upload, Claude's marks). ISO strings sort by time.
+    var lastActivity: String { pages.map(\.updatedAt).reduce(updatedAt) { max($0, $1) } }
+
+    var lastActivityDate: Date? {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f.date(from: lastActivity) ?? ISO8601DateFormatter().date(from: lastActivity)
+    }
+
+    var openDoubts: Int { pages.reduce(0) { $0 + ($1.doubts ?? []).filter(\.isOpen).count } }
 }
 
 struct ViewState: Codable {

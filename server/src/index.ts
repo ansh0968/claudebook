@@ -111,6 +111,17 @@ api.get("/notebooks/:id", (req, res) => {
   nb ? res.json(nb) : res.status(404).json({ error: "not found" });
 });
 
+api.patch("/notebooks/:id", (req, res) => {
+  const title = typeof req.body?.title === "string" ? req.body.title.trim() : "";
+  if (!title || title.length > 200) return res.status(400).json({ error: "title must be 1-200 characters" });
+  const nb = store.renameNotebook(req.params.id, title);
+  nb ? res.json(nb) : res.status(404).json({ error: "not found" });
+});
+
+api.delete("/notebooks/:id", (req, res) => {
+  store.deleteNotebook(req.params.id) ? res.json({ ok: true }) : res.status(404).json({ error: "not found" });
+});
+
 api.post("/notebooks/:id/pages", (req, res) => {
   const { count, afterIndex, background } = req.body as { count?: number; afterIndex?: number; background?: Background };
   try {

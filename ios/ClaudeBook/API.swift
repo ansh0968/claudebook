@@ -92,6 +92,15 @@ struct API {
         return try decode(Notebook.self, await request("notebooks", method: "POST", json: Body(title: title, pages: 1, background: background)))
     }
 
+    func renameNotebook(_ id: String, title: String) async throws {
+        struct Body: Encodable { var title: String }
+        _ = try await request("notebooks/\(id)", method: "PATCH", json: Body(title: title))
+    }
+
+    func deleteNotebook(_ id: String) async throws {
+        _ = try await request("notebooks/\(id)", method: "DELETE")
+    }
+
     func addPage(notebookId: String, afterIndex: Int, background: PageBackground) async throws {
         struct Body: Encodable { var count: Int; var afterIndex: Int; var background: PageBackground }
         _ = try await request("notebooks/\(notebookId)/pages", method: "POST", json: Body(count: 1, afterIndex: afterIndex, background: background))

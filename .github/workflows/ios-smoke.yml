@@ -145,6 +145,11 @@ jobs:
           xcrun simctl launch "$UDID" in.clarifiq.claudebook
           sleep 5
           xcrun simctl io "$UDID" screenshot shots/12-library-refreshed.png
+          # First-run screen, as seen after a fresh install (empty secret, nothing in the Keychain).
+          xcrun simctl terminate "$UDID" in.clarifiq.claudebook
+          SIMCTL_CHILD_CLAUDEBOOK_SECRET= xcrun simctl launch "$UDID" in.clarifiq.claudebook
+          sleep 4
+          xcrun simctl io "$UDID" screenshot shots/13-setup.png
       - uses: actions/upload-artifact@v4
         if: always()
         with:
