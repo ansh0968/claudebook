@@ -62,7 +62,7 @@ export type Item = ItemInput & { id: string; createdAt: string; d?: string; w?: 
  */
 export function moleculeAtomsForDisplay(item: Item & { rotation?: number; rotation_center?: Point }): Record<string, Point> | undefined {
   if (!item.atoms || !item.rotation || !item.rotation_center) return item.atoms;
-  const angle = item.rotation * Math.PI / 180, cos = Math.cos(angle), sin = Math.sin(angle);
+  const angle = (item.rotation % 360) * Math.PI / 180, cos = Math.cos(angle), sin = Math.sin(angle);
   const [cx, cy] = item.rotation_center;
   return Object.fromEntries(Object.entries(item.atoms).map(([id, [x, y]]) => [id,
     [cx + (x - cx) * cos - (y - cy) * sin, cy + (x - cx) * sin + (y - cy) * cos] as Point,
