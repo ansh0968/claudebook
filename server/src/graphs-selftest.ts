@@ -15,7 +15,12 @@ for (const name of ["sin", "cos", "tan", "asin", "acos", "atan", "sinh", "cosh",
 near(parseExpression("log(100)+ln(e)")(0), 3);
 near(parseExpression("sin(t)", "t")(Math.PI / 2), 1);
 for (const invalid of ["process.exit()", "constructor", "x;y", "x.y", "x[0]", "2**3", "sin()", "foo(x)", "(x+1", "", "(".repeat(70) + "1" + ")".repeat(70)]) assert.throws(() => parseExpression(invalid), /position/);
-assert.throws(() => expressionNumber("t"), /finite/);
+assert.throws(() => expressionNumber("t"), /position/);
+assert.throws(() => expressionNumber("t^0"), /position/);
+assert.throws(() => expressionNumber("1e309"), /finite/);
+assert.throws(() => expressionNumber("exp(1000)"), /finite/);
+assert.equal(parseExpression(Array(1000).fill("1").join("+"))(0), 1000);
+assert.throws(() => parseExpression("1".repeat(2001)), /2000/);
 const inputs: ItemInput[] = [
   { type: "axes", origin: [300, 700], xrange: [-2, 5], yrange: [-1, 4], unit: [70, 90], name: "g1", grid: true, color: "black" },
   { type: "shade", axes: "g1", fn1: "x^2/2", fn2: "axis", from: 0, to: 2, color: "#3B82F6" },
@@ -69,6 +74,39 @@ for (const part of clipped.parts!) {
   const b = pathBounds(part.d);
   assert.ok(b.x >= 160 && b.x + b.w <= 650 && b.y >= 340 && b.y + b.h <= 790, "Shade polygon should be geometrically clipped");
 }
+// Empty, clipped-away and non-finite plots still have a stable movable bbox.
+for (const fn of ["sqrt(-1)", "1/0", "1e200", "exp(1000)"]) {
+  const empty = prepareItems([{ type: "plot", axes: "g1", fn }], items)[0];
+  assert.deepEqual(empty.parts, []);
+  assert.deepEqual(itemBBox(empty), { x: 300, y: 700, w: 0, h: 0 });
+  assert.deepEqual(itemBBox(translateItem(empty, 15, -20)), { x: 315, y: 680, w: 0, h: 0 });
+}
+const extreme = prepareItems([{ type: "axes", origin: [0, 0], xrange: [0, 1], yrange: [-1, 1], unit: 1e20, ticks: false, labels: false, name: "large" }]);
+assert.throws(() => prepareItems([{ type: "plot", axes: "large", fn: "0", dashed: true }], extreme), /20000 segments|numeric precision/);
+const overflowBatch = prepareBatch([{ type: "shade", axes: "g1", fn1: "1e308" }, { type: "point", at: [100, 100] }], items);
+assert.equal(overflowBatch.items.length, 1); assert.equal(overflowBatch.warnings.length, 1);
+// A finite long interval must not overflow solely due to the sample index.
+const longInterval = prepareItems([{ type: "plot", axes: "g1", x: "t/1e307", y: "0", t: [0, 1e308] }], items)[0];
+assert.ok(itemBBox(longInterval).w > 300, "Expected points beyond the first two samples");
+const cropAxes = prepareItems([{ type: "axes", origin: [150, 150], xrange: [-0.5, 0.5], yrange: [-1.5, 1.5], unit: 80, name: "crop", ticks: false, labels: false }]);
+const croppedCircle = prepareItems([{ type: "plot", axes: "crop", x: "cos(t)", y: "sin(t)", t: [0, "2pi"], color: "black" }], cropAxes)[0];
+const circleBox = itemBBox(croppedCircle);
+near(circleBox.x, 110); near(circleBox.w, 80);
+const circlePixels = await sharp(Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg" width="300" height="300"><rect width="300" height="300" fill="white"/>${itemToSvg(croppedCircle)}</svg>`)).raw().toBuffer({ resolveWithObject: true });
+const darkAt = (x: number, y: number) => circlePixels.data[(y * 300 + x) * circlePixels.info.channels] < 128;
+assert.ok(darkAt(150, 70) && darkAt(150, 230), "Both circle arcs must survive clipping");
+assert.ok(!darkAt(110, 150) && !darkAt(190, 150), "Clipping an open stroke must not add vertical viewport edges");
+const poleShade = prepareItems([{ type: "shade", axes: "g1", fn1: "1/(x-0.003)", from: -1, to: 1 }], items)[0];
+assert.ok(poleShade.parts!.length >= 2);
+for (const part of poleShade.parts!) {
+  const b = pathBounds(part.d);
+  assert.ok(b.x + b.w < 301 || b.x > 299, "A shaded component must not bridge the pole");
+}
+const crossing = prepareItems([{ type: "shade", axes: "g1", fn1: "x", fn2: "-x", from: -2, to: 2, color: "black", opacity: 1 }], items)[0];
+const shadePixels = await sharp(Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg" width="800" height="900"><rect width="800" height="900" fill="white"/>${itemToSvg(crossing)}</svg>`)).raw().toBuffer({ resolveWithObject: true });
+const shadeAt = (x: number, y: number) => shadePixels.data[(y * 800 + x) * shadePixels.info.channels] < 128;
+assert.ok(shadeAt(230, 700) && shadeAt(370, 700), "Shade must fill both sides of a curve crossing");
+assert.ok(!shadeAt(300, 650), "No spurious bridge through the crossing");
 const output = path.join(process.env.CLAUDEBOOK_TEST_ARTIFACTS ?? os.tmpdir(), "claudebook-graphs.png");
 fs.mkdirSync(path.dirname(output), { recursive: true });
 await sharp(Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="1000"><rect width="1000" height="1000" fill="white"/>${items.map(itemToSvg).join("")}</svg>`)).png().toFile(output);

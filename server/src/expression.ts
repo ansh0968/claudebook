@@ -5,7 +5,7 @@ const functions: Record<string, (x: number) => number> = {
   sinh: Math.sinh, cosh: Math.cosh, tanh: Math.tanh, log: Math.log10, ln: Math.log,
   exp: Math.exp, sqrt: Math.sqrt, abs: Math.abs, floor: Math.floor, ceil: Math.ceil,
 };
-export function parseExpression(source: string, variable: "x" | "t" = "x"): Expr {
+export function parseExpression(source: string, variable: "x" | "t" | null = "x"): Expr {
   if (source.length > 2000) throw new Error("Expression exceeds 2000 characters at position 2000");
   let pos = 0, depth = 0;
   let token = "", tokenPos = 0;
@@ -78,7 +78,7 @@ export function parseExpression(source: string, variable: "x" | "t" = "x"): Expr
 }
 
 export function expressionNumber(value: number | string): number {
-  const result = typeof value === "number" ? value : parseExpression(value, "t")(NaN);
+  const result = typeof value === "number" ? value : parseExpression(value, null)(0);
   if (!Number.isFinite(result)) throw new Error(`Expected a finite constant expression, got ${JSON.stringify(value)}`);
   return result;
 }

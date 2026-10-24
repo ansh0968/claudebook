@@ -117,7 +117,7 @@ export function prepareGraph(i: GraphInput, available: Reference[]): { parts: Pa
   const fx = parametric && i.type === "plot" ? parseExpression(i.x!, "t") : (x: number) => x;
   const f2 = i.type === "shade" && i.fn2 && i.fn2 !== "axis" ? parseExpression(i.fn2) : () => 0;
   const data = Array.from({ length: samples + 1 }, (_, n) => {
-    const v = from + (to - from) * n / samples;
+    const v = from + (to - from) * (n / samples);
     return [fx(v), f(v), f2(v)];
   });
   const spanX = g.xrange[1] - g.xrange[0], spanY = g.yrange[1] - g.yrange[0];
@@ -128,8 +128,9 @@ export function prepareGraph(i: GraphInput, available: Reference[]): { parts: Pa
     const rect = { x: p0[0], y: p0[1], w: spanX * g.unit[0], h: spanY * g.unit[1] };
     let run: Point[] = [];
     const outlines: string[] = [];
+    const dashBudget = { segments: 0 };
     const flush = () => {
-      const runs = i.dashed ? dashedRuns(run) : [run];
+      const runs = i.dashed ? dashedRuns(run, dashBudget) : [run];
       for (const points of runs) if (points.length > 1) {
         const d = clipPathToRect(strokePolyline(points, width), rect);
         if (d) outlines.push(d);
@@ -139,6 +140,7 @@ export function prepareGraph(i: GraphInput, available: Reference[]): { parts: Pa
     for (const v of data) {
       if (!v.every(Number.isFinite)) { flush(); continue; }
       const p = pagePoint(g, v[0], v[1]), prev = run.at(-1);
+      if (!p.every(Number.isFinite)) { flush(); continue; }
       if (prev && (Math.abs(prev[0] - p[0]) > rect.w || Math.abs(prev[1] - p[1]) > rect.h)) flush();
       run.push(p);
     }
@@ -166,14 +168,18 @@ export function prepareGraph(i: GraphInput, available: Reference[]): { parts: Pa
 }
 
 /** Dashes follow page distance along the sampled curve, including across its joints. */
-function dashedRuns(points: Point[]): Point[][] {
+function dashedRuns(points: Point[], budget: { segments: number }): Point[][] {
   const runs: Point[][] = [];
   let on = true, remaining = 10, run: Point[] = [];
   for (let n = 1; n < points.length; n++) {
     const a = points[n - 1], b = points[n], length = Math.hypot(b[0] - a[0], b[1] - a[1]);
     let used = 0;
     while (used < length) {
+      // Bound the generated geometry as well as input samples. Very large axes
+      // can contain billions of page-length dashes despite having only two samples.
+      if (++budget.segments > 20000) throw new Error("Dashed plot exceeds 20000 segments; reduce the axes scale or plot interval");
       const next = Math.min(length, used + remaining);
+      if (!Number.isFinite(length) || next <= used) throw new Error("Dashed plot coordinates exceed numeric precision");
       const at = (d: number): Point => [a[0] + (b[0] - a[0]) * d / length, a[1] + (b[1] - a[1]) * d / length];
       if (on) { if (!run.length) run.push(at(used)); run.push(at(next)); }
       remaining -= next - used; used = next;

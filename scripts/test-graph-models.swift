@@ -7,3 +7,13 @@ let legacyJSON = #"{"id":"legacy","type":"line","from":[1,2],"to":[3,4]}"#
 let legacyItem = try JSONDecoder().decode(ClaudeItem.self, from: Data(legacyJSON.utf8))
 assert(legacyItem.from == [1, 2] && legacyItem.to == [3, 4])
 print("Graph and legacy drawing model decoding passed")
+
+let shadeJSON = #"{"id":"shade","type":"shade","from":-2,"to":2,"parts":[{"d":"M0 0L10 0L10 10Z","fill":"blue","opacity":0.25,"clip":"M0 0H10V10H0Z"}]}"#
+let shadeItem = try JSONDecoder().decode(ClaudeItem.self, from: Data(shadeJSON.utf8))
+assert(shadeItem.from == nil && shadeItem.to == nil && shadeItem.parts?.first?.opacity == 0.25)
+let headsJSON = #"{"id":"heads","type":"arrow","from":[1,2],"to":[3,4],"head":"both","head_filled":true,"head_d":"M1 2L3 4"}"#
+let headsItem = try JSONDecoder().decode(ClaudeItem.self, from: Data(headsJSON.utf8))
+assert(headsItem.head == "both" && headsItem.headFilled == true && headsItem.headD != nil)
+let encodedHeads = try JSONDecoder().decode(ClaudeItem.self, from: JSONEncoder().encode(headsItem))
+assert(encodedHeads == headsItem)
+print("Shade scalars, prepared styles and rendering arrowheads decoding passed")
