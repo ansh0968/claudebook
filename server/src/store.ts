@@ -131,7 +131,10 @@ export class Store {
   }
 
   private emit(e: StoreEvent) {
-    for (const fn of this.listeners) fn(e);
+    for (const fn of this.listeners) {
+      try { fn(e); }
+      catch (error) { console.warn(`Live update listener failed: ${(error as Error).message}`); }
+    }
   }
 
   listNotebooks() {
@@ -171,9 +174,10 @@ export class Store {
   deleteNotebook(id: string) {
     const nb = this.getNotebook(id);
     if (!nb) return false;
+    const previous = this.pageCheckpoint();
     this.db.notebooks = this.db.notebooks.filter((n) => n.id !== id);
     if (this.db.view.notebookId === id) this.db.view = { notebookId: null, pageId: null, updatedAt: now() };
-    this.save();
+    this.savePageChange(previous);
     for (const page of nb.pages) this.removePageFiles(page.id);
     this.emit({ type: "notebook", notebookId: id });
     return true;
@@ -313,8 +317,18 @@ export class Store {
     return at;
   }
 
+  /** Structural edits replace page arrays, never their ink/path payloads. */
+  private pageCheckpoint(): DB {
+    return { ...this.db, notebooks: this.db.notebooks.map(nb => ({ ...nb, pages: [...nb.pages] })), view: { ...this.db.view } };
+  }
+
+  private savePageChange(previous: DB) {
+    try { this.save(); }
+    catch (error) { this.db = previous; throw error; }
+  }
+
   /** Preserve the selected page by id through reorders and cross-notebook moves. */
-  private finishPageChange(notebooks: Notebook[], fallbackIndex = 0) {
+  private finishPageChange(notebooks: Notebook[], previousDatabase: DB, fallbackIndex = 0) {
     const previous = this.db.view;
     const current = previous.pageId ? this.findPage(previous.pageId) : undefined;
     const nb = current?.notebook ?? (previous.notebookId ? this.getNotebook(previous.notebookId) : undefined);
@@ -323,7 +337,7 @@ export class Store {
     const changed = notebookId !== previous.notebookId || pageId !== previous.pageId;
     if (changed) this.db.view = { notebookId, pageId, updatedAt: now() };
     for (const notebook of notebooks) notebook.updatedAt = now();
-    this.save();
+    this.savePageChange(previousDatabase);
     for (const notebook of notebooks) this.emit({ type: "notebook", notebookId: notebook.id });
     if (changed && notebookId && pageId) this.openPage(notebookId, pageId);
   }
@@ -334,10 +348,11 @@ export class Store {
     if (!nb) throw new Error("Notebook not found. Nothing was changed.");
     const selected = this.selectedPages(ids);
     if (selected.some(p => p.notebook.id !== nb.id)) throw new Error("All deleted page ids must belong to this notebook. Nothing was changed.");
+    const previous = this.pageCheckpoint();
     const currentIndex = nb.pages.findIndex(p => p.id === this.db.view.pageId), chosen = new Set(ids);
     const survivingBefore = nb.pages.slice(0, Math.max(0, currentIndex)).filter(p => !chosen.has(p.id)).length;
     nb.pages = nb.pages.filter(p => !chosen.has(p.id));
-    this.finishPageChange([nb], survivingBefore);
+    this.finishPageChange([nb], previous, survivingBefore);
     for (const { page } of selected) this.removePageFiles(page.id);
     return nb;
   }
@@ -347,8 +362,9 @@ export class Store {
     if (!nb) throw new Error("Notebook not found. Nothing was changed.");
     const byId = new Map(nb.pages.map(p => [p.id, p]));
     if (ids.length !== nb.pages.length || new Set(ids).size !== ids.length || ids.some(id => !byId.has(id))) throw new Error("page_ids must list every existing page exactly once. Nothing was changed.");
+    const previous = this.pageCheckpoint();
     nb.pages = ids.map(id => byId.get(id)!);
-    this.finishPageChange([nb]);
+    this.finishPageChange([nb], previous);
     return nb;
   }
 
@@ -357,11 +373,12 @@ export class Store {
     if (!target) throw new Error("Target notebook not found. Nothing was changed.");
     const chosen = new Set(ids), remaining = target.pages.filter(p => !chosen.has(p.id));
     const at = this.insertionCount(afterPage, remaining.length);
+    const previous = this.pageCheckpoint();
     const affected = [...new Set([...selected.map(p => p.notebook), target])];
     for (const nb of affected) nb.pages = nb.pages.filter(p => !chosen.has(p.id));
     const pages = selected.map(p => p.page);
     target.pages.splice(at, 0, ...pages);
-    this.finishPageChange(affected);
+    this.finishPageChange(affected, previous);
     return { notebook: target, pages };
   }
 
@@ -369,6 +386,7 @@ export class Store {
     const selected = this.selectedPages(ids), target = this.getNotebook(targetNotebookId ?? selected[0].notebook.id);
     if (!target) throw new Error("Target notebook not found. Nothing was changed.");
     const at = this.insertionCount(afterPage, target.pages.length), copiedFiles: string[] = [];
+    const previous = this.pageCheckpoint();
     let pages: Page[];
     try {
       pages = selected.map(({ page }) => {
@@ -382,18 +400,18 @@ export class Store {
         copy.doubts = copy.doubts.map(d => ({ ...d, id: nanoid(10), pageId: copy.id, createdAt: now() }));
         for (const file of [this.snapshotPath.bind(this), this.drawingPath.bind(this)]) {
           if (fs.existsSync(file(page.id))) {
-            fs.copyFileSync(file(page.id), file(copy.id));
             copiedFiles.push(file(copy.id));
+            fs.copyFileSync(file(page.id), file(copy.id));
           }
         }
         return copy;
       });
+      target.pages.splice(at, 0, ...pages);
+      this.finishPageChange([target], previous);
     } catch (e) {
       for (const file of copiedFiles) fs.rmSync(file, { force: true });
       throw e;
     }
-    target.pages.splice(at, 0, ...pages);
-    this.finishPageChange([target]);
     return { notebook: target, pages };
   }
 

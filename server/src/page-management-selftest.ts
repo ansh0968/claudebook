@@ -71,6 +71,28 @@ try {
   store.setView(neighbors.id, original[3].id);
   store.deletePages(neighbors.id, [original[0].id, original[3].id]);
   assert.equal(store.view().pageId, original[4].id, "Multi-delete must choose the next original surviving neighbor");
+  const faultSource = store.createNotebook("Save failure", 2), faultTarget = store.createNotebook("Save failure target", 1);
+  const [fa, fb] = faultSource.pages.map(p => p.id);
+  store.saveSnapshot(fa, png);
+  store.saveDrawing(fa, Buffer.from([1, 2]));
+  for (const operation of [
+    () => store.reorderPages(faultSource.id, [fb, fa]),
+    () => store.deletePages(faultSource.id, [fa]),
+    () => store.movePages([fa], faultTarget.id),
+    () => store.duplicatePages([fa], faultTarget.id),
+    () => store.deleteNotebook(faultSource.id),
+  ]) {
+    const before = JSON.stringify(store.listNotebooks()), view = JSON.stringify(store.view());
+    const disk = fs.readFileSync(path.join(directory, "db.json"), "utf8"), files = fs.readdirSync(store.snapshotsDir).sort();
+    const internal = store as unknown as { save(): void }, save = internal.save;
+    internal.save = () => { throw new Error("Simulated disk full"); };
+    try { assert.throws(operation, /disk full/); } finally { internal.save = save; }
+    assert.equal(JSON.stringify(store.listNotebooks()), before, "Failed save must roll back in-memory changes");
+    assert.equal(JSON.stringify(store.view()), view);
+    assert.equal(fs.readFileSync(path.join(directory, "db.json"), "utf8"), disk);
+    assert.deepEqual(fs.readdirSync(store.snapshotsDir).sort(), files, "Failed duplicate must clean copied files");
+    assert.deepEqual(fs.readFileSync(store.drawingPath(fa)), Buffer.from([1, 2]));
+  }
   console.log("[page management] empty libraries, identity-safe reorder/move, independent ink/PDF/item/doubt copies and invalid-request atomicity passed");
 } finally { fs.rmSync(directory, { recursive: true, force: true }); }
 

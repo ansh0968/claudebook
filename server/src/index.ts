@@ -200,7 +200,11 @@ api.delete("/notebooks/:id/delete-request", (req, res) => {
 });
 
 api.delete("/notebooks/:id", (req, res) => {
-  store.deleteNotebook(req.params.id) ? res.json({ ok: true }) : res.status(404).json({ error: "not found" });
+  const notebook = store.getNotebook(req.params.id);
+  if (!notebook) return res.status(404).json({ error: "not found" });
+  const deletedPageIds = notebook.pages.map(p => p.id);
+  store.deleteNotebook(req.params.id);
+  res.json({ ok: true, deletedPageIds });
 });
 
 api.post("/notebooks/:id/pages", (req, res) => {
