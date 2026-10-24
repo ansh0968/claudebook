@@ -622,12 +622,12 @@ struct ShelfView: View {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(alignment: .top, spacing: 18) {
                     NewScratchTile(busy: model.creatingScratch) { Task { await model.newScratchPad() } }
-                        .frame(width: 140)
+                        .frame(width: 150)
                         .accessibilityIdentifier("library.newScratch")
                     ForEach(pads.prefix(12)) { nb in
                         NavigationLink(value: LibraryRoute.notebook(NotebookDestination(notebookId: nb.id))) { ScratchCard(notebook: nb) }
                             .buttonStyle(.plain)
-                            .frame(width: 140)
+                            .frame(width: 150)
                             .modifier(NotebookActions(notebook: nb))
                             .accessibilityIdentifier("notebook.\(nb.id)")
                     }
@@ -958,7 +958,7 @@ struct ScratchCard: View {
             .padding(.horizontal, 2)
         }
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("\(notebook.title), scratch pad, \(ExpiryBadge.text(notebook.expiryDate))")
+        .accessibilityLabel("\(notebook.title), scratch pad, \(ExpiryBadge.text(notebook.expiryDate)) before it deletes itself")
     }
 }
 
@@ -968,10 +968,10 @@ struct ExpiryBadge: View {
     static func text(_ date: Date?) -> String {
         guard let date else { return "Temporary" }
         let hours = date.timeIntervalSinceNow / 3600
-        if hours < 1 { return "Deletes soon" }
-        if hours < 24 { return "Deletes in \(Int(hours.rounded(.up)))h" }
+        if hours < 1 { return "Deleting soon" }
+        if hours < 24 { return "\(Int(hours.rounded(.up)))h left" }
         let days = Int((hours / 24).rounded(.up))
-        return days == 1 ? "Deletes tomorrow" : "Deletes in \(days) days"
+        return days == 1 ? "1 day left" : "\(days) days left"
     }
 
     private var urgent: Bool { (date?.timeIntervalSinceNow ?? .infinity) < 24 * 3600 }
@@ -979,6 +979,7 @@ struct ExpiryBadge: View {
     var body: some View {
         Label(Self.text(date), systemImage: "timer")
             .font(.caption2.weight(.bold))
+            .lineLimit(1)
             .foregroundStyle(urgent ? AnyShapeStyle(StudyPalette.coral) : AnyShapeStyle(.secondary))
             .padding(.horizontal, 7).padding(.vertical, 4)
             .background(.regularMaterial, in: Capsule())

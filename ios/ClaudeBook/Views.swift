@@ -194,10 +194,16 @@ struct NotebookEditor: View {
                     if let notebook, notebook.isScratch {
                         // Scratch pads delete themselves after a week; one tap files this one as a real notebook.
                         Button { controller.flush(); library.ask(.keep(notebook)) } label: {
-                            Label("Keep", systemImage: "tray.and.arrow.down")
-                                .labelStyle(.titleAndIcon)
+                            // Toolbars drop a Label's title; spell it out so "Keep" can't be missed.
+                            HStack(spacing: 5) {
+                                Image(systemName: "tray.and.arrow.down")
+                                Text("Keep")
+                            }
+                            .font(.subheadline.weight(.semibold))
                         }
-                        .accessibilityLabel("Keep this scratch pad, \(ExpiryBadge.text(notebook.expiryDate).lowercased())")
+                        .buttonStyle(.bordered)
+                        .tint(StudyPalette.teal)
+                        .accessibilityLabel("Keep this scratch pad, \(ExpiryBadge.text(notebook.expiryDate)) before it deletes itself")
                         .accessibilityIdentifier("editor.keep")
                     }
                     Image(systemName: syncIcon).foregroundStyle(sync == "offline" ? .red : .secondary)
