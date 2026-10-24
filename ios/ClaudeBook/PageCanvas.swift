@@ -808,9 +808,9 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
                 // Without the PDF the snapshot would hide it from Claude, so let the server's own render stand.
                 if page.pdf == nil || pdf != nil {
                     let png = PageSnapshot.png(drawing: drawing, background: page.background, pdf: pdf)
-                    try await api.uploadSnapshot(pageId: id, png: png, textBoxes: boxes)
+                    try await api.uploadSnapshot(pageId: id, png: png, textBoxes: boxes, strokeCount: drawing.strokes.count)
                 }
-                try await api.uploadDrawing(pageId: id, data: drawing.dataRepresentation())
+                try await api.uploadDrawing(pageId: id, data: drawing.dataRepresentation(), strokeCount: drawing.strokes.count)
             } catch {
                 PendingUploads.all.insert(id)
                 if Task.isCancelled { return }

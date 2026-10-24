@@ -67,10 +67,16 @@ struct ClaudeItem: Codable, Identifiable, Hashable {
     var label: String?
     var revealed: Bool?
     var smiles: String?
+    var head: String?
+    var headFilled: Bool?
+    /// Arrowheads the server computed for arrow, path and svg items, in page coordinates.
+    var headD: String?
 
     enum CodingKeys: String, CodingKey {
-        case id, type, points, from, to, center, rx, ry, x, y, w, h, text, size, color, width, fill, d, closed, dashed, latex, smooth, bend, group, label, revealed, smiles
+        case id, type, points, from, to, center, rx, ry, x, y, w, h, text, size, color, width, fill, d, closed, dashed, latex, smooth, bend, group, label, revealed, smiles, head
         case halfHead = "half_head"
+        case headFilled = "head_filled"
+        case headD = "head_d"
     }
 }
 
@@ -97,6 +103,8 @@ struct Notebook: Codable, Identifiable, Hashable {
     var pages: [Page]
     var createdAt: String
     var updatedAt: String
+    /// Claude asked to delete this notebook; the library asks the user to confirm.
+    var deleteRequestedAt: String?
 
     /// Latest change to the notebook or any page (ink upload, Claude's marks). ISO strings sort by time.
     var lastActivity: String { pages.map(\.updatedAt).reduce(updatedAt) { max($0, $1) } }

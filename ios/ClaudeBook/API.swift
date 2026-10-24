@@ -101,6 +101,11 @@ struct API {
         _ = try await request("notebooks/\(id)", method: "DELETE")
     }
 
+    /// The user kept a notebook Claude asked to delete.
+    func cancelDeleteRequest(_ id: String) async throws {
+        _ = try await request("notebooks/\(id)/delete-request", method: "DELETE")
+    }
+
     func addPage(notebookId: String, afterIndex: Int, background: PageBackground) async throws {
         struct Body: Encodable { var count: Int; var afterIndex: Int; var background: PageBackground }
         _ = try await request("notebooks/\(notebookId)/pages", method: "POST", json: Body(count: 1, afterIndex: afterIndex, background: background))
@@ -111,13 +116,14 @@ struct API {
         _ = try await request("view", method: "POST", json: Body(notebookId: notebookId, pageId: pageId))
     }
 
-    func uploadSnapshot(pageId: String, png: Data, textBoxes: [TextBox]) async throws {
-        struct Body: Encodable { var png: String; var textBoxes: [TextBox] }
-        _ = try await request("pages/\(pageId)/snapshot", method: "PUT", json: Body(png: png.base64EncodedString(), textBoxes: textBoxes))
+    /// strokeCount lets Claude tell an empty page from one whose ink hasn't synced.
+    func uploadSnapshot(pageId: String, png: Data, textBoxes: [TextBox], strokeCount: Int) async throws {
+        struct Body: Encodable { var png: String; var textBoxes: [TextBox]; var strokeCount: Int }
+        _ = try await request("pages/\(pageId)/snapshot", method: "PUT", json: Body(png: png.base64EncodedString(), textBoxes: textBoxes, strokeCount: strokeCount))
     }
 
-    func uploadDrawing(pageId: String, data: Data) async throws {
-        _ = try await request("pages/\(pageId)/drawing", method: "PUT", body: data)
+    func uploadDrawing(pageId: String, data: Data, strokeCount: Int) async throws {
+        _ = try await request("pages/\(pageId)/drawing", method: "PUT", body: data, query: [URLQueryItem(name: "strokes", value: String(strokeCount))])
     }
 
     func drawing(pageId: String) async throws -> Data? {
@@ -185,6 +191,10 @@ struct API {
 final class LiveConnection: ObservableObject {
     @Published private(set) var connected = false
     var onEvent: ((LiveEvent) -> Void)?
+    /// Requests from Claude (open a page, confirm a delete). The library owns navigation, so it handles
+    /// these whichever screen is showing, while onEvent belongs to the screen on top.
+    var onCommand: ((LiveEvent) -> Void)?
+    static let commands: Set<String> = ["openPage", "deleteRequest"]
     private var task: URLSessionWebSocketTask?
     private var running = false
 
@@ -225,7 +235,7 @@ final class LiveConnection: ObservableObject {
                 case .success(let message):
                     self.connected = true
                     if case .string(let text) = message, let event = try? JSONDecoder().decode(LiveEvent.self, from: Data(text.utf8)) {
-                        self.onEvent?(event)
+                        if Self.commands.contains(event.type) { self.onCommand?(event) } else { self.onEvent?(event) }
                     }
                     self.receive(on: task)
                 case .failure:

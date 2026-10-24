@@ -249,9 +249,28 @@ enum ClaudeRenderer {
             return CGPoint(x: a[0], y: a[1])
         }
         func strokeAndFill(_ path: CGPath) {
-            if let fill = item.fill, fill != "none" {
+            let filled = item.fill.map { $0 != "none" } ?? false
+            if filled, let fill = item.fill {
                 ctx.addPath(path)
                 ctx.setFillColor(adapt(UIColor(hex: fill), dark: dark).cgColor)
+                ctx.fillPath()
+            }
+            // A fill with no color is a fill-only shape, same as the server.
+            guard !filled || item.color != nil else { return }
+            ctx.addPath(path)
+            ctx.strokePath()
+        }
+        func dash() {
+            if item.dashed == true { ctx.setLineDash(phase: 0, lengths: [10, 8]) }
+        }
+        /// Heads are never dashed; filled ones are stroked too so their tips match the line's round cap.
+        func heads() {
+            guard let d = item.headD, !d.isEmpty else { return }
+            ctx.setLineDash(phase: 0, lengths: [])
+            let path = outline(item, d)
+            if item.headFilled == true {
+                ctx.addPath(path)
+                ctx.setFillColor(color.cgColor)
                 ctx.fillPath()
             }
             ctx.addPath(path)
@@ -269,13 +288,22 @@ enum ClaudeRenderer {
             } else {
                 ctx.addPath(smoothPath(pts, closed: item.closed ?? false))
             }
+            dash()
             ctx.strokePath()
+            heads()
         case "line":
             guard let a = pt(item.from), let b = pt(item.to) else { return }
             if item.dashed == true { ctx.setLineDash(phase: 0, lengths: [10, 8]) }
             ctx.move(to: a); ctx.addLine(to: b); ctx.strokePath()
         case "arrow":
             guard let a = pt(item.from), let b = pt(item.to) else { return }
+            // Newer arrows carry their heads (none, start, end, both, filled) as head_d.
+            if item.headD != nil || item.head != nil {
+                dash()
+                ctx.move(to: a); ctx.addLine(to: b); ctx.strokePath()
+                heads()
+                return
+            }
             let angle = atan2(b.y - a.y, b.x - a.x), head = 10 + (item.width ?? 3) * 2
             ctx.move(to: a); ctx.addLine(to: b)
             ctx.move(to: CGPoint(x: b.x - head * cos(angle - 0.45), y: b.y - head * sin(angle - 0.45)))
@@ -331,7 +359,9 @@ enum ClaudeRenderer {
             UIGraphicsPopContext()
         case "svg":
             guard let d = item.d else { return }
+            dash()
             strokeAndFill(outline(item, d))
+            heads()
         case "math", "molecule":
             // The server typesets LaTeX into one flattened path in page coordinates.
             guard let d = item.d else { return }

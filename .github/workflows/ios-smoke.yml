@@ -105,13 +105,23 @@ jobs:
           echo "view after scrolling: $(api notebooks | jq -c .view) (page 2 is $PAGE2)"
           mcp '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"draw_on_page","arguments":{"items":[
             {"type":"rect","x":90,"y":120,"w":820,"h":200,"color":"#3B82F6"},
-            {"type":"text","x":560,"y":360,"text":"page 2!","size":44}]}}}'
+            {"type":"text","x":560,"y":360,"text":"page 2!","size":44},
+            {"type":"arrow","from":[120,460],"to":[460,460],"head":"both","color":"#3B82F6"},
+            {"type":"text","x":290,"y":450,"text":"λ = 2 m → Ω, μ, θ","size":32,"anchor":"bottom-center"},
+            {"type":"path","points":[[120,560],[260,500],[400,580],[540,520]],"dashed":true,"head":"end","head_filled":true,"color":"#E5484D"},
+            {"type":"svg","d":"M600,560 A120,120 0 0 1 840,560","head":"both","dashed":true},
+            {"type":"ellipse","center":[300,700],"rx":120,"ry":60,"fill":"#30A46C55"},
+            {"type":"math","latex":"\\begin{vmatrix} a & b \\\\ c & d \\end{vmatrix} \\begin{array}{|c|c|} \\hline 1 & 2 \\\\ \\hline 3 & 4 \\\\ \\hline \\end{array} A \\xrightarrow[\\Delta]{H_2SO_4} B","x":500,"y":640,"size":36}]}}}'
           sleep 5
           xcrun simctl io "$UDID" screenshot shots/7-claude-page2.png
           # Claude inserts a page at the start: everything on screen should stay put, ink included.
           mcp "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"tools/call\",\"params\":{\"name\":\"add_pages\",\"arguments\":{\"notebook_id\":\"$PDF_NB\",\"after_page\":0,\"background\":\"lined\"}}}"
           sleep 6
           xcrun simctl io "$UDID" screenshot shots/8-page-inserted.png
+          # Claude flips the iPad back to the first page.
+          mcp "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"tools/call\",\"params\":{\"name\":\"open_page\",\"arguments\":{\"notebook_id\":\"$PDF_NB\",\"page_number\":1}}}"
+          sleep 4
+          xcrun simctl io "$UDID" screenshot shots/8b-open-page-1.png
           api notebooks/$PDF_NB | jq -c '[.pages[] | {id, pdf: .pdf.page, claude: (.claudeLayer | length), v: .snapshotVersion}]'
           xcrun simctl spawn "$UDID" log show --last 5m --style compact --predicate 'process == "ClaudeBook" AND messageType >= 16' | tail -40 || true
           echo "--- server log"; tail -20 $RUNNER_TEMP/server.log

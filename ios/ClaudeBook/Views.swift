@@ -8,6 +8,11 @@ enum StudyPalette {
     static let background = Color(uiColor: UIColor { $0.userInterfaceStyle == .dark ? UIColor(hex: "#151D1F") : UIColor(hex: "#F5F1E9") })
 }
 
+extension Notification.Name {
+    /// Claude asked to flip to a page in the notebook that's already open. userInfo: notebookId, pageId.
+    static let claudeOpenPage = Notification.Name("claudeOpenPage")
+}
+
 struct NotebookDestination: Hashable {
     var notebookId: String
     var pageId: String? = nil
@@ -139,6 +144,7 @@ struct LibraryView: View {
     @State private var renaming: Notebook?
     @State private var renameTitle = ""
     @State private var deleting: Notebook?
+    @State private var claudeDeleting: Notebook?
     @Environment(\.colorScheme) private var colorScheme
 
     private var openQuestions: Int {
@@ -300,8 +306,40 @@ struct LibraryView: View {
             }
             .onAppear {
                 live.onEvent = { e in if e.type == "notebook" { Task { await load() } } }
+                live.onCommand = { e in handleCommand(e) }
             }
         }
+        // On the stack itself, so Claude's delete request shows over an open notebook too.
+        .alert("Claude wants to delete “\(claudeDeleting?.title ?? "")”",
+               isPresented: Binding(get: { claudeDeleting != nil }, set: { if !$0 { claudeDeleting = nil } }),
+               presenting: claudeDeleting) { nb in
+            Button("Delete", role: .destructive) { Task { await confirmClaudeDelete(nb) } }
+            Button("Keep", role: .cancel) { Task { try? await API.current?.cancelDeleteRequest(nb.id); await load() } }
+        } message: { nb in
+            Text("\(nb.pages.count) page\(nb.pages.count == 1 ? "" : "s"), your ink and Claude's marks are removed from ClaudeBook. This can't be undone.")
+        }
+    }
+
+    private func handleCommand(_ e: LiveEvent) {
+        guard let notebookId = e.notebookId else { return }
+        switch e.type {
+        case "openPage":
+            guard let pageId = e.pageId else { return }
+            if path.last?.notebookId == notebookId {
+                NotificationCenter.default.post(name: .claudeOpenPage, object: nil, userInfo: ["notebookId": notebookId, "pageId": pageId])
+            } else {
+                path = [NotebookDestination(notebookId: notebookId, pageId: pageId)]
+            }
+        case "deleteRequest":
+            Task { await load() }
+        default:
+            break
+        }
+    }
+
+    private func confirmClaudeDelete(_ nb: Notebook) async {
+        path.removeAll { $0.notebookId == nb.id }
+        await delete(nb)
     }
 
     @discardableResult
@@ -310,6 +348,8 @@ struct LibraryView: View {
             let list = try await API.current?.notebooks()
             notebooks = list?.notebooks ?? []
             error = nil
+            // Includes requests Claude made while the app was closed.
+            if claudeDeleting == nil { claudeDeleting = notebooks.first { $0.deleteRequestedAt != nil } }
             return list?.view
         } catch {
             self.error = error.localizedDescription
@@ -559,6 +599,14 @@ struct NotebookEditor: View {
                     try? await Task.sleep(for: .seconds(8))
                     guard !Task.isCancelled else { break }
                     if !live.connected { await load() }
+                }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .claudeOpenPage)) { note in
+                guard note.userInfo?["notebookId"] as? String == notebookId, let pageId = note.userInfo?["pageId"] as? String else { return }
+                Task {
+                    // A page Claude just added may not be loaded yet.
+                    if !controller.pages.contains(where: { $0.id == pageId }) { await load() }
+                    if let i = controller.pages.firstIndex(where: { $0.id == pageId }) { controller.scrollTo(page: i, animated: true) }
                 }
             }
             .onDisappear { controller.flush(); controller.cancelDoubtSelection() }
