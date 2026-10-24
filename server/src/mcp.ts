@@ -6,7 +6,7 @@ import { compileTypst, downloadPdf, savePdf } from "./pdf.js";
 import { pdfTextPage, describePdfText } from "./pdf-text.js";
 import { TYPST_IMPORTS } from "./typst-packages.js";
 import { clampRegion, renderPage, type Region } from "./render.js";
-import { PAGE_H, PAGE_W, type Page, type Store } from "./store.js";
+import { PAGE_H, PAGE_W, type Notebook, type Page, type Store } from "./store.js";
 import { parsePageRegion } from "./regions.js";
 import { logMistake } from "./study.js";
 
@@ -33,7 +33,8 @@ To give the user something to write on (worksheets, notes, practice questions), 
 PDF-backed pages include their own text with page-coordinate line boxes, filtered when zoomed. This is separate from recognized handwriting; scanned pages may have no text layer.
 create_pdf ships these exact Typst imports offline (Typst 0.13.1):
 ${TYPST_IMPORTS}
-Example drawing: #canvas({ draw.line((0,0),(2,1)); draw.circle((1,1),radius:0.4) }). Chemistry: #ch("H2O").`;
+Example drawing: #canvas({ draw.line((0,0),(2,1)); draw.circle((1,1),radius:0.4) }). Chemistry: #ch("H2O").
+The library is organised in folders (list_notebooks shows them). Put new notebooks and PDFs in the folder that fits with the folder parameter, and file notebooks with move_notebook. Scratch pads are temporary and delete themselves a week after their last edit unless the user keeps them.`;
 
 type ToolResult = { content: ({ type: "text"; text: string } | { type: "image"; data: string; mimeType: string })[]; isError?: boolean };
 
@@ -112,6 +113,22 @@ export function buildMcpServer(store: Store) {
     return { content: [{ type: "text", text }, { type: "image", data: png.toString("base64"), mimeType: "image/png" }] };
   }
 
+  /** A folder by id, or by a "Subject/Topic" name path (case insensitive). Missing names are created when `create` is set. */
+  function resolveFolder(ref: string, create: boolean): string | undefined {
+    if (store.getFolder(ref)) return ref;
+    let parentId: string | undefined;
+    for (const name of ref.split("/").map((n) => n.trim()).filter(Boolean)) {
+      const match = store.listFolders().find((f) => f.parentId === parentId && f.name.toLocaleLowerCase() === name.toLocaleLowerCase());
+      if (match) parentId = match.id;
+      else if (create) parentId = store.createFolder(name.slice(0, 100), parentId).id;
+      else return;
+    }
+    return parentId;
+  }
+
+  const folderParam = z.string().trim().min(1).optional()
+    .describe('Folder id or name path such as "Chemistry" or "Chemistry/Organic". Missing folders are created. Omit for the top level.');
+
   const zoom = z
     .object({ x: z.number(), y: z.number(), w: z.number(), h: z.number() })
     .optional()
@@ -157,14 +174,31 @@ export function buildMcpServer(store: Store) {
     "list_notebooks",
     {
       title: "List notebooks",
-      description: "All notebooks with their ids and page counts, and which one is open.",
+      description: "All notebooks grouped by folder, with their ids and page counts, which one is open, and the user's temporary scratch pads.",
       inputSchema: {},
       annotations: { readOnlyHint: true },
     },
     async () => {
       const view = store.view();
-      const rows = store.listNotebooks().map((n) => `- "${n.title}" id ${n.id}, ${n.pages.length} page(s)${n.id === view.notebookId ? " (open)" : ""}${n.deleteRequestedAt ? " (waiting for the user to confirm deletion on the iPad)" : ""}`);
-      return text(rows.join("\n") || "No notebooks yet.");
+      const row = (n: Notebook, indent: string) => `${indent}- "${n.title}" id ${n.id}, ${n.pages.length} page(s)${n.id === view.notebookId ? " (open)" : ""}${n.deleteRequestedAt ? " (waiting for the user to confirm deletion on the iPad)" : ""}`;
+      const notebooks = store.listNotebooks();
+      const lines: string[] = [];
+      const walk = (parentId: string | undefined, depth: number) => {
+        const indent = "  ".repeat(depth);
+        const folders = store.listFolders().filter((f) => f.parentId === parentId).sort((a, b) => a.name.localeCompare(b.name));
+        for (const f of folders) {
+          lines.push(`${indent}- Folder "${f.name}" id ${f.id}`);
+          walk(f.id, depth + 1);
+        }
+        for (const n of notebooks) if (!n.scratch && n.folderId === parentId) lines.push(row(n, indent));
+      };
+      walk(undefined, 0);
+      const scratch = notebooks.filter((n) => n.scratch);
+      if (scratch.length) {
+        lines.push("Scratch pads (temporary):");
+        for (const n of scratch) lines.push(`${row(n, "")}, deletes itself after ${store.scratchExpiry(n)} unless kept`);
+      }
+      return text(lines.join("\n") || "No notebooks yet.");
     },
   );
 
@@ -355,12 +389,33 @@ export function buildMcpServer(store: Store) {
     "create_notebook",
     {
       title: "Create a notebook",
-      description: "Make a new notebook for the user.",
-      inputSchema: { title: z.string(), pages: z.number().int().min(1).max(200).optional(), background },
+      description: "Make a new notebook for the user, optionally inside a folder.",
+      inputSchema: { title: z.string(), pages: z.number().int().min(1).max(200).optional(), background, folder: folderParam },
     },
-    async ({ title, pages, background }) => {
-      const nb = store.createNotebook(title, pages ?? 1, background ?? "blank");
-      return text(`Created "${nb.title}" (id ${nb.id}) with ${nb.pages.length} page(s).`);
+    async ({ title, pages, background, folder }) => {
+      const folderId = folder ? resolveFolder(folder, true) : undefined;
+      const nb = store.createNotebook(title, pages ?? 1, background ?? "blank", { folderId });
+      const where = folderId ? ` in folder "${store.folderPath(folderId).join("/")}"` : "";
+      return text(`Created "${nb.title}" (id ${nb.id}) with ${nb.pages.length} page(s)${where}.`);
+    },
+  );
+
+  server.registerTool(
+    "move_notebook",
+    {
+      title: "File a notebook in a folder",
+      description: 'Move a notebook into a folder (created if missing), or to the top level with folder "". Moving a scratch pad into a folder keeps it for good.',
+      inputSchema: {
+        notebook_id: z.string(),
+        folder: z.string().trim().describe('Folder id or name path such as "Physics/Mechanics"; "" for the top level'),
+      },
+    },
+    async ({ notebook_id, folder }) => {
+      const nb = store.getNotebook(notebook_id);
+      if (!nb) return fail("Notebook not found.");
+      const folderId = folder ? resolveFolder(folder, true) : null;
+      store.updateNotebook(nb.id, { folderId, ...(folderId && nb.scratch ? { scratch: false as const } : {}) });
+      return text(`Moved "${nb.title}" to ${folderId ? `folder "${store.folderPath(folderId).join("/")}"` : "the top level"}.`);
     },
   );
 
@@ -430,10 +485,11 @@ export function buildMcpServer(store: Store) {
   );
 
   /** Store a PDF and turn it into notebook pages; shared by the two PDF tools. */
-  async function addPdf(bytes: Buffer, title: string, notebookId?: string): Promise<ToolResult> {
+  async function addPdf(bytes: Buffer, title: string, notebookId?: string, folder?: string): Promise<ToolResult> {
     if (notebookId && !store.getNotebook(notebookId)) return fail("Notebook not found.");
     const { file, pages } = await savePdf(store, bytes);
-    const { notebook, firstIndex } = store.addPdfPages(file, pages, title, notebookId);
+    const folderId = !notebookId && folder ? resolveFolder(folder, true) : undefined;
+    const { notebook, firstIndex } = store.addPdfPages(file, pages, title, notebookId, folderId);
     const range = pages === 1 ? `page ${firstIndex + 1}` : `pages ${firstIndex + 1}-${firstIndex + pages}`;
     return text(`${notebookId ? "Added" : "Created"} "${notebook.title}" (id ${notebook.id}), ${range} from a ${pages}-page PDF. The user can open it in ClaudeBook and write on it.`);
   }
@@ -447,9 +503,9 @@ export function buildMcpServer(store: Store) {
         "Write Typst markup, not LaTeX (math is $x^2$ inline or $ x = (-b plus.minus sqrt(b^2 - 4a c)) / (2a) $ on its own line, #pagebreak() for new pages). " +
         "Pages are A4. Leave generous blank space under each question for handwriting, e.g. #v(6cm). Makes a new notebook unless notebook_id is given (then pages are appended). " +
         `Offline packages (exact imports):\n${TYPST_IMPORTS}\nExample: #canvas({ draw.line((0,0),(2,1)); draw.circle((1,1),radius:0.4) }). PDF text with coordinates appears in view_page/get_current_page.`,
-      inputSchema: { title: z.string(), typst: z.string().describe(`Complete Typst source. Offline package imports:\n${TYPST_IMPORTS}`), notebook_id: z.string().optional() },
+      inputSchema: { title: z.string(), typst: z.string().describe(`Complete Typst source. Offline package imports:\n${TYPST_IMPORTS}`), notebook_id: z.string().optional(), folder: folderParam },
     },
-    async ({ title, typst, notebook_id }) => {
+    async ({ title, typst, notebook_id, folder }) => {
       const prefixed = !/#set page\(/.test(typst);
       let pdf: Buffer;
       try {
@@ -459,7 +515,7 @@ export function buildMcpServer(store: Store) {
         const msg = (e as Error).message.replace(/main\.typ:(\d+)/g, (_, n) => `main.typ:${prefixed ? Number(n) - 1 : n}`);
         return fail(`Typst error:\n${msg}`);
       }
-      return addPdf(pdf, title, notebook_id);
+      return addPdf(pdf, title, notebook_id, folder);
     },
   );
 
@@ -468,13 +524,13 @@ export function buildMcpServer(store: Store) {
     {
       title: "Import a PDF from the web",
       description: "Download a PDF (https, up to 50MB) into ClaudeBook as pages the user can annotate. Makes a new notebook unless notebook_id is given.",
-      inputSchema: { url: z.string().url(), title: z.string().optional(), notebook_id: z.string().optional() },
+      inputSchema: { url: z.string().url(), title: z.string().optional(), notebook_id: z.string().optional(), folder: folderParam },
     },
-    async ({ url, title, notebook_id }) => {
+    async ({ url, title, notebook_id, folder }) => {
       try {
         const bytes = await downloadPdf(url);
         const name = title || decodeURIComponent(new URL(url).pathname.split("/").pop() || "Imported PDF").replace(/\.pdf$/i, "");
-        return await addPdf(bytes, name, notebook_id);
+        return await addPdf(bytes, name, notebook_id, folder);
       } catch (e) {
         return fail(`Couldn't import that PDF: ${(e as Error).message}`);
       }

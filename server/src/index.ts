@@ -11,7 +11,7 @@ import { prepareItems } from "./items.js";
 import { buildMcpServer } from "./mcp.js";
 import { PDF_ID, pdfPath, savePdf } from "./pdf.js";
 import { claudeLayerSvg, renderPage } from "./render.js";
-import { Store, type Background, type TextBox } from "./store.js";
+import { Store, type Background, type Notebook, type TextBox } from "./store.js";
 import { parsePageRegion } from "./regions.js";
 
 const PORT = Number(process.env.PORT ?? 8787);
@@ -37,6 +37,12 @@ const upgraded = store.upgradeItems((item) => {
   return { ...item, ...outline };
 });
 if (upgraded) console.log(`gave ${upgraded} text item(s) handwriting outlines`);
+const purgeScratch = () => {
+  const purged = store.purgeExpiredScratchPads();
+  if (purged.length) console.log(`deleted ${purged.length} expired scratch pad(s)`);
+};
+purgeScratch();
+setInterval(purgeScratch, 60 * 60 * 1000).unref();
 const app = express();
 /** Older app builds don't send a stroke count; anything that isn't a whole number is ignored. */
 const strokeCountFrom = (n: unknown) => (typeof n === "number" && Number.isInteger(n) && n >= 0 ? n : undefined);
@@ -84,7 +90,11 @@ app.all("/mcp/:secret", (_req, res) => res.status(405).set("Allow", "POST").end(
 const api = express.Router();
 api.use(requireToken, express.json({ limit: "25mb" }));
 
-api.get("/notebooks", (_req, res) => res.json({ notebooks: store.listNotebooks(), view: store.view() }));
+/** Notebooks as the app sees them: scratch pads carry the time they'll delete themselves. */
+const withExpiry = (nb: Notebook) => (nb.scratch ? { ...nb, expiresAt: store.scratchExpiry(nb) } : nb);
+const FOLDER_NAME = /^.{1,100}$/su;
+
+api.get("/notebooks", (_req, res) => res.json({ notebooks: store.listNotebooks().map(withExpiry), folders: store.listFolders(), view: store.view() }));
 
 api.get("/search", (req, res) => {
   if (typeof req.query.q !== "string" || !req.query.q.trim()) return res.status(400).json({ error: "q must be nonempty text" });
@@ -92,8 +102,43 @@ api.get("/search", (req, res) => {
 });
 
 api.post("/notebooks", (req, res) => {
-  const { title, pages, background } = req.body as { title?: string; pages?: number; background?: Background };
-  res.json(store.createNotebook(title || "Untitled", pages ?? 1, background ?? "blank"));
+  const { title, pages, background, folderId, scratch } = req.body as { title?: string; pages?: number; background?: Background; folderId?: string; scratch?: boolean };
+  if (folderId !== undefined && (typeof folderId !== "string" || (folderId && !store.getFolder(folderId)))) return res.status(400).json({ error: "folderId must name an existing folder" });
+  if (scratch && folderId) return res.status(400).json({ error: "scratch pads live outside folders" });
+  const nb = store.createNotebook(title || (scratch ? "Scratch pad" : "Untitled"), pages ?? 1, background ?? (scratch ? "grid" : "blank"), { folderId: folderId || undefined, scratch: scratch === true });
+  res.json(withExpiry(nb));
+});
+
+api.post("/folders", (req, res) => {
+  const name = typeof req.body?.name === "string" ? req.body.name.trim() : "";
+  const parentId = req.body?.parentId;
+  if (!FOLDER_NAME.test(name)) return res.status(400).json({ error: "name must be 1-100 characters" });
+  if (parentId !== undefined && parentId !== null && parentId !== "" && (typeof parentId !== "string" || !store.getFolder(parentId))) return res.status(400).json({ error: "parentId must name an existing folder" });
+  res.status(201).json(store.createFolder(name, parentId || undefined));
+});
+
+api.patch("/folders/:id", (req, res) => {
+  const changes: { name?: string; parentId?: string | null } = {};
+  if (req.body?.name !== undefined) {
+    const name = typeof req.body.name === "string" ? req.body.name.trim() : "";
+    if (!FOLDER_NAME.test(name)) return res.status(400).json({ error: "name must be 1-100 characters" });
+    changes.name = name;
+  }
+  if (req.body?.parentId !== undefined) {
+    if (req.body.parentId !== null && typeof req.body.parentId !== "string") return res.status(400).json({ error: "parentId must be a folder id, or empty for the top level" });
+    changes.parentId = req.body.parentId || null;
+  }
+  if (!Object.keys(changes).length) return res.status(400).json({ error: "send name and/or parentId" });
+  try {
+    const folder = store.updateFolder(req.params.id, changes);
+    folder ? res.json(folder) : res.status(404).json({ error: "not found" });
+  } catch (e) {
+    res.status(400).json({ error: (e as Error).message });
+  }
+});
+
+api.delete("/folders/:id", (req, res) => {
+  store.deleteFolder(req.params.id) ? res.json({ ok: true }) : res.status(404).json({ error: "not found" });
 });
 
 /** The app uploads a PDF from Files; every PDF page becomes a notebook page. */
@@ -102,7 +147,8 @@ api.post("/notebooks/import-pdf", express.raw({ type: "application/pdf", limit: 
   try {
     const { file, pages } = await savePdf(store, req.body);
     const title = typeof req.query.title === "string" && req.query.title.trim() ? req.query.title.trim() : "Imported PDF";
-    res.json(store.addPdfPages(file, pages, title).notebook);
+    const folderId = typeof req.query.folderId === "string" && store.getFolder(req.query.folderId) ? req.query.folderId : undefined;
+    res.json(store.addPdfPages(file, pages, title, undefined, folderId).notebook);
   } catch (e) {
     res.status(400).json({ error: (e as Error).message });
   }
@@ -116,14 +162,34 @@ api.get("/pdfs/:file", (req, res) => {
 
 api.get("/notebooks/:id", (req, res) => {
   const nb = store.getNotebook(req.params.id);
-  nb ? res.json(nb) : res.status(404).json({ error: "not found" });
+  nb ? res.json(withExpiry(nb)) : res.status(404).json({ error: "not found" });
 });
 
+/** Rename, move into a folder (folderId "" or null = top level), and/or keep a scratch pad (scratch: false). */
 api.patch("/notebooks/:id", (req, res) => {
-  const title = typeof req.body?.title === "string" ? req.body.title.trim() : "";
-  if (!title || title.length > 200) return res.status(400).json({ error: "title must be 1-200 characters" });
-  const nb = store.renameNotebook(req.params.id, title);
-  nb ? res.json(nb) : res.status(404).json({ error: "not found" });
+  const changes: { title?: string; folderId?: string | null; scratch?: false } = {};
+  if (req.body?.title !== undefined) {
+    const title = typeof req.body.title === "string" ? req.body.title.trim() : "";
+    if (!title || title.length > 200) return res.status(400).json({ error: "title must be 1-200 characters" });
+    changes.title = title;
+  }
+  if (req.body?.folderId !== undefined) {
+    if (req.body.folderId !== null && typeof req.body.folderId !== "string") return res.status(400).json({ error: "folderId must be a folder id, or empty for the top level" });
+    changes.folderId = req.body.folderId || null;
+  }
+  if (req.body?.scratch !== undefined) {
+    if (req.body.scratch !== false) return res.status(400).json({ error: "scratch can only be set to false, to keep a scratch pad" });
+    changes.scratch = false;
+  }
+  if (!Object.keys(changes).length) return res.status(400).json({ error: "send title, folderId and/or scratch" });
+  const nb = store.getNotebook(req.params.id);
+  if (!nb) return res.status(404).json({ error: "not found" });
+  if (changes.folderId && nb.scratch && changes.scratch !== false) return res.status(400).json({ error: "keep the scratch pad (scratch: false) to file it in a folder" });
+  try {
+    res.json(withExpiry(store.updateNotebook(req.params.id, changes)!));
+  } catch (e) {
+    res.status(400).json({ error: (e as Error).message });
+  }
 });
 
 /** The user said no to Claude's request to delete this notebook. */

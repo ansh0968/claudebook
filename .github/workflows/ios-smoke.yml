@@ -130,6 +130,8 @@ jobs:
       - name: Chemistry tools and refreshed UI
         working-directory: ios
         run: |
+          cat ClaudeBook/Models.swift ../scripts/test-library-models.swift > "$RUNNER_TEMP/library-model-test.swift"
+          swift "$RUNNER_TEMP/library-model-test.swift"
           UDID=$(xcrun simctl list devices available -j | jq -r '[.devices[][] | select(.name | test("iPad Pro"))][0].udid')
           xcrun simctl terminate "$UDID" in.clarifiq.claudebook || true
           node ../scripts/smoke-fixture.mjs
@@ -157,6 +159,21 @@ jobs:
           xcrun simctl launch "$UDID" in.clarifiq.claudebook
           sleep 5
           xcrun simctl io "$UDID" screenshot shots/12-library-refreshed.png
+          # Folders and scratch pads, reached through a test route since CI can't tap.
+          shot() {
+            xcrun simctl terminate "$UDID" in.clarifiq.claudebook || true
+            SIMCTL_CHILD_CLAUDEBOOK_TEST_ROUTE="$1" xcrun simctl launch "$UDID" in.clarifiq.claudebook
+            sleep "${3:-5}"
+            xcrun simctl io "$UDID" screenshot "shots/$2.png"
+          }
+          shot "folder:Chemistry" 14-folder
+          shot "folder:Organic" 15-subfolder
+          shot "scratch" 16-scratch-pads
+          shot "notebook:Scratch · quick" 17-scratch-editor 8
+          xcrun simctl ui "$UDID" appearance dark
+          shot "" 18-library-dark
+          shot "scratch" 19-scratch-pads-dark
+          xcrun simctl ui "$UDID" appearance light
           # First-run screen, as seen after a fresh install (empty secret, nothing in the Keychain).
           xcrun simctl terminate "$UDID" in.clarifiq.claudebook
           SIMCTL_CHILD_CLAUDEBOOK_SECRET= xcrun simctl launch "$UDID" in.clarifiq.claudebook

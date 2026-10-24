@@ -215,6 +215,23 @@ struct Page: Codable, Identifiable, Hashable {
     var updatedAt: String
 }
 
+enum ISODate {
+    static func parse(_ s: String) -> Date? {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f.date(from: s) ?? ISO8601DateFormatter().date(from: s)
+    }
+}
+
+struct Folder: Codable, Identifiable, Hashable {
+    var id: String
+    var name: String
+    /// nil for a top-level folder.
+    var parentId: String?
+    var createdAt: String
+    var updatedAt: String
+}
+
 struct Notebook: Codable, Identifiable, Hashable {
     var id: String
     var title: String
@@ -223,15 +240,19 @@ struct Notebook: Codable, Identifiable, Hashable {
     var updatedAt: String
     /// Claude asked to delete this notebook; the library asks the user to confirm.
     var deleteRequestedAt: String?
+    /// nil when the notebook sits at the top level of the library.
+    var folderId: String?
+    /// Scratch pads delete themselves on the server at `expiresAt` (a week after the last edit) unless kept.
+    var scratch: Bool?
+    var expiresAt: String?
+
+    var isScratch: Bool { scratch == true }
+    var expiryDate: Date? { expiresAt.flatMap(ISODate.parse) }
 
     /// Latest change to the notebook or any page (ink upload, Claude's marks). ISO strings sort by time.
     var lastActivity: String { pages.map(\.updatedAt).reduce(updatedAt) { max($0, $1) } }
 
-    var lastActivityDate: Date? {
-        let f = ISO8601DateFormatter()
-        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return f.date(from: lastActivity) ?? ISO8601DateFormatter().date(from: lastActivity)
-    }
+    var lastActivityDate: Date? { ISODate.parse(lastActivity) }
 
     var openDoubts: Int { pages.reduce(0) { $0 + ($1.doubts ?? []).filter(\.isOpen).count } }
 }
@@ -243,6 +264,8 @@ struct ViewState: Codable {
 
 struct NotebookList: Codable {
     var notebooks: [Notebook]
+    /// Missing from servers older than folders.
+    var folders: [Folder]?
     var view: ViewState
 }
 

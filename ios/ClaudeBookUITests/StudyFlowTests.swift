@@ -97,6 +97,42 @@ final class StudyFlowTests: XCTestCase {
         try await api.seedHandwriting(pageId: page.id, text: nil)
     }
 
+    @MainActor
+    func testScratchPadOpensInOneTapAndCanBeKeptInAFolder() async throws {
+        let before: SmokeList = try await api.request("notebooks")
+        let existing = Set(before.notebooks.map(\.id))
+        let folder: SmokeFolder = try await api.request("folders", method: "POST", body: ["name": "Kept in CI"])
+        let app = launch(autoopen: false)
+        defer { app.terminate() }
+        let tile = app.buttons["library.newScratch"]
+        XCTAssertTrue(tile.waitForExistence(timeout: 10))
+        tile.tap()
+        XCTAssertTrue(app.buttons["editor.pages"].waitForExistence(timeout: 10))
+        let pad: SmokeNotebook = try await eventually {
+            let list: SmokeList = try await self.api.request("notebooks")
+            return list.notebooks.first { !existing.contains($0.id) && $0.scratch == true }
+        }
+        XCTAssertNotNil(pad.expiresAt)
+        XCTAssertNil(pad.folderId)
+        let keep = app.buttons["editor.keep"]
+        XCTAssertTrue(keep.waitForExistence(timeout: 5))
+        keep.tap()
+        let target = app.buttons["picker.folder.\(folder.id)"]
+        XCTAssertTrue(target.waitForExistence(timeout: 5))
+        target.tap()
+        app.buttons["picker.confirm"].tap()
+        let kept: SmokeNotebook = try await eventually {
+            let current: SmokeNotebook = try await self.api.request("notebooks/\(pad.id)")
+            return current.scratch == nil && current.folderId == folder.id ? current : nil
+        }
+        XCTAssertNil(kept.expiresAt)
+        // Once kept, the editor stops offering to keep it.
+        let gone = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: keep)
+        await fulfillment(of: [gone], timeout: 10)
+        let _: SmokeOK = try await api.request("notebooks/\(pad.id)", method: "DELETE")
+        let _: SmokeOK = try await api.request("folders/\(folder.id)", method: "DELETE")
+    }
+
     private func fixture() async throws -> SmokeNotebook {
         let list: SmokeList = try await api.request("notebooks")
         return try XCTUnwrap(list.notebooks.first { $0.title == "Organic chemistry" }, "Run scripts/smoke-fixture.mjs first")
@@ -143,7 +179,8 @@ final class StudyFlowTests: XCTestCase {
 private enum SmokeError: Error { case unsafeHost, response(Int), timeout }
 private struct SmokeList: Decodable { var notebooks: [SmokeNotebook]; var view: SmokeView }
 private struct SmokeView: Decodable { var notebookId: String?; var pageId: String? }
-private struct SmokeNotebook: Decodable { var id: String; var title: String; var pages: [SmokePage] }
+private struct SmokeNotebook: Decodable { var id: String; var title: String; var pages: [SmokePage]; var folderId: String?; var scratch: Bool?; var expiresAt: String? }
+private struct SmokeFolder: Decodable { var id: String; var name: String }
 private struct SmokePage: Decodable { var id: String; var claudeLayer: [SmokeItem]; var doubts: [SmokeDoubt]? }
 private struct SmokeItem: Decodable { var id: String; var type: String; var text: String?; var revealed: Bool? }
 private struct SmokeDoubt: Decodable { var id: String; var pageId: String; var region: SmokeRegion }
