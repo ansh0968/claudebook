@@ -61,6 +61,10 @@ final class LibraryModel: ObservableObject {
     @Published var notebooks: [Notebook] = []
     @Published var folders: [Folder] = []
     @Published var error: String?
+    @Published var actionError: String?
+    var prepareNotebookDeletion: ((String) async -> Void)?
+    var resumeNotebookUploads: ((String) -> Void)?
+    private var loadGeneration = 0
     @Published var path: [LibraryRoute] = []
     @Published var prompt: LibraryPrompt?
     @Published var promptText = ""
@@ -70,15 +74,31 @@ final class LibraryModel: ObservableObject {
 
     @discardableResult
     func load() async -> ViewState? {
+        loadGeneration += 1
+        let generation = loadGeneration
         do {
             guard let list = try await API.current?.notebooks() else { return nil }
+            guard generation == loadGeneration else { return list.view }
+            let liveIds = Set(list.notebooks.map(\.id))
+            let livePageIds = Set(list.notebooks.flatMap { $0.pages.map(\.id) })
+            for removed in notebooks where !liveIds.contains(removed.id) {
+                let ids = removed.pages.map(\.id).filter { !livePageIds.contains($0) }
+                LocalDrawings.remove(ids)
+                NotificationCenter.default.post(name: .pagesDeleted, object: nil, userInfo: ["pageIds": ids])
+            }
             notebooks = list.notebooks
+            path.removeAll { route in
+                if case .notebook(let destination) = route { return !liveIds.contains(destination.notebookId) }
+                return false
+            }
             folders = list.folders ?? []
             error = nil
             // Includes requests Claude made while the app was closed.
-            if claudeDeleting == nil { claudeDeleting = notebooks.first { $0.deleteRequestedAt != nil } }
+            if let current = claudeDeleting, !notebooks.contains(where: { $0.id == current.id && $0.deleteRequestedAt != nil }) { claudeDeleting = nil }
+            if claudeDeleting == nil && prompt == nil { claudeDeleting = notebooks.first { $0.deleteRequestedAt != nil } }
             return list.view
         } catch {
+            guard generation == loadGeneration else { return nil }
             self.error = error.localizedDescription
             return nil
         }
@@ -147,6 +167,7 @@ final class LibraryModel: ObservableObject {
     // MARK: Actions
 
     func ask(_ prompt: LibraryPrompt) {
+        actionError = nil
         switch prompt {
         case .renameNotebook(let nb): promptText = nb.title
         case .renameFolder(let f): promptText = f.name
@@ -156,8 +177,7 @@ final class LibraryModel: ObservableObject {
     }
 
     /// The alert or confirmation dialog's main button.
-    func submitPrompt() {
-        guard let prompt else { return }
+    func submitPrompt(_ prompt: LibraryPrompt) {
         let text = promptText.trimmingCharacters(in: .whitespacesAndNewlines)
         self.prompt = nil
         Task {
@@ -175,7 +195,8 @@ final class LibraryModel: ObservableObject {
 
     private func run(_ op: (API) async throws -> Void) async {
         guard let api = API.current else { return }
-        do { try await op(api) } catch { self.error = error.localizedDescription }
+        actionError = nil
+        do { try await op(api) } catch { self.actionError = error.localizedDescription }
         await load()
     }
 
@@ -217,7 +238,7 @@ final class LibraryModel: ObservableObject {
             guard let nb = try await API.current?.createNotebook(title: title, background: .grid, scratch: true) else { return }
             await load()
             open(nb.id)
-        } catch { self.error = error.localizedDescription }
+        } catch { self.actionError = error.localizedDescription }
     }
 
     func createNotebook(title: String, in folderId: String?) async {
@@ -225,7 +246,7 @@ final class LibraryModel: ObservableObject {
             guard let nb = try await API.current?.createNotebook(title: title, background: .lined, folderId: folderId) else { return }
             await load()
             open(nb.id)
-        } catch { self.error = error.localizedDescription }
+        } catch { self.actionError = error.localizedDescription }
     }
 
     @discardableResult
@@ -235,7 +256,7 @@ final class LibraryModel: ObservableObject {
             await load()
             return folder
         } catch {
-            self.error = error.localizedDescription
+            self.actionError = error.localizedDescription
             return nil
         }
     }
@@ -262,9 +283,18 @@ final class LibraryModel: ObservableObject {
     }
 
     func delete(_ nb: Notebook) async {
+        defer { resumeNotebookUploads?(nb.id) }
         await run { api in
+            await prepareNotebookDeletion?(nb.id)
             try await api.deleteNotebook(nb.id)
-            for page in nb.pages { try? FileManager.default.removeItem(at: LocalDrawings.url(page.id)) }
+            // A page may have moved out since this confirmation was opened.
+            // Never tombstone an id that still belongs to another notebook.
+            if let remaining = try? await api.notebooks() {
+                let retained = Set(remaining.notebooks.flatMap { $0.pages.map(\.id) })
+                let ids = nb.pages.map(\.id).filter { !retained.contains($0) }
+                LocalDrawings.remove(ids)
+                NotificationCenter.default.post(name: .pagesDeleted, object: nil, userInfo: ["pageIds": ids])
+            }
             path.removeAll { route in
                 if case .notebook(let destination) = route { return destination.notebookId == nb.id }
                 return false
@@ -283,7 +313,7 @@ final class LibraryModel: ObservableObject {
             guard let nb = try await API.current?.importPDF(data, title: url.deletingPathExtension().lastPathComponent, folderId: folderId) else { return }
             await load()
             open(nb.id)
-        } catch { self.error = error.localizedDescription }
+        } catch { self.actionError = error.localizedDescription }
     }
 
     /// Drag and drop payloads are "notebook:<id>" or "folder:<id>".
@@ -351,7 +381,23 @@ struct LibraryView: View {
         } message: { notebook in
             Text("\(notebook.pages.count) page\(notebook.pages.count == 1 ? "" : "s"), your ink and Claude's marks are removed from ClaudeBook. This can't be undone.")
         }
-        .onAppear { live.onCommand = { event in model.handleCommand(event) } }
+        .onAppear {
+            live.onCommand = { event in model.handleCommand(event) }
+            live.onLibraryEvent = { event in
+                if ["hello", "notebook", "folders"].contains(event.type) { Task { await model.load() } }
+            }
+        }
+        .onChange(of: model.prompt?.id) { _, value in if value == nil { Task { await model.load() } } }
+        .overlay(alignment: .bottom) {
+            if let message = model.actionError {
+                HStack {
+                    Text(message).foregroundStyle(.red)
+                    Button("Dismiss") { model.actionError = nil }
+                }
+                .padding().background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12)).padding()
+                .accessibilityIdentifier("library.actionError")
+            }
+        }
         .task {
             let view = await model.load()
             let env = ProcessInfo.processInfo.environment
@@ -418,14 +464,14 @@ struct LibraryPrompts: ViewModifier {
 
     func body(content: Content) -> some View {
         content
-            .alert(textTitle, isPresented: showing(\.asksForText)) {
+            .alert(textTitle, isPresented: showing(\.asksForText), presenting: model.prompt) { prompt in
                 TextField(placeholder, text: $model.promptText)
-                Button(confirmLabel) { model.submitPrompt() }
+                Button(confirmLabel) { model.submitPrompt(prompt) }.accessibilityIdentifier("library.promptConfirm")
                 Button("Cancel", role: .cancel) {}
             }
-            .confirmationDialog(deleteTitle, isPresented: showing(\.isDeletion), titleVisibility: .visible) {
-                Button(deleteLabel, role: .destructive) { model.submitPrompt() }
-            } message: {
+            .confirmationDialog(deleteTitle, isPresented: showing(\.isDeletion), titleVisibility: .visible, presenting: model.prompt) { prompt in
+                Button(deleteLabel, role: .destructive) { model.submitPrompt(prompt) }.accessibilityIdentifier("library.confirmDelete")
+            } message: { _ in
                 Text(deleteMessage)
             }
             .sheet(item: Binding(get: { model.prompt?.picksFolder == true ? model.prompt : nil }, set: { if $0 == nil { model.prompt = nil } })) { prompt in
@@ -744,8 +790,14 @@ struct ShelfView: View {
     private var notebooksSection: some View {
         let notebooks = model.notebooks(in: folderId)
         if notebooks.isEmpty {
-            if isRoot && model.keptCount == 0 && model.folders.isEmpty {
-                ContentUnavailableView("Your first notebook", systemImage: "book.closed", description: Text("Create a notebook or import a PDF to begin."))
+            if isRoot && model.keptCount == 0 {
+                ContentUnavailableView {
+                    Label("No notebooks yet", systemImage: "book.closed")
+                } description: { Text("Create a notebook or import a PDF to begin.") } actions: {
+                    Button("New notebook") { model.ask(.newNotebook(folderId: nil)) }
+                        .buttonStyle(.borderedProminent).accessibilityIdentifier("library.emptyCreate")
+                }
+                .accessibilityIdentifier("library.empty")
                     .frame(maxWidth: .infinity)
             } else if !isRoot && model.subfolders(of: folderId).isEmpty {
                 ContentUnavailableView {

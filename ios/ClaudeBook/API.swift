@@ -145,6 +145,29 @@ struct API {
         _ = try await request("notebooks/\(notebookId)/pages", method: "POST", json: Body(count: 1, afterIndex: afterIndex, background: background))
     }
 
+    func deletePages(notebookId: String, pageIds: [String]) async throws -> Notebook {
+        struct Body: Encodable { var pageIds: [String] }
+        return try decode(Notebook.self, await request("notebooks/\(notebookId)/pages/delete", method: "POST", json: Body(pageIds: pageIds)))
+    }
+
+    func reorderPages(notebookId: String, pageIds: [String]) async throws -> Notebook {
+        struct Body: Encodable { var pageIds: [String] }
+        return try decode(Notebook.self, await request("notebooks/\(notebookId)/pages/reorder", method: "POST", json: Body(pageIds: pageIds)))
+    }
+
+    struct PageTransfer: Decodable { var notebook: Notebook; var pages: [Page] }
+
+    func duplicatePages(_ pageIds: [String], into notebookId: String, afterPage: Int) async throws -> PageTransfer {
+        struct Body: Encodable { var pageIds: [String]; var targetNotebookId: String; var afterPage: Int }
+        return try decode(PageTransfer.self, await request("pages/duplicate", method: "POST", json: Body(pageIds: pageIds, targetNotebookId: notebookId, afterPage: afterPage)))
+    }
+
+    func movePages(_ pageIds: [String], into notebookId: String, afterPage: Int) async throws -> PageTransfer {
+        struct Body: Encodable { var pageIds: [String]; var targetNotebookId: String; var afterPage: Int }
+        return try decode(PageTransfer.self, await request("pages/move", method: "POST", json: Body(pageIds: pageIds, targetNotebookId: notebookId, afterPage: afterPage)))
+    }
+
+
     func setView(notebookId: String, pageId: String) async throws {
         struct Body: Encodable { var notebookId: String; var pageId: String }
         _ = try await request("view", method: "POST", json: Body(notebookId: notebookId, pageId: pageId))
@@ -230,6 +253,8 @@ final class LiveConnection: ObservableObject {
     /// Requests from Claude (open a page, confirm a delete). The library owns navigation, so it handles
     /// these whichever screen is showing, while onEvent belongs to the screen on top.
     var onCommand: ((LiveEvent) -> Void)?
+    /// Library metadata must refresh even while the editor owns onEvent.
+    var onLibraryEvent: ((LiveEvent) -> Void)?
     static let commands: Set<String> = ["openPage", "deleteRequest"]
     private var task: URLSessionWebSocketTask?
     private var running = false
@@ -271,6 +296,7 @@ final class LiveConnection: ObservableObject {
                 case .success(let message):
                     self.connected = true
                     if case .string(let text) = message, let event = try? JSONDecoder().decode(LiveEvent.self, from: Data(text.utf8)) {
+                        self.onLibraryEvent?(event)
                         if Self.commands.contains(event.type) { self.onCommand?(event) } else { self.onEvent?(event) }
                     }
                     self.receive(on: task)

@@ -1,8 +1,23 @@
 import XCTest
 import UIKit
+import PencilKit
 @testable import ClaudeBook
 
 final class NotebookLayoutTests: XCTestCase {
+    @MainActor
+    func testConfirmedDeletionStopsLateDrawingSavesAndPendingUploads() {
+        let id = "deleted-test-" + UUID().uuidString
+        LocalDrawings.save(PKDrawing(), pageId: id)
+        PendingUploads.all.insert(id)
+        XCTAssertTrue(LocalDrawings.exists(id))
+        LocalDrawings.remove([id])
+        LocalDrawings.save(PKDrawing(), pageId: id)
+        PendingUploads.all.insert(id)
+        XCTAssertFalse(LocalDrawings.exists(id))
+        XCTAssertNil(LocalDrawings.load(id))
+        XCTAssertFalse(PendingUploads.all.contains(id))
+    }
+
     func testBottomSearchMatchKeepsViewportCenterOnMatchingPage() {
         let region = PageRegion(x: 120, y: 1200, w: 650, h: 45)
         let viewport: CGFloat = 1100

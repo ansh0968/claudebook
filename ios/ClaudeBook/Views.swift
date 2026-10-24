@@ -11,6 +11,8 @@ enum StudyPalette {
 extension Notification.Name {
     /// Claude asked to flip to a page in the notebook that's already open. userInfo: notebookId, pageId.
     static let claudeOpenPage = Notification.Name("claudeOpenPage")
+    static let pagesDeleted = Notification.Name("pagesDeleted")
+    static let localDrawingChanged = Notification.Name("localDrawingChanged")
 }
 
 struct NotebookDestination: Hashable {
@@ -133,6 +135,7 @@ struct NotebookEditor: View {
     var initialRegion: PageRegion? = nil
     @EnvironmentObject private var live: LiveConnection
     @EnvironmentObject private var library: LibraryModel
+    @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.colorScheme) private var colorScheme
     @AppStorage("invertPDFs") private var invertPDFs = true
@@ -155,7 +158,17 @@ struct NotebookEditor: View {
         NotebookCanvas(controller: controller, dark: colorScheme == .dark, invertPDFs: invertPDFs)
             .ignoresSafeArea(edges: .bottom)
             .overlay {
-                if notebook == nil {
+                if let notebook, notebook.pages.isEmpty {
+                    ContentUnavailableView {
+                        Label("No pages", systemImage: "doc")
+                    } description: { Text("Add a page to start writing in this notebook.") } actions: {
+                        Button("Add a page") { Task { await addPage(after: -1) } }
+                            .buttonStyle(.borderedProminent).disabled(addingPage)
+                            .accessibilityIdentifier("editor.emptyAdd")
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(StudyPalette.background)
+                } else if notebook == nil {
                     if let loadError {
                         ContentUnavailableView {
                             Label("Couldn’t open notebook", systemImage: "wifi.exclamationmark")
@@ -183,7 +196,7 @@ struct NotebookEditor: View {
                     .padding(.horizontal, 22).padding(.top, 10)
                 }
             }
-            .navigationTitle(notebook.map { "\($0.title) · \(index + 1)/\($0.pages.count)" } ?? "")
+            .navigationTitle(notebook.map { $0.pages.isEmpty ? $0.title : "\($0.title) · \(index + 1)/\($0.pages.count)" } ?? "")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItemGroup(placement: .topBarLeading) {
@@ -221,10 +234,18 @@ struct NotebookEditor: View {
                         Label("Ask Claude", systemImage: askingClaude ? "xmark.circle" : "questionmark.bubble")
                     }
                     .tint(StudyPalette.coral)
-                    .disabled(notebook == nil || markingDoubt)
+                    .disabled(notebook?.pages.isEmpty != false || markingDoubt)
                     .accessibilityLabel(askingClaude ? "Cancel question selection" : "Ask Claude about part of this page")
                     .accessibilityIdentifier("editor.askClaude")
                     Menu {
+                        if let notebook {
+                            Section("Notebook") {
+                                Button { controller.flush(); library.ask(.renameNotebook(notebook)) } label: { Label("Rename notebook", systemImage: "pencil") }
+                                    .accessibilityIdentifier("editor.renameNotebook")
+                                Button(role: .destructive) { library.ask(.deleteNotebook(notebook)) } label: { Label("Delete notebook", systemImage: "trash") }
+                                    .accessibilityIdentifier("editor.deleteNotebook")
+                            }
+                        }
                         Section {
                             Toggle(isOn: $pencilOnly) { Label("Draw with Apple Pencil only", systemImage: "applepencil") }
                         }
@@ -243,9 +264,17 @@ struct NotebookEditor: View {
             .sheet(isPresented: $showPages) {
                 if let notebook {
                     // Layer events update the controller directly; thumbnails should show those changes too.
-                    PageGrid(notebook: notebookWithCurrentPages(notebook), current: index) { i in
+                    PageGrid(notebook: notebookWithCurrentPages(notebook), currentPageId: controller.currentPage?.id,
+                             beforeMutation: { discarding in
+                                 if discarding { await controller.pauseUploads() }
+                                 else { try await controller.flushAndWait() }
+                             }, onChanged: { updated in
+                                 applyNotebook(updated)
+                                 controller.flush()
+                                 Task { await library.load() }
+                             }, onFailure: { controller.flush() }) { pageId in
                         showPages = false
-                        controller.scrollTo(page: i, animated: false)
+                        if let i = controller.pages.firstIndex(where: { $0.id == pageId }) { controller.scrollTo(page: i, animated: false) }
                     }
                 }
             }
@@ -254,6 +283,8 @@ struct NotebookEditor: View {
             .onChange(of: scenePhase) { _, p in if p != .active { controller.flush() } }
             .task { await load() }
             .onAppear {
+                library.prepareNotebookDeletion = { id in if id == notebookId { await controller.pauseUploads() } }
+                library.resumeNotebookUploads = { id in if id == notebookId { controller.flush() } }
                 controller.onSyncState = { s in sync = s }
                 controller.onPageChange = { i in index = i }
                 controller.onPullToAdd = { Task { await addPage(after: controller.pages.count - 1) } }
@@ -303,7 +334,15 @@ struct NotebookEditor: View {
                     if let i = controller.pages.firstIndex(where: { $0.id == pageId }) { controller.scrollTo(page: i, animated: true) }
                 }
             }
-            .onDisappear { controller.flush(); controller.cancelDoubtSelection() }
+            .onReceive(NotificationCenter.default.publisher(for: .pagesDeleted)) { note in
+                guard let ids = note.userInfo?["pageIds"] as? [String] else { return }
+                controller.discardPages(ids)
+            }
+            .onDisappear {
+                controller.flush(); controller.cancelDoubtSelection()
+                library.prepareNotebookDeletion = nil
+                library.resumeNotebookUploads = nil
+            }
     }
 
     private var syncIcon: String {
@@ -327,10 +366,17 @@ struct NotebookEditor: View {
             guard let api = API.current else { return }
             nb = try await api.notebook(notebookId)
             loadError = nil
-        } catch { loadError = error.localizedDescription; return }
-        notebook = nb
-        controller.setNotebook(nb)
-        index = controller.currentIndex
+        } catch {
+            if let apiError = error as? APIError, apiError.status == 404 {
+                let ids = controller.pages.map(\.id)
+                controller.discardPages(ids)
+                notebook = nil
+                dismiss()
+                Task { await library.load() }
+            } else { notice = error.localizedDescription; loadError = error.localizedDescription }
+            return
+        }
+        applyNotebook(nb)
         if !initialJumpDone, let initialPageId, let target = nb.pages.firstIndex(where: { $0.id == initialPageId }) {
             initialJumpDone = true
             if let initialRegion {
@@ -340,6 +386,19 @@ struct NotebookEditor: View {
             }
         }
         runTestHooks()
+    }
+
+    private func applyNotebook(_ updated: Notebook) {
+        let selected = controller.currentPage?.id
+        let oldIndex = index
+        notebook = updated
+        controller.setNotebook(updated)
+        index = controller.currentIndex
+        if let selected, let i = updated.pages.firstIndex(where: { $0.id == selected }) {
+            controller.scrollTo(page: i, animated: false)
+        } else if !updated.pages.isEmpty {
+            controller.scrollTo(page: min(oldIndex, updated.pages.count - 1), animated: false)
+        }
     }
 
     /// Hooks for the CI smoke test, which can't touch the screen.
@@ -359,17 +418,18 @@ struct NotebookEditor: View {
 
     /// Insert a blank page after page `i` and scroll to it.
     private func addPage(after i: Int) async {
-        guard !addingPage, let nb = notebook, nb.pages.indices.contains(i) else { return }
+        guard !addingPage, let nb = notebook else { return }
+        let after = nb.pages.isEmpty ? -1 : min(max(-1, i), nb.pages.count - 1)
         addingPage = true
         defer { addingPage = false; controller.endPullToAdd() }
         do {
-            try await API.current?.addPage(notebookId: nb.id, afterIndex: i, background: nb.pages[i].background)
+            try await API.current?.addPage(notebookId: nb.id, afterIndex: after, background: nb.pages.isEmpty ? .lined : nb.pages[max(0, after)].background)
         } catch {
-            sync = "offline"
+            notice = "Couldn’t add a page: \(error.localizedDescription)"
             return
         }
         await load()
-        controller.scrollTo(page: i + 1, animated: true)
+        controller.scrollTo(page: after + 1, animated: true)
     }
 
     private func undoClaude(count: Int?) {
@@ -442,40 +502,6 @@ struct AppearanceMenu: View {
     }
 }
 
-/// All pages of a notebook as thumbnails. Tap one to jump there.
-struct PageGrid: View {
-    let notebook: Notebook
-    let current: Int
-    var onPick: (Int) -> Void
-    @Environment(\.dismiss) private var dismiss
-
-    var body: some View {
-        NavigationStack {
-            ScrollView {
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 140), spacing: 20)], spacing: 20) {
-                    ForEach(Array(notebook.pages.enumerated()), id: \.element.id) { i, page in
-                        Button { onPick(i) } label: {
-                            VStack(spacing: 6) {
-                                PageThumbnail(page: page)
-                                    .overlay(RoundedRectangle(cornerRadius: 4).stroke(i == current ? Color.accentColor : .clear, lineWidth: 3))
-                                Text("\(i + 1)").font(.caption).foregroundStyle(.secondary)
-                            }
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel("Page \(i + 1)\(i == current ? ", current page" : "")")
-                        .accessibilityIdentifier("page.\(page.id)")
-                    }
-                }
-                .padding(20)
-            }
-            .navigationTitle(notebook.title)
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
-            .background(StudyPalette.background)
-        }
-    }
-}
-
 struct PageThumbnail: View {
     let page: Page
     @Environment(\.colorScheme) private var colorScheme
@@ -491,7 +517,10 @@ struct PageThumbnail: View {
         .aspectRatio(PageGeometry.width / PageGeometry.height, contentMode: .fit)
         .clipShape(RoundedRectangle(cornerRadius: 4))
         .shadow(color: .black.opacity(0.12), radius: 4, y: 1)
-        .task(id: "\(page.id)-\(dark)-\(invertPDFs)") { image = await render() }
+        .task(id: "\(page.id)-\(page.snapshotVersion)-\(dark)-\(invertPDFs)") { image = await render() }
+        .onReceive(NotificationCenter.default.publisher(for: .localDrawingChanged)) { note in
+            if note.userInfo?["pageId"] as? String == page.id { Task { image = await render() } }
+        }
     }
 
     private func render() async -> UIImage {

@@ -143,6 +143,164 @@ final class StudyFlowTests: XCTestCase {
         let _: SmokeOK = try await api.request("folders/\(folder.id)", method: "DELETE")
     }
 
+    @MainActor
+    func testNotebookRenameAndDeleteConfirmationsUseTheirCapturedNotebook() async throws {
+        let notebook: SmokeNotebook = try await api.request("notebooks", method: "POST", body: ["title": "CRUD", "pages": 1])
+        let app = launch(autoopen: false)
+        defer { app.terminate() }
+        let card = app.buttons["notebook.\(notebook.id)"]
+        try requireCRUDReady(card)
+        card.press(forDuration: 1.1)
+        try requireCRUDReady(app.buttons["Rename"])
+        app.buttons["Rename"].tap()
+        let title = app.alerts.textFields.firstMatch
+        try requireCRUDReady(title)
+        title.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5)).tap()
+        title.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: 12) + "CRUD renamed")
+        let save = app.buttons["library.promptConfirm"]
+        try requireCRUDReady(save)
+        save.tap()
+        let renamed: SmokeNotebook = try await eventually {
+            let current: SmokeNotebook = try await self.api.request("notebooks/\(notebook.id)")
+            return current.title == "CRUD renamed" ? current : nil
+        }
+        XCTAssertEqual(renamed.id, notebook.id)
+        try requireCRUDReady(card)
+        card.press(forDuration: 1.1)
+        try requireCRUDReady(app.buttons["Delete"].firstMatch)
+        app.buttons["Delete"].firstMatch.tap()
+        let confirm = app.buttons["library.confirmDelete"]
+        try requireCRUDReady(confirm)
+        confirm.tap()
+        let deleted: Bool = try await eventually {
+            let list: SmokeList = try await self.api.request("notebooks")
+            return list.notebooks.contains { $0.id == notebook.id } ? nil : true
+        }
+        XCTAssertTrue(deleted)
+    }
+
+    @MainActor
+    func testPageActionsDuplicateReorderDeleteAndMoveStablePageIds() async throws {
+        executionTimeAllowance = 120
+        let notebook: SmokeNotebook = try await api.request("notebooks", method: "POST", body: ["title": "Page operations", "pages": 2])
+        let target: SmokeNotebook = try await api.request("notebooks", method: "POST", body: ["title": "Page destination", "pages": 1])
+        let first = notebook.pages[0].id
+        try await api.setView(notebook: notebook.id, page: first)
+        let app = launch()
+        defer { app.terminate() }
+        try requireCRUDReady(app.buttons["editor.pages"])
+        app.buttons["editor.pages"].tap()
+        try requireCRUDReady(app.buttons["pages.actions.\(first)"])
+        app.buttons["pages.actions.\(first)"].tap()
+        try requireCRUDReady(app.buttons["pages.duplicate.\(first)"])
+        app.buttons["pages.duplicate.\(first)"].tap()
+        let duplicated: SmokeNotebook = try await eventually {
+            let current: SmokeNotebook = try await self.api.request("notebooks/\(notebook.id)")
+            return current.pages.count == 3 ? current : nil
+        }
+        let copy = duplicated.pages[1].id
+        XCTAssertNotEqual(copy, first)
+        XCTAssertEqual(duplicated.pages[2].id, notebook.pages[1].id)
+        try requireCRUDReady(app.buttons["pages.actions.\(copy)"])
+        app.buttons["pages.actions.\(copy)"].tap()
+        try requireCRUDReady(app.buttons["pages.down.\(copy)"])
+        app.buttons["pages.down.\(copy)"].tap()
+        let reordered: SmokeNotebook = try await eventually {
+            let current: SmokeNotebook = try await self.api.request("notebooks/\(notebook.id)")
+            return current.pages.last?.id == copy ? current : nil
+        }
+        XCTAssertEqual(reordered.pages.map(\.id), [first, notebook.pages[1].id, copy])
+        try requireCRUDReady(app.buttons["pages.actions.\(copy)"])
+        app.buttons["pages.actions.\(copy)"].tap()
+        try requireCRUDReady(app.buttons["pages.delete.\(copy)"])
+        app.buttons["pages.delete.\(copy)"].tap()
+        try requireCRUDReady(app.buttons["pages.confirmDelete"])
+        app.buttons["pages.confirmDelete"].tap()
+        let deleted: SmokeNotebook = try await eventually {
+            let current: SmokeNotebook = try await self.api.request("notebooks/\(notebook.id)")
+            return current.pages.count == 2 ? current : nil
+        }
+        XCTAssertEqual(deleted.pages.map(\.id), notebook.pages.map(\.id))
+        try requireCRUDReady(app.buttons["pages.actions.\(first)"])
+        app.buttons["pages.actions.\(first)"].tap()
+        try requireCRUDReady(app.buttons["Move to notebook…"])
+        app.buttons["Move to notebook…"].tap()
+        try requireCRUDReady(app.buttons["pages.target.\(target.id)"])
+        app.buttons["pages.target.\(target.id)"].tap()
+        let moved: SmokeNotebook = try await eventually {
+            let current: SmokeNotebook = try await self.api.request("notebooks/\(target.id)")
+            return current.pages.last?.id == first ? current : nil
+        }
+        XCTAssertEqual(moved.pages.map(\.id), target.pages.map(\.id) + [first])
+        let source: SmokeNotebook = try await api.request("notebooks/\(notebook.id)")
+        XCTAssertEqual(source.pages.map(\.id), [notebook.pages[1].id])
+    }
+
+    @MainActor
+    func testDeletingOnlyPageShowsAnAddPageAction() async throws {
+        let notebook: SmokeNotebook = try await api.request("notebooks", method: "POST", body: ["title": "Empty pages", "pages": 1])
+        let pageId = notebook.pages[0].id
+        try await api.setView(notebook: notebook.id, page: pageId)
+        let app = launch()
+        defer { app.terminate() }
+        try requireCRUDReady(app.buttons["editor.pages"])
+        app.buttons["editor.pages"].tap()
+        try requireCRUDReady(app.buttons["pages.actions.\(pageId)"])
+        app.buttons["pages.actions.\(pageId)"].tap()
+        try requireCRUDReady(app.buttons["pages.delete.\(pageId)"])
+        app.buttons["pages.delete.\(pageId)"].tap()
+        try requireCRUDReady(app.buttons["pages.confirmDelete"])
+        app.buttons["pages.confirmDelete"].tap()
+        let empty: SmokeNotebook = try await eventually {
+            let current: SmokeNotebook = try await self.api.request("notebooks/\(notebook.id)")
+            return current.pages.isEmpty ? current : nil
+        }
+        XCTAssertTrue(empty.pages.isEmpty)
+        try requireCRUDReady(app.buttons["Done"])
+        app.buttons["Done"].tap()
+        try requireCRUDReady(app.buttons["editor.emptyAdd"])
+        app.buttons["editor.emptyAdd"].tap()
+        let added: SmokeNotebook = try await eventually {
+            let current: SmokeNotebook = try await self.api.request("notebooks/\(notebook.id)")
+            return current.pages.count == 1 ? current : nil
+        }
+        XCTAssertNotEqual(added.pages[0].id, pageId)
+    }
+
+    /// Runs last against the throwaway server; other study tests need their seeded fixtures.
+    @MainActor
+    func testZZDeletingTheFinalNotebookLeavesAnEmptyLibrary() async throws {
+        let list: SmokeList = try await api.request("notebooks")
+        for notebook in list.notebooks {
+            let _: SmokeOK = try await api.request("notebooks/\(notebook.id)", method: "DELETE")
+        }
+        let final: SmokeNotebook = try await api.request("notebooks", method: "POST", body: ["title": "Last notebook", "pages": 1])
+        let app = launch(autoopen: false)
+        defer { app.terminate() }
+        let card = app.buttons["notebook.\(final.id)"]
+        try requireCRUDReady(card)
+        card.press(forDuration: 1.1)
+        try requireCRUDReady(app.buttons["Delete"].firstMatch)
+        app.buttons["Delete"].firstMatch.tap()
+        try requireCRUDReady(app.buttons["library.confirmDelete"])
+        app.buttons["library.confirmDelete"].tap()
+        let empty: Bool = try await eventually {
+            let current: SmokeList = try await self.api.request("notebooks")
+            return current.notebooks.isEmpty ? true : nil
+        }
+        XCTAssertTrue(empty)
+        try requireCRUDReady(app.buttons["library.emptyCreate"])
+    }
+
+    @MainActor
+    private func requireCRUDReady(_ element: XCUIElement, timeout: TimeInterval = 12) throws {
+        let ready = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == true AND enabled == true AND hittable == true"), object: element)
+        guard XCTWaiter.wait(for: [ready], timeout: timeout) == .completed else {
+            XCTFail("Control did not become ready: \(element)")
+            throw SmokeError.timeout
+        }
+    }
+
     private func fixture() async throws -> SmokeNotebook {
         let list: SmokeList = try await api.request("notebooks")
         return try XCTUnwrap(list.notebooks.first { $0.title == "Organic chemistry" }, "Run scripts/smoke-fixture.mjs first")
