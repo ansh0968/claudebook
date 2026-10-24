@@ -131,8 +131,9 @@ struct API {
         _ = try await request("folders/\(id)", method: "DELETE")
     }
 
-    func deleteNotebook(_ id: String) async throws {
-        _ = try await request("notebooks/\(id)", method: "DELETE")
+    func deleteNotebook(_ id: String) async throws -> [String]? {
+        struct Deleted: Decodable { var deletedPageIds: [String]? }
+        return try decode(Deleted.self, await request("notebooks/\(id)", method: "DELETE")).deletedPageIds
     }
 
     /// The user kept a notebook Claude asked to delete.

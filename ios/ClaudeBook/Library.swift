@@ -286,15 +286,18 @@ final class LibraryModel: ObservableObject {
         defer { resumeNotebookUploads?(nb.id) }
         await run { api in
             await prepareNotebookDeletion?(nb.id)
-            try await api.deleteNotebook(nb.id)
-            // A page may have moved out since this confirmation was opened.
-            // Never tombstone an id that still belongs to another notebook.
-            if let remaining = try? await api.notebooks() {
+            let deleted = try await api.deleteNotebook(nb.id)
+            let ids: [String]
+            if let deleted {
+                ids = deleted
+            } else if let remaining = try? await api.notebooks() {
+                // Older servers omit exact ids. Preserve any page moved elsewhere
+                // since this confirmation was opened, and defer uncertain cleanup.
                 let retained = Set(remaining.notebooks.flatMap { $0.pages.map(\.id) })
-                let ids = nb.pages.map(\.id).filter { !retained.contains($0) }
-                LocalDrawings.remove(ids)
-                NotificationCenter.default.post(name: .pagesDeleted, object: nil, userInfo: ["pageIds": ids])
-            }
+                ids = nb.pages.map(\.id).filter { !retained.contains($0) }
+            } else { ids = [] }
+            LocalDrawings.remove(ids)
+            NotificationCenter.default.post(name: .pagesDeleted, object: nil, userInfo: ["pageIds": ids])
             path.removeAll { route in
                 if case .notebook(let destination) = route { return destination.notebookId == nb.id }
                 return false
