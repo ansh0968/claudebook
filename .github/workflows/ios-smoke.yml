@@ -163,6 +163,7 @@ jobs:
           sleep 4
           xcrun simctl io "$UDID" screenshot shots/13-setup.png
       - name: Drawing acceptance scenes
+        if: always()
         working-directory: ios
         run: |
           UDID=$(xcrun simctl list devices available -j | jq -r '[.devices[][] | select(.name | test("iPad Pro"))][0].udid')
