@@ -31,6 +31,7 @@ const inputs: ItemInput[] = [
 ];
 const items = prepareItems(inputs.map(i => ItemSchema.parse(i)));
 const axesBox = itemBBox(items[0]), plotBox = itemBBox(items[2]);
+assert.equal(items[3].parts![0].fill, "#FFFFFF", "Open point fill must use explicit hex supported by both renderers");
 assert.ok(plotBox.x >= axesBox.x && plotBox.y >= axesBox.y && plotBox.x + plotBox.w <= axesBox.x + axesBox.w && plotBox.y + plotBox.h <= axesBox.y + axesBox.h);
 for (const item of items) {
   const before = itemBBox(item), moved = translateItem(item, 27.5, -11.25), after = itemBBox(moved);

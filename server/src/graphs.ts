@@ -102,7 +102,7 @@ export function prepareGraph(i: GraphInput, available: Reference[]): { parts: Pa
   if (i.type === "point") {
     const g = i.axes ? findAxes(i.axes, available) : undefined, at = g ? pagePoint(g, ...i.at) : i.at;
     const [x, y] = at, r = 4, k = r * 0.5522847498;
-    parts.push({ d: `M${x + r},${y}C${x + r},${y + k} ${x + k},${y + r} ${x},${y + r}C${x - k},${y + r} ${x - r},${y + k} ${x - r},${y}C${x - r},${y - k} ${x - k},${y - r} ${x},${y - r}C${x + k},${y - r} ${x + r},${y - k} ${x + r},${y}Z`, stroke: color, width: 2, fill: i.filled === false ? "white" : color });
+    parts.push({ d: `M${x + r},${y}C${x + r},${y + k} ${x + k},${y + r} ${x},${y + r}C${x - k},${y + r} ${x - r},${y + k} ${x - r},${y}C${x - r},${y - k} ${x - k},${y - r} ${x},${y - r}C${x + k},${y - r} ${x + r},${y - k} ${x + r},${y}Z`, stroke: color, width: 2, fill: i.filled === false ? "#FFFFFF" : color });
     const pos = i.label_pos ?? "ne";
     if (i.label) parts.push(label(i.label, [x + (pos.endsWith("e") ? 10 : -10), y + (pos.startsWith("n") ? -28 : 8)], color, pos.endsWith("e") ? "left" : "right"));
     return { parts, graph: g };
