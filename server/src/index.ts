@@ -6,11 +6,12 @@ import { fileURLToPath } from "node:url";
 import express, { type NextFunction, type Request, type Response } from "express";
 import { WebSocketServer, type WebSocket } from "ws";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import { renderHandwriting } from "./handwriting.js";
+import { renderLegacyHandwriting } from "./handwriting.js";
 import { buildMcpServer } from "./mcp.js";
 import { PDF_ID, pdfPath, savePdf } from "./pdf.js";
 import { claudeLayerSvg, renderPage } from "./render.js";
 import { Store, type Background, type TextBox } from "./store.js";
+import { parsePageRegion } from "./regions.js";
 
 const PORT = Number(process.env.PORT ?? 8787);
 const DATA_DIR = process.env.DATA_DIR ?? path.resolve("data");
@@ -23,9 +24,12 @@ if (SECRET.length < 16) {
 
 const store = new Store(DATA_DIR);
 // Text drawn before handwriting outlines existed gets them now, so the app renders it in the same font.
-const upgraded = store.upgradeItems((item) =>
-  item.type === "text" && !item.d ? { ...item, ...renderHandwriting(item.text, item.x, item.y, item.size ?? 32) } : undefined,
-);
+const upgraded = store.upgradeItems((item) => {
+  if (item.type !== "text" || item.d) return;
+  const { unsupported, ...outline } = renderLegacyHandwriting(item.text, item.x, item.y, item.size ?? 32);
+  if (unsupported) console.warn(`Text item ${item.id} needs a supported font; original text was preserved.`);
+  return { ...item, ...outline };
+});
 if (upgraded) console.log(`gave ${upgraded} text item(s) handwriting outlines`);
 const app = express();
 app.disable("x-powered-by");
@@ -74,6 +78,11 @@ api.use(requireToken, express.json({ limit: "25mb" }));
 
 api.get("/notebooks", (_req, res) => res.json({ notebooks: store.listNotebooks(), view: store.view() }));
 
+api.get("/search", (req, res) => {
+  if (typeof req.query.q !== "string" || !req.query.q.trim()) return res.status(400).json({ error: "q must be nonempty text" });
+  res.json({ results: store.searchNotes(req.query.q) });
+});
+
 api.post("/notebooks", (req, res) => {
   const { title, pages, background } = req.body as { title?: string; pages?: number; background?: Background };
   res.json(store.createNotebook(title || "Untitled", pages ?? 1, background ?? "blank"));
@@ -100,6 +109,17 @@ api.get("/pdfs/:file", (req, res) => {
 api.get("/notebooks/:id", (req, res) => {
   const nb = store.getNotebook(req.params.id);
   nb ? res.json(nb) : res.status(404).json({ error: "not found" });
+});
+
+api.patch("/notebooks/:id", (req, res) => {
+  const title = typeof req.body?.title === "string" ? req.body.title.trim() : "";
+  if (!title || title.length > 200) return res.status(400).json({ error: "title must be 1-200 characters" });
+  const nb = store.renameNotebook(req.params.id, title);
+  nb ? res.json(nb) : res.status(404).json({ error: "not found" });
+});
+
+api.delete("/notebooks/:id", (req, res) => {
+  store.deleteNotebook(req.params.id) ? res.json({ ok: true }) : res.status(404).json({ error: "not found" });
 });
 
 api.post("/notebooks/:id/pages", (req, res) => {
@@ -162,6 +182,27 @@ api.get("/pages/:id/claude.svg", (req, res) => {
 api.get("/pages/:id/claude", (req, res) => {
   const found = store.findPage(req.params.id);
   found ? res.json({ items: found.page.claudeLayer }) : res.status(404).end();
+});
+
+api.post("/pages/:id/hints/:itemId/reveal", (req, res) => {
+  const item = store.revealHint(req.params.id, req.params.itemId);
+  item ? res.json({ item }) : res.status(404).json({ error: "hint not found on this page" });
+});
+
+api.post("/pages/:id/doubts", (req, res) => {
+  if (!store.findPage(req.params.id)) return res.status(404).json({ error: "no such page" });
+  const region = parsePageRegion(req.body?.region);
+  if (!region || (req.body?.pageId !== undefined && req.body.pageId !== req.params.id)) {
+    return res.status(400).json({ error: "pageId must match the URL and region must fit within the page" });
+  }
+  res.status(201).json({ doubt: store.addDoubt(req.params.id, region) });
+});
+
+api.get("/pages/:id/doubts", (req, res) => {
+  const found = store.findPage(req.params.id);
+  if (!found) return res.status(404).json({ error: "no such page" });
+  if (req.query.status !== undefined && req.query.status !== "open") return res.status(400).json({ error: "status must be open" });
+  res.json({ doubts: found.page.doubts.filter((d) => req.query.status !== "open" || !d.resolvedAt) });
 });
 
 api.delete("/pages/:id/claude", (req, res) => {

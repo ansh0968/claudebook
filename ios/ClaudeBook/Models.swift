@@ -21,6 +21,22 @@ struct TextBox: Codable, Hashable {
     var h: Double
 }
 
+struct PageRegion: Codable, Hashable {
+    var x: Double
+    var y: Double
+    var w: Double
+    var h: Double
+}
+
+struct Doubt: Codable, Identifiable, Hashable {
+    var id: String
+    var pageId: String
+    var region: PageRegion
+    var createdAt: String
+    var resolvedAt: String?
+    var isOpen: Bool { resolvedAt == nil }
+}
+
 /// One thing Claude drew. Mirrors the server's item union with optional fields.
 struct ClaudeItem: Codable, Identifiable, Hashable {
     var id: String
@@ -44,6 +60,18 @@ struct ClaudeItem: Codable, Identifiable, Hashable {
     var closed: Bool?
     var dashed: Bool?
     var latex: String?
+    var smooth: Bool?
+    var bend: Double?
+    var halfHead: Bool?
+    var group: String?
+    var label: String?
+    var revealed: Bool?
+    var smiles: String?
+
+    enum CodingKeys: String, CodingKey {
+        case id, type, points, from, to, center, rx, ry, x, y, w, h, text, size, color, width, fill, d, closed, dashed, latex, smooth, bend, group, label, revealed, smiles
+        case halfHead = "half_head"
+    }
 }
 
 /// A page that sits on top of a PDF page. `page` is 1-based.
@@ -59,6 +87,7 @@ struct Page: Codable, Identifiable, Hashable {
     var snapshotVersion: Int
     var textBoxes: [TextBox]
     var claudeLayer: [ClaudeItem]
+    var doubts: [Doubt]?
     var updatedAt: String
 }
 
@@ -68,6 +97,17 @@ struct Notebook: Codable, Identifiable, Hashable {
     var pages: [Page]
     var createdAt: String
     var updatedAt: String
+
+    /// Latest change to the notebook or any page (ink upload, Claude's marks). ISO strings sort by time.
+    var lastActivity: String { pages.map(\.updatedAt).reduce(updatedAt) { max($0, $1) } }
+
+    var lastActivityDate: Date? {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f.date(from: lastActivity) ?? ISO8601DateFormatter().date(from: lastActivity)
+    }
+
+    var openDoubts: Int { pages.reduce(0) { $0 + ($1.doubts ?? []).filter(\.isOpen).count } }
 }
 
 struct ViewState: Codable {

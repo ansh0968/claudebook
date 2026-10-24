@@ -92,6 +92,15 @@ struct API {
         return try decode(Notebook.self, await request("notebooks", method: "POST", json: Body(title: title, pages: 1, background: background)))
     }
 
+    func renameNotebook(_ id: String, title: String) async throws {
+        struct Body: Encodable { var title: String }
+        _ = try await request("notebooks/\(id)", method: "PATCH", json: Body(title: title))
+    }
+
+    func deleteNotebook(_ id: String) async throws {
+        _ = try await request("notebooks/\(id)", method: "DELETE")
+    }
+
     func addPage(notebookId: String, afterIndex: Int, background: PageBackground) async throws {
         struct Body: Encodable { var count: Int; var afterIndex: Int; var background: PageBackground }
         _ = try await request("notebooks/\(notebookId)/pages", method: "POST", json: Body(count: 1, afterIndex: afterIndex, background: background))
@@ -126,6 +135,37 @@ struct API {
     func claudeItems(pageId: String) async throws -> [ClaudeItem] {
         struct Out: Decodable { var items: [ClaudeItem] }
         return try decode(Out.self, await request("pages/\(pageId)/claude")).items
+    }
+
+    func doubts(pageId: String) async throws -> [Doubt] {
+        struct Out: Decodable { var doubts: [Doubt] }
+        return try decode(Out.self, await request("pages/\(pageId)/doubts")).doubts
+    }
+
+    func markDoubt(pageId: String, region: PageRegion) async throws -> Doubt {
+        struct Body: Encodable { var region: PageRegion }
+        struct Out: Decodable { var doubt: Doubt }
+        return try decode(Out.self, await request("pages/\(pageId)/doubts", method: "POST", json: Body(region: region))).doubt
+    }
+
+    func revealHint(pageId: String, itemId: String) async throws -> ClaudeItem {
+        struct Body: Encodable {}
+        struct Out: Decodable { var item: ClaudeItem }
+        return try decode(Out.self, await request("pages/\(pageId)/hints/\(itemId)/reveal", method: "POST", json: Body())).item
+    }
+
+    struct SearchHit: Decodable, Identifiable {
+        var notebookId: String
+        var notebookTitle: String
+        var pageId: String
+        var pageNumber: Int
+        var box: TextBox
+        var id: String { "\(pageId):\(box.x):\(box.y):\(box.text)" }
+    }
+
+    func search(_ query: String) async throws -> [SearchHit] {
+        struct Out: Decodable { var results: [SearchHit] }
+        return try decode(Out.self, await request("search", query: [URLQueryItem(name: "q", value: query)])).results
     }
 
     func undoClaude(pageId: String, count: Int? = 1) async throws {

@@ -4,6 +4,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { nanoid } from "nanoid";
 import type { Item } from "./items.js";
+import { translateItem } from "./items.js";
+import { renderHandwriting } from "./handwriting.js";
 
 // Every page uses the same logical coordinate space so Claude can reason in round numbers.
 // A4 ratio. The iPad app scales this to whatever size it draws at.
@@ -20,6 +22,16 @@ export interface TextBox {
   h: number;
 }
 
+export interface PageRegion { x: number; y: number; w: number; h: number }
+
+export interface Doubt {
+  id: string;
+  pageId: string;
+  region: PageRegion;
+  createdAt: string;
+  resolvedAt?: string;
+}
+
 export interface Page {
   id: string;
   background: Background;
@@ -29,6 +41,7 @@ export interface Page {
   snapshotVersion: number;
   /** Handwriting recognized on device, in page coordinates. */
   textBoxes: TextBox[];
+  doubts: Doubt[];
   claudeLayer: Item[];
   updatedAt: string;
 }
@@ -73,6 +86,8 @@ export class Store {
     this.db = fs.existsSync(this.file)
       ? JSON.parse(fs.readFileSync(this.file, "utf8"))
       : { notebooks: [], view: { notebookId: null, pageId: null, updatedAt: null } };
+    // Older db.json files have no doubts field. Normalize once so every API response has an array.
+    for (const notebook of this.db.notebooks) for (const page of notebook.pages) page.doubts ??= [];
     if (this.db.notebooks.length === 0) this.seed();
   }
 
@@ -100,6 +115,33 @@ export class Store {
     return this.db.notebooks;
   }
 
+  /** Rename a notebook. Returns undefined if it doesn't exist. */
+  renameNotebook(id: string, title: string) {
+    const nb = this.getNotebook(id);
+    if (!nb) return;
+    nb.title = title;
+    nb.updatedAt = now();
+    this.save();
+    this.emit({ type: "notebook", notebookId: id });
+    return nb;
+  }
+
+  /** Remove a notebook and its page files. PDFs stay, since another notebook may share one. */
+  deleteNotebook(id: string) {
+    const nb = this.getNotebook(id);
+    if (!nb) return false;
+    this.db.notebooks = this.db.notebooks.filter((n) => n.id !== id);
+    for (const page of nb.pages) {
+      fs.rmSync(this.snapshotPath(page.id), { force: true });
+      fs.rmSync(this.drawingPath(page.id), { force: true });
+    }
+    if (this.db.view.notebookId === id) this.db.view = { notebookId: null, pageId: null, updatedAt: now() };
+    if (this.db.notebooks.length === 0) this.seed();
+    this.save();
+    this.emit({ type: "notebook", notebookId: id });
+    return true;
+  }
+
   getNotebook(id: string) {
     return this.db.notebooks.find((n) => n.id === id);
   }
@@ -112,7 +154,60 @@ export class Store {
   }
 
   newPage(background: Background = "blank"): Page {
-    return { id: nanoid(10), background, snapshotVersion: 0, textBoxes: [], claudeLayer: [], updatedAt: now() };
+    return { id: nanoid(10), background, snapshotVersion: 0, textBoxes: [], doubts: [], claudeLayer: [], updatedAt: now() };
+  }
+
+  addDoubt(pageId: string, region: PageRegion): Doubt {
+    const found = this.findPage(pageId);
+    if (!found) throw new Error(`No page ${pageId}`);
+    const valid = [region.x, region.y, region.w, region.h].every(Number.isFinite) &&
+      region.w > 0 && region.h > 0 && region.x >= 0 && region.y >= 0 &&
+      region.x + region.w <= PAGE_W && region.y + region.h <= PAGE_H;
+    if (!valid) throw new RangeError(`Doubt region must fit within ${PAGE_W} x ${PAGE_H} page coordinates`);
+    const doubt: Doubt = { id: nanoid(10), pageId, region: { ...region }, createdAt: now() };
+    found.page.doubts.push(doubt);
+    found.page.updatedAt = now();
+    this.save();
+    this.emit({ type: "doubts", notebookId: found.notebook.id, pageId, doubts: found.page.doubts });
+    return doubt;
+  }
+
+  resolveDoubt(id: string): Doubt | undefined {
+    for (const notebook of this.db.notebooks) for (const page of notebook.pages) {
+      const doubt = page.doubts.find((d) => d.id === id);
+      if (!doubt) continue;
+      if (!doubt.resolvedAt) {
+        doubt.resolvedAt = now();
+        page.updatedAt = now();
+        this.save();
+        this.emit({ type: "doubts", notebookId: notebook.id, pageId: page.id, doubts: page.doubts });
+      }
+      return doubt;
+    }
+  }
+
+  searchNotes(query: string) {
+    const needle = query.trim().toLocaleLowerCase();
+    if (!needle) return [];
+    return this.db.notebooks.flatMap((notebook) => notebook.pages.flatMap((page, index) =>
+      page.textBoxes.filter((box) => box.text.toLocaleLowerCase().includes(needle)).map((box) => ({
+        notebookId: notebook.id, notebookTitle: notebook.title, pageId: page.id, pageNumber: index + 1, box,
+      })),
+    ));
+  }
+
+  revealHint(pageId: string, itemId: string) {
+    const found = this.findPage(pageId);
+    if (!found) return;
+    const item = found.page.claudeLayer.find((i) => i.id === itemId);
+    if (!item || item.type !== "hint") return;
+    if (!item.revealed) {
+      Object.assign(item, renderHandwriting(item.text, item.x, item.y, item.size ?? 32), { revealed: true });
+      found.page.updatedAt = now();
+      this.save();
+      this.emit({ type: "claudeLayer", notebookId: found.notebook.id, pageId });
+    }
+    return item;
   }
 
   createNotebook(title: string, pageCount = 1, background: Background = "blank"): Notebook {
@@ -225,8 +320,42 @@ export class Store {
     this.emit({ type: "claudeLayer", notebookId: found.notebook.id, pageId });
     return removed;
   }
+
+  /** Target ids and a named group without affecting neighboring items. */
+  removeClaudeItemsByIds(pageId: string, ids: string[], group?: string) {
+    const found = this.findPage(pageId);
+    if (!found) throw new Error(`No page ${pageId}`);
+    const selected = new Set(ids);
+    const before = found.page.claudeLayer.length;
+    found.page.claudeLayer = found.page.claudeLayer.filter((item) => !selected.has(item.id) && !(group !== undefined && item.group === group));
+    const removed = before - found.page.claudeLayer.length;
+    if (removed) {
+      found.page.updatedAt = now();
+      this.save();
+      this.emit({ type: "claudeLayer", notebookId: found.notebook.id, pageId });
+    }
+    return removed;
+  }
+
+  moveClaudeItems(pageId: string, ids: string[], dx: number, dy: number): Item[] {
+    const found = this.findPage(pageId);
+    if (!found) throw new Error(`No page ${pageId}`);
+    if (![dx, dy].every(Number.isFinite)) throw new Error("Move offsets must be finite numbers");
+    const selected = new Set(ids);
+    // Prepare every translation first so a malformed legacy path cannot leave a partial move.
+    const moved = found.page.claudeLayer.filter((item) => selected.has(item.id)).map((item) => translateItem(item, dx, dy));
+    if (moved.length) {
+      const byId = new Map(moved.map((item) => [item.id, item]));
+      found.page.claudeLayer = found.page.claudeLayer.map((item) => byId.get(item.id) ?? item);
+      found.page.updatedAt = now();
+      this.save();
+      this.emit({ type: "claudeLayer", notebookId: found.notebook.id, pageId });
+    }
+    return moved;
+  }
 }
 
 export type StoreEvent =
   | { type: "notebook"; notebookId: string }
-  | { type: "claudeLayer"; notebookId: string; pageId: string };
+  | { type: "claudeLayer"; notebookId: string; pageId: string }
+  | { type: "doubts"; notebookId: string; pageId: string; doubts: Doubt[] };

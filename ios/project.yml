@@ -13,7 +13,10 @@ targets:
     type: application
     platform: iOS
     sources: [ClaudeBook]
-    scheme: {}
+    scheme:
+      testTargets:
+        - ClaudeBookTests
+        - ClaudeBookUITests
     info:
       path: ClaudeBook/Info.plist
       properties:
@@ -31,3 +34,26 @@ targets:
         INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
         INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad: "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight"
         INFOPLIST_KEY_UIRequiresFullScreen: NO
+  ClaudeBookTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources: [ClaudeBookTests]
+    dependencies:
+      - target: ClaudeBook
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+  ClaudeBookUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources: [ClaudeBookUITests]
+    dependencies:
+      - target: ClaudeBook
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+    info:
+      path: ClaudeBookUITests/Info.plist
+      properties:
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true

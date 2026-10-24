@@ -63,12 +63,13 @@ final class PaperView: TiledPageView {
         Self.drawPaper(style, in: ctx)
     }
 
-    static let darkPaper = UIColor(hex: "#1E1E20")
+    static let lightPaper = UIColor(hex: "#FFFEFA")
+    static let darkPaper = UIColor(hex: "#1D2527")
 
     /// Draws the page in page units. Snapshots for Claude always pass a light style.
     static func drawPaper(_ style: PaperStyle, in ctx: CGContext) {
         let w = PageGeometry.width, h = PageGeometry.height
-        ctx.setFillColor((style.dark ? darkPaper : .white).cgColor)
+        ctx.setFillColor((style.dark ? darkPaper : lightPaper).cgColor)
         ctx.fill(PageGeometry.rect)
         if let pdf = style.pdf {
             drawPDF(pdf, in: ctx, invert: style.dark && style.invertPDF)
@@ -79,13 +80,13 @@ final class PaperView: TiledPageView {
         case .blank:
             break
         case .lined:
-            ctx.setStrokeColor(UIColor(hex: dark ? "#34404F" : "#C9D7E8").cgColor)
+            ctx.setStrokeColor(UIColor(hex: dark ? "#324347" : "#D9DDD5").cgColor)
             ctx.setLineWidth(1.5)
             var y: CGFloat = 120
             while y < h - 40 { ctx.move(to: CGPoint(x: 40, y: y)); ctx.addLine(to: CGPoint(x: w - 40, y: y)); y += 40 }
             ctx.strokePath()
         case .grid:
-            ctx.setStrokeColor(UIColor(hex: dark ? "#2B323B" : "#E3EAF2").cgColor)
+            ctx.setStrokeColor(UIColor(hex: dark ? "#2D3C3E" : "#E5E7DE").cgColor)
             ctx.setLineWidth(1)
             var x: CGFloat = 25
             while x < w { ctx.move(to: CGPoint(x: x, y: 0)); ctx.addLine(to: CGPoint(x: x, y: h)); x += 25 }
@@ -93,7 +94,7 @@ final class PaperView: TiledPageView {
             while y < h { ctx.move(to: CGPoint(x: 0, y: y)); ctx.addLine(to: CGPoint(x: w, y: y)); y += 25 }
             ctx.strokePath()
         case .dotted:
-            ctx.setFillColor(UIColor(hex: dark ? "#454C56" : "#C9D2DC").cgColor)
+            ctx.setFillColor(UIColor(hex: dark ? "#455355" : "#D3D8CF").cgColor)
             var x: CGFloat = 25
             while x < w {
                 var y: CGFloat = 25
@@ -160,12 +161,14 @@ final class ClaudeLayerView: TiledPageView {
     private let lock = NSLock()
     private var _items: [ClaudeItem] = []
     private var _dark = false
+    private var _doubts: [Doubt] = []
 
-    func update(items: [ClaudeItem], dark: Bool) {
+    func update(items: [ClaudeItem], dark: Bool, doubts: [Doubt] = []) {
         lock.lock()
-        let same = items == _items && dark == _dark
+        let same = items == _items && dark == _dark && doubts == _doubts
         _items = items
         _dark = dark
+        _doubts = doubts
         lock.unlock()
         if !same { setNeedsDisplay() }
     }
@@ -173,9 +176,10 @@ final class ClaudeLayerView: TiledPageView {
     override func draw(_ rect: CGRect) {
         guard let ctx = UIGraphicsGetCurrentContext() else { return }
         lock.lock()
-        let items = _items, dark = _dark
+        let items = _items, dark = _dark, doubts = _doubts
         lock.unlock()
         for item in items { ClaudeRenderer.draw(item, dark: dark, in: ctx) }
+        for doubt in doubts where doubt.isOpen { ClaudeRenderer.drawDoubt(doubt, dark: dark, in: ctx) }
     }
 }
 
@@ -209,11 +213,12 @@ enum PDFCache {
 
 enum ClaudeRenderer {
     static let defaultColor = "#D97757"
-    /// Parsed outlines for text and math items, which tiles would otherwise re-parse for every tile.
+    /// Parsed outlines for server-rendered items, which tiles would otherwise re-parse for every tile.
     private static let paths = NSCache<NSString, CGPath>()
 
     private static func outline(_ item: ClaudeItem, _ d: String) -> CGPath {
-        let key = "\(item.id):\(d.count)" as NSString
+        // Moves and hint reveals can replace an outline without changing its character count.
+        let key = d as NSString
         if let path = paths.object(forKey: key) { return path }
         let path = SVGPath.parse(d)
         paths.setObject(path, forKey: key)
@@ -257,7 +262,13 @@ enum ClaudeRenderer {
         case "path":
             let pts = (item.points ?? []).compactMap { pt($0) }
             guard pts.count >= 2 else { return }
-            ctx.addPath(smoothPath(pts, closed: item.closed ?? false))
+            if item.smooth == false {
+                ctx.move(to: pts[0])
+                for point in pts.dropFirst() { ctx.addLine(to: point) }
+                if item.closed == true { ctx.closePath() }
+            } else {
+                ctx.addPath(smoothPath(pts, closed: item.closed ?? false))
+            }
             ctx.strokePath()
         case "line":
             guard let a = pt(item.from), let b = pt(item.to) else { return }
@@ -270,6 +281,25 @@ enum ClaudeRenderer {
             ctx.move(to: CGPoint(x: b.x - head * cos(angle - 0.45), y: b.y - head * sin(angle - 0.45)))
             ctx.addLine(to: b)
             ctx.addLine(to: CGPoint(x: b.x - head * cos(angle + 0.45), y: b.y - head * sin(angle + 0.45)))
+            ctx.strokePath()
+        case "curved_arrow":
+            guard let a = pt(item.from), let b = pt(item.to) else { return }
+            let dx = b.x - a.x, dy = b.y - a.y
+            let length = hypot(dx, dy)
+            guard length > 0 else { return }
+            let bend = CGFloat(item.bend ?? 40)
+            let normal = CGPoint(x: -dy / length, y: dx / length)
+            let control = CGPoint(x: (a.x + b.x) / 2 + normal.x * bend,
+                                  y: (a.y + b.y) / 2 + normal.y * bend)
+            ctx.move(to: a)
+            ctx.addQuadCurve(to: b, control: control)
+            let angle = atan2(b.y - control.y, b.x - control.x)
+            let head = CGFloat(10 + (item.width ?? 3) * 2)
+            let barbs = [-0.45, 0.45].map { offset in
+                CGPoint(x: b.x - head * cos(angle + offset), y: b.y - head * sin(angle + offset))
+            }
+            let selected = item.halfHead == true ? [barbs[bend >= 0 ? 1 : 0]] : barbs
+            for barb in selected { ctx.move(to: barb); ctx.addLine(to: b) }
             ctx.strokePath()
         case "ellipse":
             guard let c = pt(item.center), let rx = item.rx else { return }
@@ -302,15 +332,57 @@ enum ClaudeRenderer {
         case "svg":
             guard let d = item.d else { return }
             strokeAndFill(outline(item, d))
-        case "math":
+        case "math", "molecule":
             // The server typesets LaTeX into one flattened path in page coordinates.
             guard let d = item.d else { return }
             ctx.addPath(outline(item, d))
             ctx.setFillColor(color.cgColor)
             ctx.fillPath()
+        case "hint":
+            if item.revealed != true, let chip = rect(item) {
+                let path = CGPath(roundedRect: chip, cornerWidth: 8, cornerHeight: 8, transform: nil)
+                ctx.addPath(path)
+                ctx.setFillColor(color.withAlphaComponent(dark ? 0.16 : 0.10).cgColor)
+                ctx.fillPath()
+                ctx.addPath(path)
+                ctx.setLineWidth(1.5)
+                ctx.strokePath()
+            }
+            if let d = item.d {
+                ctx.addPath(outline(item, d))
+                ctx.setFillColor(color.cgColor)
+                ctx.fillPath()
+            } else if let x = item.x, let y = item.y {
+                let text = item.revealed == true ? (item.text ?? "") : (item.label ?? "Hint")
+                let font = UIFont(name: "Noteworthy-Light", size: (item.size ?? 28) * 0.8) ?? .systemFont(ofSize: (item.size ?? 28) * 0.8)
+                UIGraphicsPushContext(ctx)
+                (text as NSString).draw(at: CGPoint(x: x + (item.revealed == true ? 0 : 12), y: y + (item.revealed == true ? 0 : 3)), withAttributes: [.font: font, .foregroundColor: color])
+                UIGraphicsPopContext()
+            }
         default:
             break
         }
+    }
+
+    static func drawDoubt(_ doubt: Doubt, dark: Bool, in ctx: CGContext) {
+        let r = doubt.region
+        let rect = CGRect(x: r.x, y: r.y, width: r.w, height: r.h)
+        guard rect.width > 0, rect.height > 0 else { return }
+        let coral = UIColor(hex: "#D97757")
+        ctx.saveGState()
+        ctx.setStrokeColor(coral.withAlphaComponent(dark ? 0.85 : 0.62).cgColor)
+        ctx.setLineWidth(2)
+        ctx.setLineDash(phase: 0, lengths: [6, 7])
+        ctx.stroke(rect.insetBy(dx: -6, dy: -6))
+        ctx.setLineDash(phase: 0, lengths: [])
+        let badge = CGRect(x: max(0, rect.minX - 18), y: max(0, rect.minY - 18), width: 28, height: 28)
+        ctx.setFillColor(coral.cgColor)
+        ctx.fillEllipse(in: badge)
+        let mark = "?" as NSString
+        UIGraphicsPushContext(ctx)
+        mark.draw(in: badge.insetBy(dx: 7, dy: 2), withAttributes: [.font: UIFont.boldSystemFont(ofSize: 18), .foregroundColor: UIColor.white])
+        UIGraphicsPopContext()
+        ctx.restoreGState()
     }
 
     private static func rect(_ item: ClaudeItem) -> CGRect? {

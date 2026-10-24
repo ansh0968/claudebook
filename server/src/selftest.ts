@@ -2,6 +2,9 @@
 // Usage: CLAUDEBOOK_URL=http://localhost:8787 CLAUDEBOOK_SECRET=... npm test
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 
@@ -17,7 +20,7 @@ const call = async (name: string, args: Record<string, unknown> = {}, expectErro
   const r = (await client.callTool({ name, arguments: args })) as { content: any[]; isError?: boolean };
   for (const c of r.content) {
     if (c.type === "text") console.log(`[${name}]`, c.text);
-    if (c.type === "image") fs.writeFileSync(`/tmp/claude-selftest-${name}.png`, Buffer.from(c.data, "base64"));
+    if (c.type === "image") fs.writeFileSync(path.join(os.tmpdir(), `claude-selftest-${name}.png`), Buffer.from(c.data, "base64"));
   }
   if (!!r.isError !== expectError) throw new Error(`${name} ${expectError ? "should have failed" : "failed"}`);
   return r;
@@ -29,7 +32,7 @@ const api = async (path: string, init: RequestInit = {}) => {
 };
 const has = (bin: string) => {
   try {
-    execFileSync("sh", ["-c", `command -v ${bin}`], { stdio: "ignore" });
+    execFileSync(bin === "typst" ? process.env.TYPST_BIN ?? bin : bin, [bin === "typst" ? "--version" : "-v"], { stdio: "ignore" });
     return true;
   } catch {
     return false;
@@ -81,4 +84,10 @@ if (has("typst") && has("pdftoppm") && has("pdfinfo")) {
 
 await call("list_notebooks");
 await client.close();
+// Feature checks live beside this file so the same npm test command exercises
+// every feature locally, on PRs, and before deployment.
+const extension = path.extname(fileURLToPath(import.meta.url));
+for (const file of fs.readdirSync(path.dirname(fileURLToPath(import.meta.url))).sort()) {
+  if (file.endsWith(`-selftest${extension}`)) await import(new URL(file, import.meta.url).href);
+}
 console.log("selftest passed");
