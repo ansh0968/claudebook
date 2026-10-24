@@ -12,7 +12,7 @@ jobs:
   test:
     runs-on: ubuntu-latest
     env:
-      TYPST_PACKAGE_CACHE_PATH: ${{ runner.temp }}/typst-packages
+      TYPST_PACKAGE_CACHE_PATH: /tmp/claudebook-typst-packages
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
