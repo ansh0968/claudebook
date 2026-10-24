@@ -7,6 +7,8 @@ import { renderHandwriting } from "./handwriting.js";
 import { renderMolecule } from "./molecule.js";
 import svgpath from "svgpath";
 import { arrowHead, arrowPath, headsFor, pathBounds, pointBounds, type BBox, type HeadMode, type Point } from "./geometry.js";
+import { GraphSchemas, prepareGraph, type GraphTransform } from "./graphs.js";
+import { partsBBox, partsToSvg, translateParts, type Part } from "./parts.js";
 import { PAGE_H, PAGE_W } from "./store.js";
 
 const pt = z.tuple([z.number(), z.number()]).describe("[x, y] in page coordinates");
@@ -21,6 +23,7 @@ const anchor = z.enum(["top-left", "top-center", "top-right", "left-center", "ce
   .describe("Which point of the item x,y names, default top-left. The stored x,y and bbox are always the top-left");
 
 export const ItemSchema = z.discriminatedUnion("type", [
+  ...GraphSchemas,
   z.object({ type: z.literal("path"), points: z.array(pt).min(2), color, width, closed: z.boolean().optional(), smooth: z.boolean().optional(), dashed, head: head("none"), head_filled: headFilled, group })
     .describe("Freehand stroke through the points; smooth defaults true, false joins points with straight segments"),
   z.object({ type: z.literal("line"), from: pt, to: pt, color, width, dashed: z.boolean().optional(), group }),
@@ -47,7 +50,7 @@ export const ItemSchema = z.discriminatedUnion("type", [
 
 export type ItemInput = z.infer<typeof ItemSchema>;
 /** Stored items carry generated outline d, arrowhead outline head_d and dimensions where appropriate. */
-export type Item = ItemInput & { id: string; createdAt: string; d?: string; w?: number; h?: number; head_d?: string };
+export type Item = ItemInput & { id: string; createdAt: string; d?: string; w?: number; h?: number; head_d?: string; parts?: Part[]; graph?: GraphTransform };
 
 /** Fractions of the item's width and height that each anchor sits at. */
 const ANCHORS: Record<NonNullable<z.infer<typeof anchor>>, [number, number]> = {
@@ -85,11 +88,20 @@ function withHeads<T extends ItemInput>(item: T): T & { head_d?: string } {
 }
 
 /** Stamp ids and prepare outlines atomically before anything lands on the page. */
-export function prepareItems(items: ItemInput[]): Item[] {
-  return items.map((input) => {
+export function prepareItems(items: ItemInput[], existing: Item[] = []): Item[] {
+  const available = [...existing];
+  return items.map(input => {
+    const item = prepareItem(input, available);
+    available.push(item);
+    return item;
+  });
+}
+
+function prepareItem(input: ItemInput, available: Item[]): Item {
     // The iPad's path parser has no arcs, so store SVG paths with arcs already turned into curves.
     const i = input.type === "svg" ? { ...input, d: normalizeSvg(input.d) } : input;
     const base = withHeads({ ...i, id: nanoid(8), createdAt: new Date().toISOString() });
+    if (i.type === "axes" || i.type === "plot" || i.type === "shade" || i.type === "angle" || i.type === "point") return { ...base, ...prepareGraph(i, available) };
     if (i.type === "text") return anchored(base as typeof i & { id: string; createdAt: string }, renderHandwriting(i.text, i.x, i.y, i.size ?? 32)) as Item;
     if (i.type === "molecule") return { ...base, ...renderMolecule(i.smiles, i.x, i.y, i.size ?? 180) };
     if (i.type === "hint") {
@@ -106,7 +118,6 @@ export function prepareItems(items: ItemInput[]): Item[] {
     } catch (e) {
       throw new Error(`LaTeX error in "${i.latex}": ${(e as Error).message}`);
     }
-  });
 }
 
 const DEFAULT_COLOR = "#D97757";
@@ -132,7 +143,7 @@ export interface ItemWarning { item: number; type?: string; id?: string; warning
  * Prepare a batch item by item: an item with unknown keys or one that fails to render (bad LaTeX,
  * bad SMILES, bad SVG) is skipped with a warning while the rest still draw.
  */
-export function prepareBatch(raw: Record<string, unknown>[]): { items: Item[]; indexes: number[]; warnings: ItemWarning[] } {
+export function prepareBatch(raw: Record<string, unknown>[], existing: Item[] = []): { items: Item[]; indexes: number[]; warnings: ItemWarning[] } {
   const items: Item[] = [], indexes: number[] = [], warnings: ItemWarning[] = [];
   raw.forEach((input, index) => {
     const type = String(input.type);
@@ -143,7 +154,7 @@ export function prepareBatch(raw: Record<string, unknown>[]): { items: Item[]; i
       return;
     }
     try {
-      const [item] = prepareItems([ItemSchema.parse(input)]);
+      const [item] = prepareItems([ItemSchema.parse(input)], [...existing, ...items]);
       itemBBox(item);
       items.push(item);
       indexes.push(index);
@@ -185,9 +196,11 @@ function pathData(item: Extract<ItemInput, { type: "path" }>) {
 
 /** Boxes include stroke thickness and curve extrema, in fixed page coordinates. */
 export function itemBBox(item: Item): BBox {
+  if (item.parts) return partsBBox(item.parts, item.graph?.origin);
   const stroked = ["path", "line", "arrow", "curved_arrow", "ellipse", "rect", "svg"].includes(item.type) && outlined(item);
   const padding = stroked ? (("width" in item ? item.width : undefined) ?? 3) / 2 : 0;
   switch (item.type) {
+    case "axes": case "plot": case "shade": case "angle": case "point": return itemBBox(prepareItems([item])[0]);
     case "path": return pathBounds(pathData(item) + (item.head_d ?? ""), padding);
     case "line": return pointBounds([item.from, item.to], padding);
     case "arrow": return pathBounds(item.head_d !== undefined || item.head === "none" ? `M${item.from.join(",")}L${item.to.join(",")}${item.head_d ?? ""}` : arrowPath(item.from, item.to, item.width), (item.width ?? 3) / 2);
@@ -216,8 +229,13 @@ export function translateItem(item: Item, dx: number, dy: number): Item {
   if (![dx, dy].every(Number.isFinite)) throw new Error("Move offsets must be finite numbers");
   const point = ([x, y]: Point): Point => [x + dx, y + dy];
   const moved = { ...item };
-  if ("x" in moved) { moved.x += dx; moved.y += dy; }
-  if ("from" in moved) { moved.from = point(moved.from); moved.to = point(moved.to); }
+  if ("x" in moved && typeof moved.x === "number" && typeof moved.y === "number") { moved.x += dx; moved.y += dy; }
+  if ("from" in moved && Array.isArray(moved.from) && Array.isArray(moved.to)) { moved.from = point(moved.from); moved.to = point(moved.to); }
+  if (moved.type === "axes") moved.origin = point(moved.origin);
+  if (moved.type === "angle") moved.vertex = point(moved.vertex);
+  if (moved.type === "point" && !moved.graph) moved.at = point(moved.at);
+  if (moved.graph) moved.graph = { ...moved.graph, origin: point(moved.graph.origin) };
+  if (moved.parts) moved.parts = translateParts(moved.parts, dx, dy);
   if (moved.type === "ellipse") moved.center = point(moved.center);
   if (moved.type === "path") moved.points = moved.points.map(point);
   for (const key of ["d", "head_d"] as const) {
@@ -232,7 +250,8 @@ export function translateItem(item: Item, dx: number, dy: number): Item {
   return moved;
 }
 
-export function itemToSvg(item: ItemInput & { d?: string; head_d?: string }): string {
+export function itemToSvg(item: ItemInput & { d?: string; head_d?: string; parts?: Part[] }): string {
+  if (item.parts) return partsToSvg(item.parts);
   const c = esc(item.color ?? DEFAULT_COLOR);
   const w = "width" in item && item.width ? item.width : 3;
   const strokeOf = (color: string) => `stroke="${color}" stroke-width="${w}" stroke-linecap="round" stroke-linejoin="round"`;
@@ -241,6 +260,7 @@ export function itemToSvg(item: ItemInput & { d?: string; head_d?: string }): st
   // Heads are never dashed; filled heads are also stroked so their tips match the line's round cap.
   const heads = item.head_d ? `<path d="${item.head_d}" fill="${"head_filled" in item && item.head_filled ? c : "none"}" ${stroke}/>` : "";
   switch (item.type) {
+    case "axes": case "plot": case "shade": case "angle": case "point": return partsToSvg(prepareItems([item])[0].parts!);
     case "path":
       return `<path d="${pathData(item)}" fill="none" ${stroke}${dash}/>${heads}`;
     case "line":

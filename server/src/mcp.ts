@@ -22,6 +22,8 @@ Every draw returns each item's id and bbox, plus per-item warnings (bad LaTeX, u
 After drawing, call view_page to check the result and fix anything that landed in the wrong place.
 Page descriptions list item ids, labels and bounding boxes. Use erase_my_drawings with ids or group to remove selected items, move_items with ids, dx, dy to reposition them, and copy_items to duplicate them. Name related drawings with an item group.
 Use curved_arrow for reaction mechanisms (signed bend, half_head for a fishhook), path smooth:false for straight segments, and molecule with SMILES for chemical structures. Hints are hidden until the user taps their chip.
+Graphs: define {type:"axes",origin:[300,650],xrange:[-2,5],yrange:[-1,4],unit:60,name:"g1",grid:true}; then reference its name (or an existing axes id) in later items of the same batch: {type:"plot",axes:"g1",fn:"x^2/2",from:-2,to:3,samples:200,dashed:true}, {type:"shade",axes:"g1",fn1:"x^2/2",fn2:"axis",from:0,to:2,opacity:0.25}, {type:"point",axes:"g1",at:[1,2],label:"P(1,2)",label_pos:"ne",filled:true}. Plot transforms are copied so moving or erasing axes leaves plots intact. Parametric example: {type:"plot",axes:"g1",x:"cos(t)",y:"sin(t)",t:[0,"2pi"]}. Expressions support arithmetic, implicit multiplication, pi/e and sin cos tan asin acos atan sinh cosh tanh log(base 10) ln exp sqrt abs floor ceil.
+Angles use page coordinates: {type:"angle",vertex:[300,650],from:[400,650],to:[360,570],radius:30,label:"θ"}; right_angle:true forces a square (automatic near 90°). Without axes, point.at also uses page coordinates.
 To give the user something to write on (worksheets, notes, practice questions), use create_pdf; to bring in an existing PDF from the web, use import_pdf_from_url.`;
 
 type ToolResult = { content: ({ type: "text"; text: string } | { type: "image"; data: string; mimeType: string })[]; isError?: boolean };
@@ -183,7 +185,7 @@ export function buildMcpServer(store: Store) {
     async ({ items, offset, dry_run, page_id, notebook_id, page_number }) => {
       const found = resolvePage(page_id, notebook_id, page_number);
       if (!found) return fail("Page not found.");
-      const batch = prepareBatch(items as Record<string, unknown>[]);
+      const batch = prepareBatch(items as Record<string, unknown>[], found.page.claudeLayer);
       let stamped = batch.items;
       if (offset && (offset[0] || offset[1])) {
         try {

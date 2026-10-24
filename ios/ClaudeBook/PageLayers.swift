@@ -244,6 +244,32 @@ enum ClaudeRenderer {
         ctx.setLineCap(.round)
         ctx.setLineJoin(.round)
 
+        if let parts = item.parts {
+            for part in parts {
+                ctx.saveGState()
+                if let clip = part.clip {
+                    ctx.addPath(outline(item, clip))
+                    ctx.clip()
+                }
+                ctx.setAlpha(part.opacity ?? 1)
+                ctx.setLineWidth(part.width ?? 3)
+                ctx.setLineDash(phase: 0, lengths: (part.dash ?? []).map { CGFloat($0) })
+                let path = outline(item, part.d)
+                if let fill = part.fill, fill != "none" {
+                    ctx.setFillColor(adapt(UIColor(hex: fill), dark: dark).cgColor)
+                    ctx.addPath(path)
+                    ctx.fillPath()
+                }
+                if let stroke = part.stroke, stroke != "none" {
+                    ctx.setStrokeColor(adapt(UIColor(hex: stroke), dark: dark).cgColor)
+                    ctx.addPath(path)
+                    ctx.strokePath()
+                }
+                ctx.restoreGState()
+            }
+            return
+        }
+
         func pt(_ a: [Double]?) -> CGPoint? {
             guard let a, a.count >= 2 else { return nil }
             return CGPoint(x: a[0], y: a[1])
