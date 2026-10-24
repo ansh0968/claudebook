@@ -12,7 +12,9 @@ import { GraphSchemas, prepareGraph, type GraphTransform } from "./graphs.js";
 import { partsBBox, partsToSvg, translateParts, type Part } from "./parts.js";
 import { PAGE_H, PAGE_W } from "./store.js";
 
-const pt = z.tuple([z.number(), z.number()]).describe("[x, y] in page coordinates");
+// A plain length-2 array rather than z.tuple: tuples become `items: [...]` in JSON Schema,
+// which ChatGPT's connector rejects (it wants `items` to be one schema).
+const pt = z.array(z.number()).length(2).describe("[x, y] in page coordinates") as unknown as z.ZodType<Point>;
 const color = z.string().optional().describe("CSS color, default Claude orange #D97757. Use red #E5484D for mistakes, green #30A46C for corrections");
 const width = z.number().positive().optional().describe("Stroke width in page units, default 3");
 const group = z.string().optional().describe("Optional name for related items, so they can be erased together");
@@ -25,7 +27,8 @@ const anchor = z.enum(["top-left", "top-center", "top-right", "left-center", "ce
 
 const chemistryArrow = { from: pt, to: pt, bend: z.number().optional().describe("Signed curve bend, default 40"), head: z.enum(["full", "half"]).optional().describe('Filled electron-pair or fishhook head, default full. Example: head:"half"'), half_head: z.boolean().optional().describe('Legacy alias for head:"half"'), color, width, group };
 
-export const ItemSchema = z.discriminatedUnion("type", [
+// z.union, not discriminatedUnion: the latter becomes `oneOf`, and OpenAI's tool schemas only take `anyOf`.
+export const ItemSchema = z.union([
   ...GraphSchemas,
   ...PhysicsSchemas,
   z.object({ type: z.literal("path"), points: z.array(pt).min(2), color, width, closed: z.boolean().optional(), smooth: z.boolean().optional(), dashed, head: head("none"), head_filled: headFilled, group })

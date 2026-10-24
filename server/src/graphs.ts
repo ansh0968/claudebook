@@ -5,15 +5,16 @@ import { parseExpression, expressionNumber } from "./expression.js";
 import type { Part } from "./parts.js";
 import { clipPathToRect, headsFor, strokePolyline, type Point } from "./geometry.js";
 
-const pt = z.tuple([z.number(), z.number()]);
-const range = z.tuple([z.number(), z.number()]);
-const pair = z.union([z.number().positive(), z.tuple([z.number().positive(), z.number().positive()])]);
+// Length-2 arrays rather than z.tuple, which ChatGPT's connector rejects (see items.ts).
+const pt = z.array(z.number()).length(2) as unknown as z.ZodType<[number, number]>;
+const range = z.array(z.number()).length(2) as unknown as z.ZodType<[number, number]>;
+const pair = z.union([z.number().positive(), z.array(z.number().positive()).length(2) as unknown as z.ZodType<[number, number]>]);
 const style = { color: z.string().optional(), width: z.number().positive().optional(), group: z.string().optional() };
 const axesRef = z.string().min(1).describe('Axes item id or name, including earlier axes in this batch. Example: axes:"g1"');
 export const GraphSchemas = [
   z.object({ type: z.literal("axes"), origin: pt, xrange: range, yrange: range, unit: pair.optional(), ticks: z.boolean().optional(), tick_step: pair.optional(), labels: z.boolean().optional(), x_label: z.string().optional(), y_label: z.string().optional(), grid: z.boolean().optional(), name: z.string().min(1).optional(), ...style })
     .describe('Coordinate axes with ticks, numbers, arrowheads and optional grid. unit is page units per graph unit (default 40); tick_step defaults 1; ticks/labels default true. Example: {type:"axes",origin:[300,600],xrange:[-2,5],yrange:[-1,4],unit:60,name:"g1",grid:true,x_label:"x",y_label:"y"}'),
-  z.object({ type: z.literal("plot"), axes: axesRef, fn: z.string().optional(), from: z.number().optional(), to: z.number().optional(), samples: z.number().int().min(2).max(5000).optional(), x: z.string().optional(), y: z.string().optional(), t: z.tuple([z.union([z.number(), z.string()]), z.union([z.number(), z.string()])]).optional(), dashed: z.boolean().optional(), ...style })
+  z.object({ type: z.literal("plot"), axes: axesRef, fn: z.string().optional(), from: z.number().optional(), to: z.number().optional(), samples: z.number().int().min(2).max(5000).optional(), x: z.string().optional(), y: z.string().optional(), t: (z.array(z.union([z.number(), z.string()])).length(2) as unknown as z.ZodType<[number | string, number | string]>).optional(), dashed: z.boolean().optional(), ...style })
     .describe('Safe expression plot, clipped to axes. samples defaults 200; from/to default xrange. Supports x,t,+ - * / ^, implicit multiplication, pi,e,sin cos tan asin acos atan sinh cosh tanh log(base 10) ln exp sqrt abs floor ceil. Example: {type:"plot",axes:"g1",fn:"x^2/2",from:-2,to:4,dashed:true}. Parametric: {type:"plot",axes:"g1",x:"cos(t)",y:"sin(t)",t:[0,"2pi"]}'),
   z.object({ type: z.literal("shade"), axes: axesRef, fn1: z.string(), fn2: z.string().optional(), from: z.number().optional(), to: z.number().optional(), opacity: z.number().min(0).max(1).optional(), ...style })
     .describe('Fill between fn1 and fn2 (default "axis", meaning y=0), clipped to axes, opacity default 0.25. Example: {type:"shade",axes:"g1",fn1:"x^2/2",fn2:"axis",from:0,to:2}'),

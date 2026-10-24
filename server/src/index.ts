@@ -70,6 +70,9 @@ app.get("/health", (_req, res) => res.json({ ok: true }));
 // --- MCP endpoint for the Claude app (custom connector URL: https://<host>/mcp/<secret>) ---
 app.post("/mcp/:secret", express.json({ limit: "10mb" }), async (req, res) => {
   if (!safeEqual(req.params.secret, SECRET)) return res.status(404).end();
+  // We always answer with plain JSON, so don't turn away clients (ChatGPT's included) that
+  // send a narrower Accept header than the SDK insists on.
+  req.headers.accept = "application/json, text/event-stream";
   // Stateless: a fresh server + transport per request keeps things simple and restart-proof.
   const server = buildMcpServer(store);
   const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });

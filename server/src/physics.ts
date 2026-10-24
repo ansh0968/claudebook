@@ -3,7 +3,7 @@ import svgpath from "svgpath";
 import { pathBounds, pointBounds, strokePolyline, type BBox, type Point } from "./geometry.js";
 import type { Part } from "./parts.js";
 
-const pt = z.tuple([z.number(), z.number()]);
+const pt = z.array(z.number()).length(2) as unknown as z.ZodType<[number, number]>;
 const style = { color: z.string().optional(), width: z.number().positive().optional(), group: z.string().optional() };
 export const rotation = z.number().optional().describe('Degrees clockwise on screen around the positioned item bbox centre. Example: rotation:30');
 export const patternFields = {
