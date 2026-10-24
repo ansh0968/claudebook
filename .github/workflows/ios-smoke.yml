@@ -144,7 +144,7 @@ jobs:
             xcodebuild -project ClaudeBook.xcodeproj -scheme ClaudeBook -configuration Debug \
             -destination "id=$UDID" -derivedDataPath test-build -resultBundlePath TestResults.xcresult \
             -parallel-testing-enabled NO CODE_SIGNING_ALLOWED=NO test > ui-test.log 2>&1 \
-            || { tail -150 ui-test.log; exit 1; }
+            || { cp ui-test.log shots/ui-test.log; grep -n -B25 ": error:" ui-test.log | tail -200; grep -n -A6 "^Failing tests" ui-test.log; exit 1; }
           # CRUD UI tests deliberately empty the disposable library; restore study fixtures.
           node ../scripts/smoke-fixture.mjs
           node ../scripts/smoke-fixture.mjs reveal
@@ -249,6 +249,7 @@ jobs:
           TARGET="$RUNNER_TEMP/smoke-pub/runs/${GITHUB_REF_NAME//\//-}/$GITHUB_RUN_ID"
           mkdir -p "$TARGET"
           cp shots/*.png "$TARGET/"
+          cp shots/*.log "$TARGET/" 2>/dev/null || true
           echo "Smoke test for $GITHUB_SHA, run $GITHUB_RUN_ID" > "$TARGET/README.md"
           cd "$RUNNER_TEMP/smoke-pub"
           git add .
