@@ -87,6 +87,10 @@ struct ClaudeItem: Codable, Identifiable, Hashable {
     var head: String?
     var headFilled: Bool?
     var headD: String?
+    var showCarbons: Bool?
+    var explicitH: Bool?
+    var atoms: [String: [Double]]?
+    var elements: [String: String]?
     var parts: [ClaudePart]?
     var graph: ClaudeGraph?
     var origin: [Double]?
@@ -114,6 +118,9 @@ struct ClaudeItem: Codable, Identifiable, Hashable {
         case head
         case headFilled = "head_filled"
         case headD = "head_d"
+        case showCarbons = "show_carbons"
+        case explicitH = "explicit_h"
+        case atoms, elements
         case halfHead = "half_head"
         case labelPos = "label_pos"
         case rightAngle = "right_angle"
@@ -163,6 +170,10 @@ struct ClaudeItem: Codable, Identifiable, Hashable {
         head = try c.decodeIfPresent(String.self, forKey: .head)
         headFilled = try c.decodeIfPresent(Bool.self, forKey: .headFilled)
         headD = try c.decodeIfPresent(String.self, forKey: .headD)
+        showCarbons = try c.decodeIfPresent(Bool.self, forKey: .showCarbons)
+        explicitH = try c.decodeIfPresent(Bool.self, forKey: .explicitH)
+        atoms = try c.decodeIfPresent([String: [Double]].self, forKey: .atoms)
+        elements = try c.decodeIfPresent([String: String].self, forKey: .elements)
         parts = try c.decodeIfPresent([ClaudePart].self, forKey: .parts)
         graph = try c.decodeIfPresent(ClaudeGraph.self, forKey: .graph)
         origin = try c.decodeIfPresent([Double].self, forKey: .origin)

@@ -1,7 +1,7 @@
 // The tools Claude sees once ClaudeBook is added as a connector in the Claude app.
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { LooseItemSchema, itemBBox, itemLabel, offPageWarning, prepareBatch, translateItem, type Item, type ItemWarning } from "./items.js";
+import { LooseItemSchema, itemBBox, itemLabel, moleculeAtomsForDisplay, offPageWarning, prepareBatch, translateItem, type Item, type ItemWarning } from "./items.js";
 import { compileTypst, downloadPdf, savePdf } from "./pdf.js";
 import { clampRegion, renderPage, type Region } from "./render.js";
 import { PAGE_H, PAGE_W, type Page, type Store } from "./store.js";
@@ -21,7 +21,8 @@ Your drawings live on a separate layer the user can hide or undo, so don't be sh
 Every draw returns each item's id and bbox, plus per-item warnings (bad LaTeX, unknown keys, off-page): read them, they mean an item was skipped or misplaced. x,y on text and math is the top-left unless you set anchor. Use dry_run to measure before placing, and offset to shift a whole batch.
 After drawing, call view_page to check the result and fix anything that landed in the wrong place.
 Page descriptions list item ids, labels and bounding boxes. Use erase_my_drawings with ids or group to remove selected items, move_items with ids, dx, dy to reposition them, and copy_items to duplicate them. Name related drawings with an item group.
-Use curved_arrow for reaction mechanisms (signed bend, half_head for a fishhook), path smooth:false for straight segments, and molecule with SMILES for chemical structures. Hints are hidden until the user taps their chip.
+Use curved_arrow (alias curly) for reaction mechanisms: {type:"curly",from:[100,200],to:[250,200],bend:-60,head:"half"}. head:"full" draws an electron pair; half_head:true remains supported.
+Use molecule with SMILES for structures: {type:"molecule",smiles:"CC(=O)O",x:100,y:200,size:180,show_carbons:true,explicit_h:true}. Results include atoms (index to [x,y]) and elements maps; use these coordinates as arrow endpoints. Use path smooth:false for straight segments. Hints are hidden until the user taps their chip.
 Graphs: define {type:"axes",origin:[300,650],xrange:[-2,5],yrange:[-1,4],unit:60,name:"g1",grid:true}; then reference its name (or an existing axes id) in later items of the same batch: {type:"plot",axes:"g1",fn:"x^2/2",from:-2,to:3,samples:200,dashed:true}, {type:"shade",axes:"g1",fn1:"x^2/2",fn2:"axis",from:0,to:2,opacity:0.25}, {type:"point",axes:"g1",at:[1,2],label:"P(1,2)",label_pos:"ne",filled:true}. Plot transforms are copied so moving or erasing axes leaves plots intact. Parametric example: {type:"plot",axes:"g1",x:"cos(t)",y:"sin(t)",t:[0,"2pi"]}. Expressions support arithmetic, implicit multiplication, pi/e and sin cos tan asin acos atan sinh cosh tanh log(base 10) ln exp sqrt abs floor ceil.
 Angles use page coordinates: {type:"angle",vertex:[300,650],from:[400,650],to:[360,570],radius:30,label:"θ"}; right_angle:true forces a square (automatic near 90°). Without axes, point.at also uses page coordinates.
 Physics: rect, ellipse, text, math, molecule and svg accept rotation in clockwise screen degrees about the positioned bbox centre; e.g. {type:"rect",x:200,y:400,w:100,h:60,rotation:30}. Text/math anchors apply before rotation: {type:"text",x:500,y:500,text:"block",anchor:"center",rotation:30}. Pattern fills on rect/ellipse/svg: {type:"rect",x:600,y:400,w:200,h:150,fill_pattern:"cross",pattern_spacing:25}; cross uses ⊗ (into page), dot uses ⊙ (out), hatch uses parallel lines with pattern_angle (default 45; e.g. pattern_angle:30). Patterns clip to the shape and work with normal fill and rotation; fill without color keeps the shape outline hidden.
@@ -36,7 +37,7 @@ function ago(iso: string) {
   const s = Math.max(0, Math.round((Date.now() - Date.parse(iso)) / 1000));
   return s < 90 ? `${s}s ago` : s < 5400 ? `${Math.round(s / 60)} min ago` : s < 172800 ? `${Math.round(s / 3600)} h ago` : `${Math.round(s / 86400)} days ago`;
 }
-const describeItem = (item: Item) => ({ id: item.id, type: item.type, label: itemLabel(item), bbox: itemBBox(item), ...(item.group !== undefined ? { group: item.group } : {}) });
+const describeItem = (item: Item) => ({ id: item.id, type: item.type, label: itemLabel(item), bbox: itemBBox(item), ...(item.group !== undefined ? { group: item.group } : {}), ...(item.atoms ? { atoms: moleculeAtomsForDisplay(item), elements: item.elements } : {}) });
 
 export function buildMcpServer(store: Store) {
   const server = new McpServer({ name: "claudebook", version: "0.1.0" }, { instructions: INSTRUCTIONS });
