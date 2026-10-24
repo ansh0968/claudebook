@@ -109,11 +109,15 @@ if (process.env.CLAUDEBOOK_SECRET) {
     const savedItems = async () => ((await (await api(`/pages/${page_id}/claude`)).json()) as { items: Item[] }).items;
     await call("draw_on_page", { items: inputs });
     const beforeFailure = await savedItems();
-    await call("draw_on_page", { items: [{ type: "line", from: [0, 0], to: [10, 10] }, { type: "molecule", smiles: "invalid!", x: 10, y: 10 }] }, true);
-    assert.deepEqual(await savedItems(), beforeFailure, "Invalid batch must draw nothing");
+    await call("draw_on_page", { items: [{ type: "molecule", smiles: "invalid!", x: 10, y: 10 }] }, true);
+    assert.deepEqual(await savedItems(), beforeFailure, "A batch where every item fails must draw nothing");
+    const partial = JSON.parse((await call("draw_on_page", { items: [{ type: "line", from: [0, 0], to: [10, 10] }, { type: "molecule", smiles: "invalid!", x: 10, y: 10 }] }))[0].text!);
+    assert.equal(partial.items.length, 1); assert.equal(partial.warnings.length, 1); assert.equal(partial.warnings[0].item, 1);
+    assert.match(partial.warnings[0].warning, /^Skipped/);
+    assert.equal((await savedItems()).length, beforeFailure.length + 1, "The valid item in a partly bad batch still draws");
     assert.ok(!(await call("view_page", { grid: false }))[0].text?.includes("hidden-answer-sentinel"));
     await call("erase_my_drawings", {}); assert.equal((await savedItems()).length, 0);
-    console.log("[drawing MCP] Unicode text, curves, molecules, hidden hints and atomic failure passed");
+    console.log("[drawing MCP] Unicode text, curves, molecules, hidden hints and per-item failure passed");
   } finally {
     await client.close();
   }

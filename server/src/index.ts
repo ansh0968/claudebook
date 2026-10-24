@@ -32,6 +32,8 @@ const upgraded = store.upgradeItems((item) => {
 });
 if (upgraded) console.log(`gave ${upgraded} text item(s) handwriting outlines`);
 const app = express();
+/** Older app builds don't send a stroke count; anything that isn't a whole number is ignored. */
+const strokeCountFrom = (n: unknown) => (typeof n === "number" && Number.isInteger(n) && n >= 0 ? n : undefined);
 app.disable("x-powered-by");
 
 const safeEqual = (a: string, b: string) => {
@@ -118,6 +120,11 @@ api.patch("/notebooks/:id", (req, res) => {
   nb ? res.json(nb) : res.status(404).json({ error: "not found" });
 });
 
+/** The user said no to Claude's request to delete this notebook. */
+api.delete("/notebooks/:id/delete-request", (req, res) => {
+  store.cancelDeleteRequest(req.params.id) ? res.json({ ok: true }) : res.status(404).json({ error: "not found" });
+});
+
 api.delete("/notebooks/:id", (req, res) => {
   store.deleteNotebook(req.params.id) ? res.json({ ok: true }) : res.status(404).json({ error: "not found" });
 });
@@ -143,9 +150,9 @@ api.post("/view", (req, res) => {
 
 /** The app uploads a render of the user's ink (PNG, base64) plus on-device handwriting recognition. */
 api.put("/pages/:id/snapshot", (req, res) => {
-  const { png, textBoxes } = req.body as { png: string; textBoxes?: TextBox[] };
+  const { png, textBoxes, strokeCount } = req.body as { png: string; textBoxes?: TextBox[]; strokeCount?: number };
   try {
-    store.saveSnapshot(req.params.id, Buffer.from(png, "base64"), textBoxes);
+    store.saveSnapshot(req.params.id, Buffer.from(png, "base64"), textBoxes, strokeCountFrom(strokeCount));
     res.json({ ok: true });
   } catch (e) {
     res.status(404).json({ error: String(e) });
@@ -154,7 +161,7 @@ api.put("/pages/:id/snapshot", (req, res) => {
 
 api.put("/pages/:id/drawing", express.raw({ type: "*/*", limit: "50mb" }), (req, res) => {
   try {
-    store.saveDrawing(req.params.id, req.body as Buffer);
+    store.saveDrawing(req.params.id, req.body as Buffer, strokeCountFrom(req.query.strokes === undefined ? undefined : Number(req.query.strokes)));
     res.json({ ok: true });
   } catch (e) {
     res.status(404).json({ error: String(e) });

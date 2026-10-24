@@ -6,31 +6,39 @@ import { renderMath } from "./math.js";
 import { renderHandwriting } from "./handwriting.js";
 import { renderMolecule } from "./molecule.js";
 import svgpath from "svgpath";
-import { arrowPath, pathBounds, pointBounds, type BBox, type Point } from "./geometry.js";
+import { arrowHead, arrowPath, headsFor, pathBounds, pointBounds, type BBox, type HeadMode, type Point } from "./geometry.js";
+import { PAGE_H, PAGE_W } from "./store.js";
 
 const pt = z.tuple([z.number(), z.number()]).describe("[x, y] in page coordinates");
 const color = z.string().optional().describe("CSS color, default Claude orange #D97757. Use red #E5484D for mistakes, green #30A46C for corrections");
 const width = z.number().positive().optional().describe("Stroke width in page units, default 3");
 const group = z.string().optional().describe("Optional name for related items, so they can be erased together");
+const dashed = z.boolean().optional().describe("Dashed stroke");
+const head = (fallback: string) => z.enum(["none", "end", "start", "both"]).optional().describe(`Arrowheads, aligned to the path's direction at each end. Default ${fallback}`);
+const headFilled = z.boolean().optional().describe("Solid triangle arrowheads instead of open ones");
+const fill = z.string().optional().describe("Fill color. Without a color, a filled shape gets no outline");
+const anchor = z.enum(["top-left", "top-center", "top-right", "left-center", "center", "right-center", "bottom-left", "bottom-center", "bottom-right"]).optional()
+  .describe("Which point of the item x,y names, default top-left. The stored x,y and bbox are always the top-left");
 
 export const ItemSchema = z.discriminatedUnion("type", [
-  z.object({ type: z.literal("path"), points: z.array(pt).min(2), color, width, closed: z.boolean().optional(), smooth: z.boolean().optional(), group })
+  z.object({ type: z.literal("path"), points: z.array(pt).min(2), color, width, closed: z.boolean().optional(), smooth: z.boolean().optional(), dashed, head: head("none"), head_filled: headFilled, group })
     .describe("Freehand stroke through the points; smooth defaults true, false joins points with straight segments"),
   z.object({ type: z.literal("line"), from: pt, to: pt, color, width, dashed: z.boolean().optional(), group }),
-  z.object({ type: z.literal("arrow"), from: pt, to: pt, color, width, group }),
+  z.object({ type: z.literal("arrow"), from: pt, to: pt, color, width, dashed, head: head("end"), head_filled: headFilled, group })
+    .describe("Straight arrow. head: \"both\" for dimension lines (λ, R, lengths)"),
   z.object({ type: z.literal("curved_arrow"), from: pt, to: pt, bend: z.number().optional(), half_head: z.boolean().optional(), color, width, group })
     .describe("Quadratic curved arrow. Signed bend offsets its control point; half_head draws one fishhook barb"),
-  z.object({ type: z.literal("ellipse"), center: pt, rx: z.number(), ry: z.number().optional(), color, width, fill: z.string().optional(), group })
+  z.object({ type: z.literal("ellipse"), center: pt, rx: z.number(), ry: z.number().optional(), color, width, fill, group })
     .describe("Circle or ellipse. Great for circling mistakes: wrap the text box with some padding"),
-  z.object({ type: z.literal("rect"), x: z.number(), y: z.number(), w: z.number(), h: z.number(), color, width, fill: z.string().optional(), group }),
+  z.object({ type: z.literal("rect"), x: z.number(), y: z.number(), w: z.number(), h: z.number(), color, width, fill, group }),
   z.object({ type: z.literal("highlight"), x: z.number(), y: z.number(), w: z.number(), h: z.number(), color: z.string().optional(), group })
     .describe("Translucent marker over a region, default yellow"),
-  z.object({ type: z.literal("text"), x: z.number(), y: z.number(), text: z.string(), size: z.number().optional(), color, group })
+  z.object({ type: z.literal("text"), x: z.number(), y: z.number(), text: z.string(), size: z.number().optional(), color, anchor, group })
     .describe("Handwritten-style text with Unicode symbol fallback. _2 and ^- make single-character scripts; _{...} and ^{...} make longer scripts. x,y is the top-left. size is line height, default 32. Use \\n for new lines"),
-  z.object({ type: z.literal("svg"), d: z.string(), color, width, fill: z.string().optional(), group })
+  z.object({ type: z.literal("svg"), d: z.string(), color, width, fill, dashed, head: head("none"), head_filled: headFilled, group })
     .describe("Raw SVG path data in page coordinates, for figures and diagrams"),
-  z.object({ type: z.literal("math"), latex: z.string(), x: z.number(), y: z.number(), size: z.number().optional(), color, group })
-    .describe("Typeset math from LaTeX, e.g. x = \\frac{-b \\pm \\sqrt{b^2-4ac}}{2a}. Use this for every equation and corrected working step, and for any symbol, subscript or charge. Chemistry works with mhchem: \\ce{H2SO4}, \\ce{OH-}, \\ce{A + B -> C}. x,y is the top-left, size is the line height, default 36. One line per item"),
+  z.object({ type: z.literal("math"), latex: z.string(), x: z.number(), y: z.number(), size: z.number().optional(), color, anchor, group })
+    .describe("Typeset math from LaTeX, e.g. x = \\frac{-b \\pm \\sqrt{b^2-4ac}}{2a}. Use this for every equation and corrected working step, and for any symbol, subscript or charge. Chemistry works with mhchem: \\ce{H2SO4}, \\ce{OH-}, \\ce{A + B -> C}. x,y is the top-left, size is the line height, default 36; one line is about 0.55 x size tall, fractions and matrices more. Arrow labels: \\xrightarrow[below]{above} or \\ce{A ->[above][below] B}. One line per item"),
   z.object({ type: z.literal("molecule"), smiles: z.string(), x: z.number(), y: z.number(), size: z.number().positive().optional(), color, group })
     .describe("Chemical structure from SMILES. x,y is the top-left; size is the longest side, default 180"),
   z.object({ type: z.literal("hint"), x: z.number(), y: z.number(), text: z.string(), label: z.string().optional(), size: z.number().positive().optional(), revealed: z.boolean().optional(), color, group })
@@ -38,14 +46,51 @@ export const ItemSchema = z.discriminatedUnion("type", [
 ]);
 
 export type ItemInput = z.infer<typeof ItemSchema>;
-/** Stored items carry generated outline d and dimensions where appropriate. */
-export type Item = ItemInput & { id: string; createdAt: string; d?: string; w?: number; h?: number };
+/** Stored items carry generated outline d, arrowhead outline head_d and dimensions where appropriate. */
+export type Item = ItemInput & { id: string; createdAt: string; d?: string; w?: number; h?: number; head_d?: string };
+
+/** Fractions of the item's width and height that each anchor sits at. */
+const ANCHORS: Record<NonNullable<z.infer<typeof anchor>>, [number, number]> = {
+  "top-left": [0, 0], "top-center": [0.5, 0], "top-right": [1, 0], "left-center": [0, 0.5], center: [0.5, 0.5],
+  "right-center": [1, 0.5], "bottom-left": [0, 1], "bottom-center": [0.5, 1], "bottom-right": [1, 1],
+};
+
+/** Shift a rendered outline so the anchor lands on x,y; the stored x,y become the true top-left. */
+function anchored<T extends { x: number; y: number; anchor?: keyof typeof ANCHORS }>(item: T, shape: { d: string; w: number; h: number }) {
+  const { anchor: a, ...rest } = item;
+  const [fx, fy] = ANCHORS[a ?? "top-left"];
+  if (!fx && !fy) return { ...rest, ...shape };
+  const dx = -fx * shape.w, dy = -fy * shape.h;
+  return { ...rest, ...shape, x: item.x + dx, y: item.y + dy, d: shape.d && svgpath(shape.d).translate(dx, dy).round(2).toString() };
+}
+
+/** Arrowheads, computed once so the server render and the iPad draw the same shapes. */
+function withHeads<T extends ItemInput>(item: T): T & { head_d?: string } {
+  if (item.type === "arrow") {
+    const mode = item.head ?? "end", w = item.width ?? 3, filled = item.head_filled ?? false;
+    const angle = Math.atan2(item.to[1] - item.from[1], item.to[0] - item.from[0]);
+    if (item.from[0] === item.to[0] && item.from[1] === item.to[1]) return item;
+    const parts = [
+      ...(mode === "end" || mode === "both" ? [arrowHead(item.to, angle, w, filled)] : []),
+      ...(mode === "start" || mode === "both" ? [arrowHead(item.from, angle + Math.PI, w, filled)] : []),
+    ];
+    return parts.length ? { ...item, head_d: parts.join("") } : item;
+  }
+  if ((item.type === "path" || item.type === "svg") && item.head && item.head !== "none") {
+    const d = item.type === "path" ? pathData(item) : item.d;
+    const head_d = headsFor(d, item.head as HeadMode, item.width ?? 3, item.head_filled ?? false);
+    return head_d ? { ...item, head_d } : item;
+  }
+  return item;
+}
 
 /** Stamp ids and prepare outlines atomically before anything lands on the page. */
 export function prepareItems(items: ItemInput[]): Item[] {
-  return items.map((i) => {
-    const base = { ...i, id: nanoid(8), createdAt: new Date().toISOString() };
-    if (i.type === "text") return { ...base, ...renderHandwriting(i.text, i.x, i.y, i.size ?? 32) };
+  return items.map((input) => {
+    // The iPad's path parser has no arcs, so store SVG paths with arcs already turned into curves.
+    const i = input.type === "svg" ? { ...input, d: normalizeSvg(input.d) } : input;
+    const base = withHeads({ ...i, id: nanoid(8), createdAt: new Date().toISOString() });
+    if (i.type === "text") return anchored(base as typeof i & { id: string; createdAt: string }, renderHandwriting(i.text, i.x, i.y, i.size ?? 32)) as Item;
     if (i.type === "molecule") return { ...base, ...renderMolecule(i.smiles, i.x, i.y, i.size ?? 180) };
     if (i.type === "hint") {
       if (i.revealed) return { ...base, ...renderHandwriting(i.text, i.x, i.y, i.size ?? 32) };
@@ -57,7 +102,7 @@ export function prepareItems(items: ItemInput[]): Item[] {
       return base;
     }
     try {
-      return { ...base, ...renderMath(i.latex, i.x, i.y, i.size ?? 36) };
+      return anchored(base as typeof i & { id: string; createdAt: string }, renderMath(i.latex, i.x, i.y, i.size ?? 36)) as Item;
     } catch (e) {
       throw new Error(`LaTeX error in "${i.latex}": ${(e as Error).message}`);
     }
@@ -65,6 +110,58 @@ export function prepareItems(items: ItemInput[]): Item[] {
 }
 
 const DEFAULT_COLOR = "#D97757";
+
+function normalizeSvg(d: string) {
+  const path = svgpath(d);
+  if ("err" in path && path.err) throw new Error(`Invalid SVG path: ${path.err}`);
+  return /[aA]/.test(d) ? path.abs().unarc().round(2).toString() : d;
+}
+
+/** Ellipses, rects and SVG shapes with a fill but no color are fill-only, not orange-outlined. */
+const outlined = (item: ItemInput) => !("fill" in item && item.fill && item.fill !== "none" && item.color === undefined);
+
+/** Every key each item type accepts, so unknown keys can be reported instead of silently dropped. */
+const itemKeys = new Map(ItemSchema.options.map((o) => [String((o.shape.type as z.ZodLiteral<string>).value), new Set(Object.keys(o.shape))]));
+
+/** The same item types, but keeping unknown keys so draw_on_page can warn about them. */
+export const LooseItemSchema = z.union(ItemSchema.options.map((o) => (o.description ? o.loose().describe(o.description) : o.loose())) as unknown as [z.ZodTypeAny, z.ZodTypeAny, ...z.ZodTypeAny[]]);
+
+export interface ItemWarning { item: number; type?: string; id?: string; warning: string }
+
+/**
+ * Prepare a batch item by item: an item with unknown keys or one that fails to render (bad LaTeX,
+ * bad SMILES, bad SVG) is skipped with a warning while the rest still draw.
+ */
+export function prepareBatch(raw: Record<string, unknown>[]): { items: Item[]; indexes: number[]; warnings: ItemWarning[] } {
+  const items: Item[] = [], indexes: number[] = [], warnings: ItemWarning[] = [];
+  raw.forEach((input, index) => {
+    const type = String(input.type);
+    const allowed = itemKeys.get(type);
+    const unknown = allowed ? Object.keys(input).filter((k) => !allowed.has(k)) : [];
+    if (unknown.length) {
+      warnings.push({ item: index, type, warning: `Skipped: ${type} has no ${unknown.map((k) => `"${k}"`).join(", ")}. It accepts ${[...allowed!].join(", ")}` });
+      return;
+    }
+    try {
+      const [item] = prepareItems([ItemSchema.parse(input)]);
+      itemBBox(item);
+      items.push(item);
+      indexes.push(index);
+    } catch (e) {
+      warnings.push({ item: index, type, warning: `Skipped: ${(e as Error).message}` });
+    }
+  });
+  return { items, indexes, warnings };
+}
+
+/** Bounding boxes that leave the page, for a per-item warning after drawing or moving. */
+export function offPageWarning(box: BBox): string | undefined {
+  // A few units of slack so a stroke drawn right on the page edge doesn't count.
+  const slack = 4;
+  const out = [box.x < -slack && "left", box.y < -slack && "top", box.x + box.w > PAGE_W + slack && "right", box.y + box.h > PAGE_H + slack && "bottom"].filter(Boolean);
+  if (!out.length) return;
+  return `Goes off the ${out.join(" and ")} edge of the page (bbox ${[box.x, box.y, box.w, box.h].map((v) => Math.round(v)).join(", ")}; the page is ${PAGE_W} x ${PAGE_H})`;
+}
 
 const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 
@@ -88,16 +185,16 @@ function pathData(item: Extract<ItemInput, { type: "path" }>) {
 
 /** Boxes include stroke thickness and curve extrema, in fixed page coordinates. */
 export function itemBBox(item: Item): BBox {
-  const stroked = ["path", "line", "arrow", "curved_arrow", "ellipse", "rect", "svg"].includes(item.type);
+  const stroked = ["path", "line", "arrow", "curved_arrow", "ellipse", "rect", "svg"].includes(item.type) && outlined(item);
   const padding = stroked ? (("width" in item ? item.width : undefined) ?? 3) / 2 : 0;
   switch (item.type) {
-    case "path": return pathBounds(pathData(item), padding);
+    case "path": return pathBounds(pathData(item) + (item.head_d ?? ""), padding);
     case "line": return pointBounds([item.from, item.to], padding);
-    case "arrow": return pathBounds(arrowPath(item.from, item.to, item.width), padding);
+    case "arrow": return pathBounds(item.head_d !== undefined || item.head === "none" ? `M${item.from.join(",")}L${item.to.join(",")}${item.head_d ?? ""}` : arrowPath(item.from, item.to, item.width), (item.width ?? 3) / 2);
     case "curved_arrow": return pathBounds(arrowPath(item.from, item.to, item.width, item.bend ?? 40, item.half_head), padding);
     case "ellipse": return pointBounds([[item.center[0] - item.rx, item.center[1] - (item.ry ?? item.rx)], [item.center[0] + item.rx, item.center[1] + (item.ry ?? item.rx)]], padding);
     case "rect": case "highlight": return pointBounds([[item.x, item.y], [item.x + item.w, item.y + item.h]], padding);
-    case "svg": return pathBounds(item.d, padding);
+    case "svg": return pathBounds(item.d + (item.head_d ?? ""), item.head_d ? Math.max(padding, (item.width ?? 3) / 2) : padding);
     default: {
       const shape = item.d === undefined ? prepareItems([item])[0] : item;
       const box = shape.d ? pathBounds(shape.d) : { x: item.x, y: item.y, w: 0, h: 0 };
@@ -123,10 +220,11 @@ export function translateItem(item: Item, dx: number, dy: number): Item {
   if ("from" in moved) { moved.from = point(moved.from); moved.to = point(moved.to); }
   if (moved.type === "ellipse") moved.center = point(moved.center);
   if (moved.type === "path") moved.points = moved.points.map(point);
-  if (moved.d) {
-    const outline = svgpath(moved.d);
+  for (const key of ["d", "head_d"] as const) {
+    if (!moved[key]) continue;
+    const outline = svgpath(moved[key]);
     if ("err" in outline && outline.err) throw new Error(`Invalid SVG path: ${outline.err}`);
-    moved.d = outline.translate(dx, dy).round(4).toString();
+    moved[key] = outline.translate(dx, dy).round(4).toString();
   }
   // Inputs may be finite while arithmetic overflows. Validate the complete
   // result before the store replaces any items or JSON turns Infinity into null.
@@ -134,23 +232,29 @@ export function translateItem(item: Item, dx: number, dy: number): Item {
   return moved;
 }
 
-export function itemToSvg(item: ItemInput & { d?: string }): string {
+export function itemToSvg(item: ItemInput & { d?: string; head_d?: string }): string {
   const c = esc(item.color ?? DEFAULT_COLOR);
   const w = "width" in item && item.width ? item.width : 3;
-  const stroke = `stroke="${c}" stroke-width="${w}" stroke-linecap="round" stroke-linejoin="round"`;
+  const strokeOf = (color: string) => `stroke="${color}" stroke-width="${w}" stroke-linecap="round" stroke-linejoin="round"`;
+  const stroke = strokeOf(c);
+  const dash = "dashed" in item && item.dashed ? ' stroke-dasharray="10 8"' : "";
+  // Heads are never dashed; filled heads are also stroked so their tips match the line's round cap.
+  const heads = item.head_d ? `<path d="${item.head_d}" fill="${"head_filled" in item && item.head_filled ? c : "none"}" ${stroke}/>` : "";
   switch (item.type) {
     case "path":
-      return `<path d="${pathData(item)}" fill="none" ${stroke}/>`;
+      return `<path d="${pathData(item)}" fill="none" ${stroke}${dash}/>${heads}`;
     case "line":
       return `<line x1="${item.from[0]}" y1="${item.from[1]}" x2="${item.to[0]}" y2="${item.to[1]}" ${stroke}${item.dashed ? ' stroke-dasharray="10 8"' : ""}/>`;
     case "arrow":
-      return `<path d="${arrowPath(item.from, item.to, w)}" fill="none" ${stroke}/>`;
+      // Arrows drawn before head_d existed keep their original single-path shape.
+      if (item.head_d === undefined && item.head === undefined) return `<path d="${arrowPath(item.from, item.to, w)}" fill="none" ${stroke}${dash}/>`;
+      return `<path d="M${item.from.join(",")}L${item.to.join(",")}" fill="none" ${stroke}${dash}/>${heads}`;
     case "curved_arrow":
       return `<path d="${arrowPath(item.from, item.to, w, item.bend ?? 40, item.half_head)}" fill="none" ${stroke}/>`;
     case "ellipse":
-      return `<ellipse cx="${item.center[0]}" cy="${item.center[1]}" rx="${item.rx}" ry="${item.ry ?? item.rx}" fill="${esc(item.fill ?? "none")}" ${stroke}/>`;
+      return `<ellipse cx="${item.center[0]}" cy="${item.center[1]}" rx="${item.rx}" ry="${item.ry ?? item.rx}" fill="${esc(item.fill ?? "none")}" ${outlined(item) ? stroke : 'stroke="none"'}/>`;
     case "rect":
-      return `<rect x="${item.x}" y="${item.y}" width="${item.w}" height="${item.h}" rx="4" fill="${esc(item.fill ?? "none")}" ${stroke}/>`;
+      return `<rect x="${item.x}" y="${item.y}" width="${item.w}" height="${item.h}" rx="4" fill="${esc(item.fill ?? "none")}" ${outlined(item) ? stroke : 'stroke="none"'}/>`;
     case "highlight":
       return `<rect x="${item.x}" y="${item.y}" width="${item.w}" height="${item.h}" fill="${esc(item.color ?? "#FFE066")}" fill-opacity="0.45"/>`;
     case "text": {
@@ -161,7 +265,7 @@ export function itemToSvg(item: ItemInput & { d?: string }): string {
       return `<text x="${item.x}" y="${item.y}" font-family="Caveat, 'Comic Neue', 'DejaVu Sans', sans-serif" font-size="${size}" fill="${c}">${lines.join("")}</text>`;
     }
     case "svg":
-      return `<path d="${esc(item.d)}" fill="${esc(item.fill ?? "none")}" ${stroke}/>`;
+      return `<path d="${esc(item.d)}" fill="${esc(item.fill ?? "none")}" ${outlined(item) ? stroke : 'stroke="none"'}${dash}/>${heads}`;
     case "hint": {
       const shape = item.d === undefined ? prepareItems([item])[0] : item as Item;
       const label = shape.d ? `<path d="${esc(shape.d)}" fill="${c}"/>` : "";

@@ -8,6 +8,7 @@ import { RegisterHTMLHandler } from "mathjax-full/js/handlers/html.js";
 import { AllPackages } from "mathjax-full/js/input/tex/AllPackages.js";
 import type { LiteElement } from "mathjax-full/js/adaptors/lite/Element.js";
 import svgpath from "svgpath";
+import { clipPathToRect, pathBounds, strokePolyline, type Point } from "./geometry.js";
 
 let engine: { adaptor: LiteAdaptor; doc: ReturnType<typeof mathjax.document> } | undefined;
 
@@ -16,7 +17,8 @@ function init() {
   const adaptor = liteAdaptor();
   RegisterHTMLHandler(adaptor);
   const tex = new TeX({
-    packages: AllPackages.filter((p) => p !== "bussproofs"),
+    // noundefined would draw an unknown \command as red text; we want it to fail so Claude hears about it.
+    packages: AllPackages.filter((p) => p !== "bussproofs" && p !== "noundefined"),
     // Surface bad LaTeX as an error instead of drawing a red error box on the user's page.
     formatError: (_jax: unknown, err: Error) => {
       throw err;
@@ -33,9 +35,38 @@ export interface MathShape {
   h: number;
 }
 
+/** MathJax's CSS strokes table rules and frames 0.07em wide; the SVG itself only carries the class. */
+const RULE = 70;
+
+/** A rectangle outline as a filled ring: outer clockwise, inner counter-clockwise, so nonzero fill leaves a hole. */
+function ring(x: number, y: number, w: number, h: number, sw: number) {
+  const o = sw / 2;
+  const outer = `M${x - o} ${y - o}H${x + w + o}V${y + h + o}H${x - o}Z`;
+  if (w <= sw || h <= sw) return outer;
+  return `${outer}M${x + o} ${y + o}V${y + h - o}H${x + w - o}V${y + o}Z`;
+}
+
+/** A stroked line as filled quads, optionally dashed like MathJax's mjx-dashed / mjx-dotted rules. */
+function rule(a: Point, b: Point, sw: number, dash?: [number, number]) {
+  if (!dash) return strokePolyline([a, b], sw);
+  const len = Math.hypot(b[0] - a[0], b[1] - a[1]);
+  const parts: string[] = [];
+  for (let t = 0; t < len; t += dash[0] + dash[1]) {
+    const t2 = Math.min(len, t + dash[0]);
+    const at = (s: number): Point => [a[0] + (b[0] - a[0]) * s / len, a[1] + (b[1] - a[1]) * s / len];
+    parts.push(strokePolyline([at(t), at(t2)], sw));
+  }
+  return parts.join("");
+}
+
+const dashOf = (cls: string): [number, number] | undefined =>
+  /mjx-dashed/.test(cls) ? [140, 140] : /mjx-dotted/.test(cls) ? [40, 100] : undefined;
+
 /**
  * Typeset `latex` with its top-left at (x, y). `size` is roughly the height of one line of text,
  * matching the `text` item, so math and handwriting-style text sit nicely together.
+ * The returned box always starts exactly at (x, y), even when an accent or tall delimiter
+ * pokes outside MathJax's own layout box.
  */
 export function renderMath(latex: string, x: number, y: number, size = 36): MathShape {
   const { adaptor, doc } = init();
@@ -43,44 +74,84 @@ export function renderMath(latex: string, x: number, y: number, size = 36): Math
   const svg = adaptor.tags(node, "svg")[0];
   if (!svg) throw new Error("MathJax produced no SVG");
   const [minX, minY, vw, vh] = String(adaptor.getAttribute(svg, "viewBox")).split(/\s+/).map(Number);
+  const attr = (el: LiteElement, k: string) => adaptor.getAttribute(el, k) as string | undefined;
+  const num = (el: LiteElement, k: string, fallback = 0) => {
+    const v = parseFloat(attr(el, k) ?? "");
+    return Number.isFinite(v) ? v : fallback;
+  };
+
+  /** Outlines of `el` in its parent's coordinate system. */
+  const collect = (el: LiteElement): string[] => {
+    const kind = adaptor.kind(el);
+    let parts: string[] = [];
+    const cls = String(attr(el, "class") ?? "");
+    if (kind === "path") {
+      const d = String(attr(el, "d") ?? "");
+      // Glyphs are filled; the few MathJax paths drawn with fill="none" (e.g. \longdiv) are strokes.
+      if (attr(el, "fill") === "none") {
+        const sw = num(el, "stroke-width", RULE);
+        const pts: Point[] = [];
+        svgpath(d).abs().unshort().unarc().iterate((s) => { const n = s.slice(1) as number[]; if (n.length >= 2) pts.push([n[n.length - 2], n[n.length - 1]]); });
+        if (pts.length > 1) parts.push(strokePolyline(pts, sw));
+      } else if (d) parts.push(d);
+    } else if (kind === "rect") {
+      const [rx, ry, rw, rh] = [num(el, "x"), num(el, "y"), num(el, "width"), num(el, "height")];
+      // Fraction bars and sqrt vinculums are filled; table frames and \boxed are stroked outlines.
+      const stroked = attr(el, "data-frame") !== undefined || attr(el, "fill") === "none";
+      if (stroked) parts.push(ring(rx, ry, rw, rh, num(el, "stroke-width", RULE)));
+      else if (rw > 0 && rh > 0) parts.push(`M${rx} ${ry}H${rx + rw}V${ry + rh}H${rx}Z`);
+    } else if (kind === "line") {
+      const sw = num(el, "stroke-width", RULE);
+      parts.push(rule([num(el, "x1"), num(el, "y1")], [num(el, "x2"), num(el, "y2")], sw, dashOf(cls)));
+    } else if (kind === "ellipse" || kind === "circle") {
+      const cx = num(el, "cx"), cy = num(el, "cy"), rx = num(el, "rx", num(el, "r")), ry = num(el, "ry", num(el, "r"));
+      const sw = num(el, "stroke-width", RULE);
+      const pts = Array.from({ length: 49 }, (_, i): Point => [cx + rx * Math.cos(i * Math.PI / 24), cy + ry * Math.sin(i * Math.PI / 24)]);
+      parts.push(strokePolyline(pts, sw));
+    } else if (kind === "polygon" || kind === "polyline") {
+      const n = String(attr(el, "points") ?? "").trim().split(/[\s,]+/).map(Number);
+      const pts: Point[] = [];
+      for (let i = 0; i + 1 < n.length; i += 2) pts.push([n[i], n[i + 1]]);
+      if (pts.length > 1) parts.push(attr(el, "fill") === "none" ? strokePolyline(pts, num(el, "stroke-width", RULE)) : `M${pts.map((p) => p.join(" ")).join("L")}Z`);
+    }
+    for (const child of adaptor.childNodes(el)) {
+      if (adaptor.kind(child as LiteElement) !== "#text") parts.push(...collect(child as LiteElement));
+    }
+    if (kind === "svg") {
+      // Stretchy delimiters and extensible arrows are nested viewports: a glyph scaled past the
+      // viewport and clipped to it. Without the clip, vmatrix bars overshoot and \xrightarrow's
+      // shaft pokes through its labels.
+      const vb = String(attr(el, "viewBox") ?? "").split(/[\s,]+/).map(Number);
+      const w = num(el, "width"), h = num(el, "height");
+      if (vb.length === 4 && vb.every(Number.isFinite) && vb[2] > 0 && vb[3] > 0) {
+        const [bx, by, bw, bh] = vb;
+        parts = parts.map((d) => clipPathToRect(d, { x: bx, y: by, w: bw, h: bh })).filter(Boolean);
+        const t = `translate(${num(el, "x")},${num(el, "y")}) scale(${(w || bw) / bw},${(h || bh) / bh}) translate(${-bx},${-by})`;
+        parts = parts.map((d) => svgpath(d).transform(t).toString());
+      } else {
+        parts = parts.map((d) => svgpath(d).translate(num(el, "x"), num(el, "y")).toString());
+      }
+    }
+    const t = attr(el, "transform");
+    return t ? parts.map((d) => svgpath(d).transform(t).toString()) : parts;
+  };
+
+  const parts: string[] = [];
+  for (const child of adaptor.childNodes(svg)) {
+    if (adaptor.kind(child as LiteElement) !== "#text") parts.push(...collect(child as LiteElement));
+  }
+  if (!parts.length) throw new Error("Nothing to draw for that LaTeX");
 
   // MathJax units are 1/1000 em. Make 1em = 0.8 * size, same ratio the text item uses.
   const s = (size * 0.8) / 1000;
-  const toPage = `translate(${x},${y}) scale(${s}) translate(${-minX},${-minY})`;
-
-  const parts: string[] = [];
-  const walk = (el: LiteElement, transforms: string[]) => {
-    const t = adaptor.getAttribute(el, "transform");
-    const chain = t ? [t, ...transforms] : transforms;
-    const kind = adaptor.kind(el);
-    let d: string | undefined;
-    if (kind === "path") {
-      d = String(adaptor.getAttribute(el, "d") ?? "");
-    } else if (kind === "rect") {
-      // Fraction bars, overlines, sqrt vinculum.
-      const n = (k: string) => Number(adaptor.getAttribute(el, k) ?? 0);
-      const [rx, ry, rw, rh] = [n("x"), n("y"), n("width"), n("height")];
-      if (rw > 0 && rh > 0) d = `M${rx} ${ry}H${rx + rw}V${ry + rh}H${rx}Z`;
-    } else if (kind === "line") {
-      const n = (k: string) => Number(adaptor.getAttribute(el, k) ?? 0);
-      const half = Math.max(n("stroke-width"), 40) / 2;
-      const [x1, y1, x2, y2] = [n("x1"), n("y1"), n("x2"), n("y2")];
-      // Lines become thin boxes so everything stays fill-only.
-      d = x1 === x2
-        ? `M${x1 - half} ${y1}H${x1 + half}V${y2}H${x1 - half}Z`
-        : `M${x1} ${y1 - half}H${x2}V${y2 + half}H${x1}Z`;
-    }
-    if (d) {
-      let p = svgpath(d);
-      for (const tr of chain) p = p.transform(tr);
-      parts.push(p.transform(toPage).round(2).toString());
-    }
-    for (const child of adaptor.childNodes(el)) {
-      if (adaptor.kind(child as LiteElement) !== "#text") walk(child as LiteElement, chain);
-    }
-  };
-  for (const child of adaptor.childNodes(svg)) walk(child as LiteElement, []);
-
-  if (!parts.length) throw new Error("Nothing to draw for that LaTeX");
-  return { d: parts.join(""), w: +(vw * s).toFixed(1), h: +(vh * s).toFixed(1) };
+  // Anything that pokes above or left of MathJax's layout box (a wide \vec, a tall bar) moves
+  // the whole formula, so (x, y) stays the true top-left of what lands on the page.
+  const raw = parts.join("");
+  const ink = pathBounds(raw);
+  const left = Math.min(minX, ink.x), top = Math.min(minY, ink.y);
+  const right = Math.max(minX + vw, ink.x + ink.w), bottom = Math.max(minY + vh, ink.y + ink.h);
+  const toPage = `translate(${x},${y}) scale(${s}) translate(${-left},${-top})`;
+  // Absolute, unshortened commands keep the iPad's small path parser on its well-trodden paths.
+  const d = parts.map((p) => svgpath(p).transform(toPage).abs().unshort().round(2).toString()).join("");
+  return { d, w: +((right - left) * s).toFixed(1), h: +((bottom - top) * s).toFixed(1) };
 }

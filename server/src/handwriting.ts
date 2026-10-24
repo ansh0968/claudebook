@@ -1,12 +1,17 @@
 // Text is stored as outlines so the server image and iPad render the same ink.
-// Kalam supplies the handwriting; Noto subsets cover symbols Kalam cannot draw.
+// Kalam supplies the handwriting, Playpen Sans (also hand-drawn) covers Greek and maths
+// symbols, arrows are drawn as strokes, and Noto subsets catch whatever is left.
 import fs from "node:fs";
 import { createRequire } from "node:module";
 import opentype from "opentype.js";
+import { strokePolyline, type Point } from "./geometry.js";
 
 const require = createRequire(import.meta.url);
 const files = [
   "@fontsource/kalam/files/kalam-latin-400-normal.woff",
+  "@fontsource/kalam/files/kalam-latin-ext-400-normal.woff",
+  "@fontsource/playpen-sans/files/playpen-sans-greek-400-normal.woff",
+  "@fontsource/playpen-sans/files/playpen-sans-math-400-normal.woff",
   "@fontsource/noto-sans-math/files/noto-sans-math-latin-400-normal.woff",
   "@fontsource/noto-sans-symbols/files/noto-sans-symbols-symbols-400-normal.woff",
   "@fontsource/noto-sans-symbols-2/files/noto-sans-symbols-2-symbols-400-normal.woff",
@@ -24,11 +29,61 @@ function load() {
   return fonts;
 }
 
-function choose(char: string, handwriting = true): { font: opentype.Font; glyph: string } {
-  const order = handwriting ? load() : [...load().slice(1), load()[0]];
+/** Fallback glyphs are scaled so their capitals stand as tall as Kalam's. */
+const capScale = (font: opentype.Font) => {
+  const kalam = load()[0].tables.os2?.sCapHeight, own = font.tables.os2?.sCapHeight;
+  return kalam && own ? Math.min(1.25, Math.max(0.8, kalam / own)) : 1;
+};
+
+// Playpen's capital omega has feet that read as an underlined O at note sizes; Noto's is unmistakable.
+const PLAYPEN_SKIP = new Set(["Ω", "Ω"]);
+
+/** The first four fonts are hand-drawn (Kalam, Playpen Sans); the rest are typeset Noto. */
+const HANDWRITTEN = 4;
+
+function choose(char: string, handwriting = true): { font: opentype.Font; glyph: string; scale: number } {
+  const all = load(), noto = all.slice(HANDWRITTEN);
+  // Molecule labels want the typeset look first; handwriting wants Kalam, then Playpen, then Noto.
+  const order = handwriting ? (PLAYPEN_SKIP.has(char) ? [all[0], all[1], ...noto] : all) : [...noto, ...all.slice(0, HANDWRITTEN)];
   const f = order.find((candidate) => candidate.charToGlyphIndex(char) !== 0);
   if (!f) throw new Error(`No text font supports ${JSON.stringify(char)} (U+${char.codePointAt(0)!.toString(16).toUpperCase()}); use a math item for this symbol`);
-  return { font: f, glyph: char };
+  return { font: f, glyph: char, scale: handwriting && f !== all[0] && f !== all[1] ? capScale(f) : 1 };
+}
+
+// No handwriting font draws arrows, and Noto's are thin and typeset. Draw them as pen strokes
+// with the weight of Kalam's hyphen, on its height. Each entry: shafts and heads in em units.
+type ArrowSpec = { width: number; shafts: [number, number, number, number][]; heads: [number, number, number][] };
+const ARROWS: Record<string, ArrowSpec> = (() => {
+  const single = (w: number, right: boolean, left: boolean): ArrowSpec =>
+    ({ width: w, shafts: [[0.08, 0, w - 0.08, 0]], heads: [...(right ? [[w - 0.08, 0, 0]] : []), ...(left ? [[0.08, 0, Math.PI]] : [])] as [number, number, number][] });
+  const double = (w: number, right: boolean, left: boolean): ArrowSpec =>
+    ({ width: w, shafts: [[0.12, -0.09, w - 0.15, -0.09], [0.12, 0.09, w - 0.15, 0.09]], heads: [...(right ? [[w - 0.06, 0, 0]] : []), ...(left ? [[0.06, 0, Math.PI]] : [])] as [number, number, number][] });
+  return {
+    "→": single(1, true, false), "←": single(1, false, true), "↔": single(1.1, true, true),
+    "⟶": single(1.5, true, false), "⟵": single(1.5, false, true), "⟷": single(1.6, true, true),
+    "⇒": double(1.05, true, false), "⇐": double(1.05, false, true), "⇔": double(1.15, true, true), "⟹": double(1.5, true, false),
+    "↑": { width: 0.6, shafts: [[0.3, 0.32, 0.3, -0.38]], heads: [[0.3, -0.38, -Math.PI / 2]] },
+    "↓": { width: 0.6, shafts: [[0.3, -0.38, 0.3, 0.32]], heads: [[0.3, 0.32, Math.PI / 2]] },
+    "⇌": { width: 1.1, shafts: [[0.08, -0.09, 1.02, -0.09], [0.08, 0.09, 1.02, 0.09]], heads: [] },
+  };
+})();
+
+/** Outline of a drawn arrow glyph; returns its path and advance. */
+function arrowGlyph(spec: ArrowSpec, char: string, pen: number, baseline: number, fontSize: number) {
+  const em = fontSize, axis = baseline - 0.3 * em, stroke = 0.075 * em;
+  const at = (x: number, y: number): Point => [pen + x * em, axis + y * em];
+  const parts = spec.shafts.map(([x1, y1, x2, y2]) => strokePolyline([at(x1, y1), at(x2, y2)], stroke));
+  for (const [x, y, angle] of spec.heads) {
+    const tip = at(x, y), barb = 0.28 * em;
+    for (const side of [-0.5, 0.5]) parts.push(strokePolyline([[tip[0] - barb * Math.cos(angle + side), tip[1] - barb * Math.sin(angle + side)], tip], stroke));
+  }
+  if (char === "⇌") {
+    // Equilibrium harpoons: top barb up on the right end, bottom barb down on the left end.
+    const r = at(1.02, -0.09), l = at(0.08, 0.09), barb = 0.24 * em;
+    parts.push(strokePolyline([[r[0] - barb * Math.cos(0.5), r[1] - barb * Math.sin(0.5)], r], stroke));
+    parts.push(strokePolyline([[l[0] + barb * Math.cos(0.5), l[1] + barb * Math.sin(0.5)], l], stroke));
+  }
+  return { d: parts.join(""), advance: (spec.width + 0.1) * em };
 }
 
 interface Segment { char: string; scale: number; shift: number }
@@ -91,10 +146,16 @@ export function renderHandwriting(text: string, x: number, y: number, size = 32)
     let pen = x;
     const baseline = y + size * 0.78 + row * size;
     for (const segment of segments(line)) {
-      const { font, glyph } = choose(segment.char);
-      const scale = fontSize * segment.scale;
-      parts.push(font.getPath(glyph, pen, baseline + segment.shift * size, scale).toPathData(2));
-      pen += font.getAdvanceWidth(glyph, scale);
+      const scale = fontSize * segment.scale, arrow = ARROWS[segment.char];
+      if (arrow) {
+        const drawn = arrowGlyph(arrow, segment.char, pen, baseline + segment.shift * size, scale);
+        parts.push(drawn.d);
+        pen += drawn.advance;
+        continue;
+      }
+      const { font, glyph, scale: fit } = choose(segment.char);
+      parts.push(font.getPath(glyph, pen, baseline + segment.shift * size, scale * fit).toPathData(2));
+      pen += font.getAdvanceWidth(glyph, scale * fit);
     }
     w = Math.max(w, pen - x);
   });

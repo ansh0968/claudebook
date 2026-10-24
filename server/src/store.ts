@@ -39,6 +39,9 @@ export interface Page {
   pdf?: { file: string; page: number };
   /** Bumped every time the app uploads a fresh snapshot of the user's ink. */
   snapshotVersion: number;
+  /** When the app last uploaded this page's ink (snapshot or drawing), and how many strokes it had. */
+  inkSyncedAt?: string;
+  strokeCount?: number;
   /** Handwriting recognized on device, in page coordinates. */
   textBoxes: TextBox[];
   doubts: Doubt[];
@@ -52,6 +55,8 @@ export interface Notebook {
   pages: Page[];
   createdAt: string;
   updatedAt: string;
+  /** Set when Claude asked to delete the notebook; the iPad asks the user and deletes or cancels. */
+  deleteRequestedAt?: string;
 }
 
 export interface ViewState {
@@ -124,6 +129,30 @@ export class Store {
     this.save();
     this.emit({ type: "notebook", notebookId: id });
     return nb;
+  }
+
+  /** Ask the iPad to confirm deleting a notebook. Nothing is removed until the user agrees there. */
+  requestDelete(id: string) {
+    const nb = this.getNotebook(id);
+    if (!nb) return;
+    nb.deleteRequestedAt = now();
+    this.save();
+    this.emit({ type: "deleteRequest", notebookId: id });
+    return nb;
+  }
+
+  cancelDeleteRequest(id: string) {
+    const nb = this.getNotebook(id);
+    if (!nb) return false;
+    delete nb.deleteRequestedAt;
+    this.save();
+    this.emit({ type: "notebook", notebookId: id });
+    return true;
+  }
+
+  /** Flip the iPad to a page. The app only hears this while it is open. */
+  openPage(notebookId: string, pageId: string) {
+    this.emit({ type: "openPage", notebookId, pageId });
   }
 
   /** Remove a notebook and its page files. PDFs stay, since another notebook may share one. */
@@ -263,11 +292,13 @@ export class Store {
     return path.join(this.snapshotsDir, `${pageId}.png`);
   }
 
-  saveSnapshot(pageId: string, png: Buffer, textBoxes?: TextBox[]) {
+  saveSnapshot(pageId: string, png: Buffer, textBoxes?: TextBox[], strokeCount?: number) {
     const found = this.findPage(pageId);
     if (!found) throw new Error(`No page ${pageId}`);
     fs.writeFileSync(this.snapshotPath(pageId), png);
     found.page.snapshotVersion++;
+    found.page.inkSyncedAt = now();
+    if (strokeCount !== undefined) found.page.strokeCount = strokeCount;
     if (textBoxes) found.page.textBoxes = textBoxes;
     found.page.updatedAt = now();
     this.save();
@@ -278,9 +309,13 @@ export class Store {
     return path.join(this.drawingsDir, `${pageId}.pkdrawing`);
   }
 
-  saveDrawing(pageId: string, data: Buffer) {
-    if (!this.findPage(pageId)) throw new Error(`No page ${pageId}`);
+  saveDrawing(pageId: string, data: Buffer, strokeCount?: number) {
+    const found = this.findPage(pageId);
+    if (!found) throw new Error(`No page ${pageId}`);
     fs.writeFileSync(this.drawingPath(pageId), data);
+    found.page.inkSyncedAt = now();
+    if (strokeCount !== undefined) found.page.strokeCount = strokeCount;
+    this.save();
   }
 
   /** Rewrite stored Claude items in place (one-off upgrades at startup). Returns how many changed. */
@@ -337,6 +372,18 @@ export class Store {
     return removed;
   }
 
+  /** Duplicate items (new ids, same group) onto this or another page, shifted by dx,dy. Unknown ids are ignored. */
+  copyClaudeItems(pageId: string, ids: string[], dx: number, dy: number, targetPageId = pageId): Item[] {
+    const source = this.findPage(pageId), target = this.findPage(targetPageId);
+    if (!source || !target) throw new Error(`No page ${source ? targetPageId : pageId}`);
+    const selected = new Set(ids);
+    // In the order Claude listed them, so the returned ids line up with the request.
+    const byId = new Map(source.page.claudeLayer.filter((item) => selected.has(item.id)).map((item) => [item.id, item]));
+    const copies = ids.flatMap((id) => byId.has(id) ? [{ ...translateItem(byId.get(id)!, dx, dy), id: nanoid(8), createdAt: now() }] : []);
+    if (copies.length) this.addClaudeItems(target.page.id, copies);
+    return copies;
+  }
+
   moveClaudeItems(pageId: string, ids: string[], dx: number, dy: number): Item[] {
     const found = this.findPage(pageId);
     if (!found) throw new Error(`No page ${pageId}`);
@@ -357,5 +404,7 @@ export class Store {
 
 export type StoreEvent =
   | { type: "notebook"; notebookId: string }
+  | { type: "deleteRequest"; notebookId: string }
+  | { type: "openPage"; notebookId: string; pageId: string }
   | { type: "claudeLayer"; notebookId: string; pageId: string }
   | { type: "doubts"; notebookId: string; pageId: string; doubts: Doubt[] };
