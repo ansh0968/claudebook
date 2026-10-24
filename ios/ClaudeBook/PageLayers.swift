@@ -239,6 +239,12 @@ enum ClaudeRenderer {
         let color = adapt(UIColor(hex: item.color ?? defaultColor), dark: dark)
         ctx.saveGState()
         defer { ctx.restoreGState() }
+        // Centre is computed after server positioning/anchors, and translated on moves.
+        if let degrees = item.rotation, let center = item.rotationCenter, center.count == 2 {
+            ctx.translateBy(x: center[0], y: center[1])
+            ctx.rotate(by: degrees.truncatingRemainder(dividingBy: 360) * .pi / 180)
+            ctx.translateBy(x: -center[0], y: -center[1])
+        }
         ctx.setStrokeColor(color.cgColor)
         ctx.setLineWidth(item.width ?? 3)
         ctx.setLineCap(.round)

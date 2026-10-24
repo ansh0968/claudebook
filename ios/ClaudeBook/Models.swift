@@ -98,6 +98,16 @@ struct ClaudeItem: Codable, Identifiable, Hashable {
     var filled: Bool?
     var labelPos: String?
     var rightAngle: Bool?
+    var rotation: Double?
+    var rotationCenter: [Double]?
+    var fillPattern: String?
+    var patternSpacing: Double?
+    var patternAngle: Double?
+    var coils: Int?
+    var amplitude: Double?
+    var side: String?
+    var hatchLength: Double?
+    var spacing: Double?
 
     enum CodingKeys: String, CodingKey {
         case id, type, points, from, to, center, rx, ry, x, y, w, h, text, size, color, width, fill, d, closed, dashed, latex, smooth, bend, group, label, revealed, smiles, parts, graph, origin, vertex, at, axes, name, radius, filled
@@ -107,6 +117,12 @@ struct ClaudeItem: Codable, Identifiable, Hashable {
         case halfHead = "half_head"
         case labelPos = "label_pos"
         case rightAngle = "right_angle"
+        case rotation, coils, amplitude, side, spacing
+        case rotationCenter = "rotation_center"
+        case fillPattern = "fill_pattern"
+        case patternSpacing = "pattern_spacing"
+        case patternAngle = "pattern_angle"
+        case hatchLength = "hatch_length"
     }
 
     init(from decoder: Decoder) throws {
@@ -158,6 +174,16 @@ struct ClaudeItem: Codable, Identifiable, Hashable {
         filled = try c.decodeIfPresent(Bool.self, forKey: .filled)
         labelPos = try c.decodeIfPresent(String.self, forKey: .labelPos)
         rightAngle = try c.decodeIfPresent(Bool.self, forKey: .rightAngle)
+        rotation = try c.decodeIfPresent(Double.self, forKey: .rotation)
+        rotationCenter = try c.decodeIfPresent([Double].self, forKey: .rotationCenter)
+        fillPattern = try c.decodeIfPresent(String.self, forKey: .fillPattern)
+        patternSpacing = try c.decodeIfPresent(Double.self, forKey: .patternSpacing)
+        patternAngle = try c.decodeIfPresent(Double.self, forKey: .patternAngle)
+        coils = try c.decodeIfPresent(Int.self, forKey: .coils)
+        amplitude = try c.decodeIfPresent(Double.self, forKey: .amplitude)
+        side = try c.decodeIfPresent(String.self, forKey: .side)
+        hatchLength = try c.decodeIfPresent(Double.self, forKey: .hatchLength)
+        spacing = try c.decodeIfPresent(Double.self, forKey: .spacing)
     }
 }
 

@@ -174,6 +174,18 @@ jobs:
           xcrun simctl launch "$UDID" in.clarifiq.claudebook
           sleep 8
           xcrun simctl io "$UDID" screenshot shots/17-graphs-ipad.png
+      - name: Physics acceptance scene
+        working-directory: ios
+        run: |
+          UDID=$(xcrun simctl list devices available -j | jq -r '[.devices[][] | select(.name | test("iPad Pro"))][0].udid')
+          xcrun simctl terminate "$UDID" in.clarifiq.claudebook || true
+          node ../scripts/physics-fixture.mjs
+          export SIMCTL_CHILD_CLAUDEBOOK_SERVER=$BASE SIMCTL_CHILD_CLAUDEBOOK_SECRET=$SECRET
+          export SIMCTL_CHILD_CLAUDEBOOK_AUTOOPEN=1
+          unset SIMCTL_CHILD_CLAUDEBOOK_TEST_STROKE SIMCTL_CHILD_CLAUDEBOOK_TEST_SCROLL
+          xcrun simctl launch "$UDID" in.clarifiq.claudebook
+          sleep 8
+          xcrun simctl io "$UDID" screenshot shots/19-physics-ipad.png
       - uses: actions/upload-artifact@v4
         if: always()
         with:

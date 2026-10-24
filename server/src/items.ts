@@ -7,6 +7,7 @@ import { renderHandwriting } from "./handwriting.js";
 import { renderMolecule } from "./molecule.js";
 import svgpath from "svgpath";
 import { arrowHead, arrowPath, headsFor, pathBounds, pointBounds, type BBox, type HeadMode, type Point } from "./geometry.js";
+import { PhysicsSchemas, rotation, patternFields, preparePhysics, patternParts, ellipseOutline, rectOutline, rotatedBBox } from "./physics.js";
 import { GraphSchemas, prepareGraph, type GraphTransform } from "./graphs.js";
 import { partsBBox, partsToSvg, translateParts, type Part } from "./parts.js";
 import { PAGE_H, PAGE_W } from "./store.js";
@@ -24,6 +25,7 @@ const anchor = z.enum(["top-left", "top-center", "top-right", "left-center", "ce
 
 export const ItemSchema = z.discriminatedUnion("type", [
   ...GraphSchemas,
+  ...PhysicsSchemas,
   z.object({ type: z.literal("path"), points: z.array(pt).min(2), color, width, closed: z.boolean().optional(), smooth: z.boolean().optional(), dashed, head: head("none"), head_filled: headFilled, group })
     .describe("Freehand stroke through the points; smooth defaults true, false joins points with straight segments"),
   z.object({ type: z.literal("line"), from: pt, to: pt, color, width, dashed: z.boolean().optional(), group }),
@@ -31,18 +33,18 @@ export const ItemSchema = z.discriminatedUnion("type", [
     .describe("Straight arrow. head: \"both\" for dimension lines (λ, R, lengths)"),
   z.object({ type: z.literal("curved_arrow"), from: pt, to: pt, bend: z.number().optional(), half_head: z.boolean().optional(), color, width, group })
     .describe("Quadratic curved arrow. Signed bend offsets its control point; half_head draws one fishhook barb"),
-  z.object({ type: z.literal("ellipse"), center: pt, rx: z.number(), ry: z.number().optional(), color, width, fill, group })
+  z.object({ type: z.literal("ellipse"), center: pt, rx: z.number(), ry: z.number().optional(), color, width, fill, rotation, ...patternFields, group })
     .describe("Circle or ellipse. Great for circling mistakes: wrap the text box with some padding"),
-  z.object({ type: z.literal("rect"), x: z.number(), y: z.number(), w: z.number(), h: z.number(), color, width, fill, group }),
+  z.object({ type: z.literal("rect"), x: z.number(), y: z.number(), w: z.number(), h: z.number(), color, width, fill, rotation, ...patternFields, group }),
   z.object({ type: z.literal("highlight"), x: z.number(), y: z.number(), w: z.number(), h: z.number(), color: z.string().optional(), group })
     .describe("Translucent marker over a region, default yellow"),
-  z.object({ type: z.literal("text"), x: z.number(), y: z.number(), text: z.string(), size: z.number().optional(), color, anchor, group })
+  z.object({ type: z.literal("text"), x: z.number(), y: z.number(), text: z.string(), size: z.number().optional(), color, anchor, rotation, group })
     .describe("Handwritten-style text with Unicode symbol fallback. _2 and ^- make single-character scripts; _{...} and ^{...} make longer scripts. x,y is the top-left. size is line height, default 32. Use \\n for new lines"),
-  z.object({ type: z.literal("svg"), d: z.string(), color, width, fill, dashed, head: head("none"), head_filled: headFilled, group })
+  z.object({ type: z.literal("svg"), d: z.string(), color, width, fill, dashed, head: head("none"), head_filled: headFilled, rotation, ...patternFields, group })
     .describe("Raw SVG path data in page coordinates, for figures and diagrams"),
-  z.object({ type: z.literal("math"), latex: z.string(), x: z.number(), y: z.number(), size: z.number().optional(), color, anchor, group })
+  z.object({ type: z.literal("math"), latex: z.string(), x: z.number(), y: z.number(), size: z.number().optional(), color, anchor, rotation, group })
     .describe("Typeset math from LaTeX, e.g. x = \\frac{-b \\pm \\sqrt{b^2-4ac}}{2a}. Use this for every equation and corrected working step, and for any symbol, subscript or charge. Chemistry works with mhchem: \\ce{H2SO4}, \\ce{OH-}, \\ce{A + B -> C}. x,y is the top-left, size is the line height, default 36; one line is about 0.55 x size tall, fractions and matrices more. Arrow labels: \\xrightarrow[below]{above} or \\ce{A ->[above][below] B}. One line per item"),
-  z.object({ type: z.literal("molecule"), smiles: z.string(), x: z.number(), y: z.number(), size: z.number().positive().optional(), color, group })
+  z.object({ type: z.literal("molecule"), smiles: z.string(), x: z.number(), y: z.number(), size: z.number().positive().optional(), color, rotation, group })
     .describe("Chemical structure from SMILES. x,y is the top-left; size is the longest side, default 180"),
   z.object({ type: z.literal("hint"), x: z.number(), y: z.number(), text: z.string(), label: z.string().optional(), size: z.number().positive().optional(), revealed: z.boolean().optional(), color, group })
     .describe("Hidden hint chip. The user can tap it to reveal text; label defaults to Hint"),
@@ -50,7 +52,7 @@ export const ItemSchema = z.discriminatedUnion("type", [
 
 export type ItemInput = z.infer<typeof ItemSchema>;
 /** Stored items carry generated outline d, arrowhead outline head_d and dimensions where appropriate. */
-export type Item = ItemInput & { id: string; createdAt: string; d?: string; w?: number; h?: number; head_d?: string; parts?: Part[]; graph?: GraphTransform };
+export type Item = ItemInput & { id: string; createdAt: string; d?: string; w?: number; h?: number; head_d?: string; parts?: Part[]; graph?: GraphTransform; rotation_center?: Point };
 
 /** Fractions of the item's width and height that each anchor sits at. */
 const ANCHORS: Record<NonNullable<z.infer<typeof anchor>>, [number, number]> = {
@@ -92,6 +94,11 @@ export function prepareItems(items: ItemInput[], existing: Item[] = []): Item[] 
   const available = [...existing];
   return items.map(input => {
     const item = prepareItem(input, available);
+    // Rotation follows outline preparation and anchor positioning on both renderers.
+    if ("rotation" in item && item.rotation) {
+      const b = unrotatedBBox(item);
+      item.rotation_center = [b.x + b.w / 2, b.y + b.h / 2];
+    }
     available.push(item);
     return item;
   });
@@ -101,6 +108,13 @@ function prepareItem(input: ItemInput, available: Item[]): Item {
     // The iPad's path parser has no arcs, so store SVG paths with arcs already turned into curves.
     const i = input.type === "svg" ? { ...input, d: normalizeSvg(input.d) } : input;
     const base = withHeads({ ...i, id: nanoid(8), createdAt: new Date().toISOString() });
+    if (i.type === "spring" || i.type === "ground") return { ...base, parts: preparePhysics(i) };
+    if ((i.type === "rect" || i.type === "ellipse" || i.type === "svg") && i.fill_pattern) {
+      const d = i.type === "rect" ? rectOutline(i.x, i.y, i.w, i.h) : i.type === "ellipse" ? ellipseOutline(i.center, i.rx, i.ry ?? i.rx) : i.d;
+      const parts = patternParts(d, i.fill_pattern, i.pattern_spacing, i.pattern_angle, i.color, i.width, i.fill, outlined(i), i.type === "svg" && i.dashed ? [10, 8] : undefined);
+      if (base.head_d) parts.push({ d: base.head_d, stroke: i.color ?? DEFAULT_COLOR, fill: i.type === "svg" && i.head_filled ? i.color ?? DEFAULT_COLOR : "none", width: i.width ?? 3 });
+      return { ...base, parts };
+    }
     if (i.type === "axes" || i.type === "plot" || i.type === "shade" || i.type === "angle" || i.type === "point") return { ...base, ...prepareGraph(i, available) };
     if (i.type === "text") return anchored(base as typeof i & { id: string; createdAt: string }, renderHandwriting(i.text, i.x, i.y, i.size ?? 32)) as Item;
     if (i.type === "molecule") return { ...base, ...renderMolecule(i.smiles, i.x, i.y, i.size ?? 180) };
@@ -196,11 +210,15 @@ function pathData(item: Extract<ItemInput, { type: "path" }>) {
 
 /** Boxes include stroke thickness and curve extrema, in fixed page coordinates. */
 export function itemBBox(item: Item): BBox {
+  const box = unrotatedBBox(item);
+  return "rotation" in item && item.rotation ? rotatedBBox(box, item.rotation, item.rotation_center) : box;
+}
+function unrotatedBBox(item: Item): BBox {
   if (item.parts) return partsBBox(item.parts, item.graph?.origin);
   const stroked = ["path", "line", "arrow", "curved_arrow", "ellipse", "rect", "svg"].includes(item.type) && outlined(item);
   const padding = stroked ? (("width" in item ? item.width : undefined) ?? 3) / 2 : 0;
   switch (item.type) {
-    case "axes": case "plot": case "shade": case "angle": case "point": return itemBBox(prepareItems([item])[0]);
+    case "spring": case "ground": case "axes": case "plot": case "shade": case "angle": case "point": return itemBBox(prepareItems([item])[0]);
     case "path": return pathBounds(pathData(item) + (item.head_d ?? ""), padding);
     case "line": return pointBounds([item.from, item.to], padding);
     case "arrow": return pathBounds(item.head_d !== undefined || item.head === "none" ? `M${item.from.join(",")}L${item.to.join(",")}${item.head_d ?? ""}` : arrowPath(item.from, item.to, item.width), (item.width ?? 3) / 2);
@@ -234,6 +252,7 @@ export function translateItem(item: Item, dx: number, dy: number): Item {
   if (moved.type === "axes") moved.origin = point(moved.origin);
   if (moved.type === "angle") moved.vertex = point(moved.vertex);
   if (moved.type === "point" && !moved.graph) moved.at = point(moved.at);
+  if (moved.rotation_center) moved.rotation_center = point(moved.rotation_center);
   if (moved.graph) moved.graph = { ...moved.graph, origin: point(moved.graph.origin) };
   if (moved.parts) moved.parts = translateParts(moved.parts, dx, dy);
   if (moved.type === "ellipse") moved.center = point(moved.center);
@@ -250,8 +269,18 @@ export function translateItem(item: Item, dx: number, dy: number): Item {
   return moved;
 }
 
-export function itemToSvg(item: ItemInput & { d?: string; head_d?: string; parts?: Part[] }): string {
+type RenderItem = ItemInput & { d?: string; head_d?: string; parts?: Part[]; rotation_center?: Point };
+export function itemToSvg(item: RenderItem): string {
+  if ("rotation" in item && item.rotation) {
+    const prepared = item.rotation_center ? item : prepareItems([item])[0];
+    const center = prepared.rotation_center!;
+    return `<g transform="rotate(${item.rotation % 360} ${center[0]} ${center[1]})">${unrotatedSvg(prepared)}</g>`;
+  }
+  return unrotatedSvg(item);
+}
+function unrotatedSvg(item: RenderItem): string {
   if (item.parts) return partsToSvg(item.parts);
+  if ("fill_pattern" in item && item.fill_pattern) return partsToSvg(prepareItems([item])[0].parts!);
   const c = esc(item.color ?? DEFAULT_COLOR);
   const w = "width" in item && item.width ? item.width : 3;
   const strokeOf = (color: string) => `stroke="${color}" stroke-width="${w}" stroke-linecap="round" stroke-linejoin="round"`;
@@ -260,7 +289,7 @@ export function itemToSvg(item: ItemInput & { d?: string; head_d?: string; parts
   // Heads are never dashed; filled heads are also stroked so their tips match the line's round cap.
   const heads = item.head_d ? `<path d="${item.head_d}" fill="${"head_filled" in item && item.head_filled ? c : "none"}" ${stroke}/>` : "";
   switch (item.type) {
-    case "axes": case "plot": case "shade": case "angle": case "point": return partsToSvg(prepareItems([item])[0].parts!);
+    case "spring": case "ground": case "axes": case "plot": case "shade": case "angle": case "point": return partsToSvg(prepareItems([item])[0].parts!);
     case "path":
       return `<path d="${pathData(item)}" fill="none" ${stroke}${dash}/>${heads}`;
     case "line":
