@@ -58,24 +58,38 @@ export function patternParts(outline: string, pattern: "cross" | "dot" | "hatch"
   // Prepared paths use cubics so the generic iPad path parser needs no arc special case.
   outline = svgpath(outline).unarc().toString();
   const b = pathBounds(outline), parts: Part[] = [{ d: outline, fill }];
-  if (!Number.isFinite(spacing) || spacing <= 0 || Math.max(1, Math.ceil(b.w / spacing)) * Math.max(1, Math.ceil(b.h / spacing)) > 10000) throw new Error("Pattern spacing must be positive and produce at most 10000 marks");
+  const columns = Math.ceil(b.w / spacing), rows = Math.ceil(b.h / spacing);
+  if (!Number.isFinite(spacing) || spacing <= 0 || Math.max(1, columns) * Math.max(1, rows) > 10000) throw new Error("Pattern spacing must be positive and produce at most 10000 marks");
   const diagonal = Math.hypot(b.w, b.h), cx = b.x + b.w / 2, cy = b.y + b.h / 2;
+  if (![diagonal, cx, cy].every(Number.isFinite)) throw new Error("Pattern geometry must remain finite");
+  const finitePath = (points: Point[]) => {
+    if (!points.flat().every(Number.isFinite)) throw new Error("Pattern geometry must remain finite");
+    return path(points);
+  };
   if (pattern === "hatch") {
-    if (diagonal / spacing > 10000) throw new Error("Pattern spacing produces too many hatch lines");
+    const steps = diagonal / spacing;
+    if (steps > 10000) throw new Error("Pattern spacing produces too many hatch lines");
     const theta = (angle % 360) * Math.PI / 180, ux = Math.cos(theta), uy = Math.sin(theta);
     let d = "";
-    for (let offset = -diagonal; offset <= diagonal; offset += spacing) {
+    for (let n = 0; n <= Math.floor(steps * 2); n++) {
+      const offset = (n - steps) * spacing;
       const x = cx - uy * offset, y = cy + ux * offset;
-      d += path([[x - ux * diagonal, y - uy * diagonal], [x + ux * diagonal, y + uy * diagonal]]);
+      d += finitePath([[x - ux * diagonal, y - uy * diagonal], [x + ux * diagonal, y + uy * diagonal]]);
     }
     parts.push({ d, stroke: color, width: 1.2, clip: outline });
   } else {
     let rings = "", symbols = "", dots = "";
     const radius = Math.min(7, spacing * 0.22), mark = radius * 0.5;
+    if ((columns > 1 && b.x + spacing === b.x) || (rows > 1 && b.y + spacing === b.y)) throw new Error("Pattern spacing is too small to resolve at these coordinates");
     // Anchor the grid to the shape, so moving it preserves the pattern phase.
-    for (let x = b.x + spacing / 2; x < b.x + b.w; x += spacing) for (let y = b.y + spacing / 2; y < b.y + b.h; y += spacing) {
+    // Index loops stay bounded even when adding spacing to a huge coordinate rounds back to itself.
+    for (let column = 0; column < columns; column++) for (let row = 0; row < rows; row++) {
+      const ox = (column + 0.5) * spacing, oy = (row + 0.5) * spacing;
+      if (ox >= b.w || oy >= b.h) continue;
+      const x = b.x + ox, y = b.y + oy;
+      if (![x, y].every(Number.isFinite)) throw new Error("Pattern geometry must remain finite");
       rings += ellipseOutline([x, y], radius, radius);
-      if (pattern === "cross") symbols += path([[x - mark, y - mark], [x + mark, y + mark]]) + path([[x - mark, y + mark], [x + mark, y - mark]]);
+      if (pattern === "cross") symbols += finitePath([[x - mark, y - mark], [x + mark, y + mark]]) + finitePath([[x - mark, y + mark], [x + mark, y - mark]]);
       else dots += ellipseOutline([x, y], Math.max(0.6, radius * 0.2), Math.max(0.6, radius * 0.2));
     }
     if (rings) parts.push({ d: rings + symbols, stroke: color, width: 1.2, clip: outline });
