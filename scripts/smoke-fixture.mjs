@@ -35,7 +35,12 @@ if (["reveal", "focus"].includes(process.argv[2])) {
   await api(`pages/${page.id}/hints/${hint.id}/reveal`, {});
   console.log("Revealed the chemistry hint");
 } else {
-  const notebook = await api("notebooks", { title, pages: 2, background: "dotted" });
+  // A small folder tree, like a real study library.
+  const chemistry = await api("folders", { name: "Chemistry" });
+  const organic = await api("folders", { name: "Organic", parentId: chemistry.id });
+  const maths = await api("folders", { name: "Maths" });
+  await api("folders", { name: "Physics" });
+  const notebook = await api("notebooks", { title, pages: 2, background: "dotted", folderId: organic.id });
   const page = notebook.pages[0];
   await tool("draw_on_page", { page_id: page.id, items: [
     { type: "text", x: 75, y: 70, text: "Small steps. Clear mechanisms.", size: 42, color: "#254E49", group: "heading" },
@@ -58,6 +63,17 @@ if (["reveal", "focus"].includes(process.argv[2])) {
   await api(`pages/${page.id}/doubts`, { region: { x: 65, y: 1060, w: 800, h: 150 } });
   await api("view", { notebookId: notebook.id, pageId: page.id });
   await api("notebooks", { title: "Past papers", pages: 3, background: "lined" });
-  await api("notebooks", { title: "Reaction notes", pages: 2, background: "grid" });
+  await api("notebooks", { title: "Reaction notes", pages: 2, background: "grid", folderId: chemistry.id });
+  await api("notebooks", { title: "Equilibrium", pages: 1, background: "lined", folderId: chemistry.id });
+  await api("notebooks", { title: "Calculus", pages: 4, background: "grid", folderId: maths.id });
+  // Two scratch pads, one with something on it so its thumbnail isn't blank.
+  const pad = await api("notebooks", { title: "Scratch · quick integral", scratch: true });
+  await tool("draw_on_page", { page_id: pad.pages[0].id, items: [
+    { type: "math", latex: "\\int_0^1 x e^{x}\\,dx = 1", x: 90, y: 120, size: 64, color: "#253A46" },
+    { type: "ellipse", center: [520, 520], rx: 260, ry: 140, color: "#C16F52", width: 6 },
+    { type: "text", x: 330, y: 490, text: "by parts!", size: 54, color: "#357A73" },
+  ] });
+  await api("notebooks", { title: "Scratch · ideas", scratch: true });
+  await api("view", { notebookId: notebook.id, pageId: page.id });
   console.log(`Seeded chemistry smoke notebook ${notebook.id}`);
 }

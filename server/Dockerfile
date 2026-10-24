@@ -15,16 +15,23 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
  && case "${TARGETARCH:-$(uname -m)}" in arm64|aarch64) arch=aarch64 ;; *) arch=x86_64 ;; esac \
  && curl -fsSL "https://github.com/typst/typst/releases/download/${TYPST_VERSION}/typst-${arch}-unknown-linux-musl.tar.xz" | tar xJ -C /tmp \
  && mv /tmp/typst-${arch}-unknown-linux-musl/typst /usr/local/bin/typst
+ENV TYPST_PACKAGE_CACHE_PATH=/opt/typst-packages
+COPY typst-packages.typ /tmp/typst-packages.typ
+# Compilation resolves and downloads transitive imports as well as these pins.
+RUN typst compile /tmp/typst-packages.typ /tmp/typst-packages.pdf
 
 FROM node:22-slim
 # poppler-utils: pdfinfo/pdftoppm, for page counts and showing PDF pages to Claude.
 RUN apt-get update && apt-get install -y --no-install-recommends fonts-dejavu-core poppler-utils && rm -rf /var/lib/apt/lists/*
 COPY --from=typst /usr/local/bin/typst /usr/local/bin/typst
+COPY --from=typst /opt/typst-packages /opt/typst-packages
+COPY typst-packages.typ /opt/typst-packages.typ
 WORKDIR /app
-ENV NODE_ENV=production DATA_DIR=/data PORT=8787
+ENV NODE_ENV=production DATA_DIR=/data PORT=8787 TYPST_PACKAGE_CACHE_PATH=/opt/typst-packages
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY package.json ./
+COPY typst-packages.typ ./
 COPY public ./public
 VOLUME /data
 EXPOSE 8787

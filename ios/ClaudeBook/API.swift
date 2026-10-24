@@ -87,9 +87,10 @@ struct API {
         try decode(Notebook.self, await request("notebooks/\(id)"))
     }
 
-    func createNotebook(title: String, background: PageBackground) async throws -> Notebook {
-        struct Body: Encodable { var title: String; var pages: Int; var background: PageBackground }
-        return try decode(Notebook.self, await request("notebooks", method: "POST", json: Body(title: title, pages: 1, background: background)))
+    func createNotebook(title: String, background: PageBackground, folderId: String? = nil, scratch: Bool = false) async throws -> Notebook {
+        struct Body: Encodable { var title: String; var pages: Int; var background: PageBackground; var folderId: String?; var scratch: Bool? }
+        let body = Body(title: title, pages: 1, background: background, folderId: folderId, scratch: scratch ? true : nil)
+        return try decode(Notebook.self, await request("notebooks", method: "POST", json: body))
     }
 
     func renameNotebook(_ id: String, title: String) async throws {
@@ -97,8 +98,47 @@ struct API {
         _ = try await request("notebooks/\(id)", method: "PATCH", json: Body(title: title))
     }
 
-    func deleteNotebook(_ id: String) async throws {
-        _ = try await request("notebooks/\(id)", method: "DELETE")
+    /// nil moves the notebook to the top level.
+    func moveNotebook(_ id: String, to folderId: String?) async throws {
+        struct Body: Encodable { var folderId: String }
+        _ = try await request("notebooks/\(id)", method: "PATCH", json: Body(folderId: folderId ?? ""))
+    }
+
+    /// Turns a scratch pad into a normal notebook so it's never deleted.
+    func keepScratchPad(_ id: String, title: String, folderId: String?) async throws {
+        struct Body: Encodable { var title: String; var folderId: String; var scratch = false }
+        _ = try await request("notebooks/\(id)", method: "PATCH", json: Body(title: title, folderId: folderId ?? ""))
+    }
+
+    func createFolder(name: String, parentId: String?) async throws -> Folder {
+        struct Body: Encodable { var name: String; var parentId: String? }
+        return try decode(Folder.self, await request("folders", method: "POST", json: Body(name: name, parentId: parentId)))
+    }
+
+    func renameFolder(_ id: String, name: String) async throws {
+        struct Body: Encodable { var name: String }
+        _ = try await request("folders/\(id)", method: "PATCH", json: Body(name: name))
+    }
+
+    /// nil moves the folder to the top level.
+    func moveFolder(_ id: String, to parentId: String?) async throws {
+        struct Body: Encodable { var parentId: String }
+        _ = try await request("folders/\(id)", method: "PATCH", json: Body(parentId: parentId ?? ""))
+    }
+
+    /// Notebooks and folders inside move up to the deleted folder's parent.
+    func deleteFolder(_ id: String) async throws {
+        _ = try await request("folders/\(id)", method: "DELETE")
+    }
+
+    func deleteNotebook(_ id: String) async throws -> [String]? {
+        struct Deleted: Decodable { var deletedPageIds: [String]? }
+        return try decode(Deleted.self, await request("notebooks/\(id)", method: "DELETE")).deletedPageIds
+    }
+
+    /// The user kept a notebook Claude asked to delete.
+    func cancelDeleteRequest(_ id: String) async throws {
+        _ = try await request("notebooks/\(id)/delete-request", method: "DELETE")
     }
 
     func addPage(notebookId: String, afterIndex: Int, background: PageBackground) async throws {
@@ -106,26 +146,52 @@ struct API {
         _ = try await request("notebooks/\(notebookId)/pages", method: "POST", json: Body(count: 1, afterIndex: afterIndex, background: background))
     }
 
+    func deletePages(notebookId: String, pageIds: [String]) async throws -> Notebook {
+        struct Body: Encodable { var pageIds: [String] }
+        return try decode(Notebook.self, await request("notebooks/\(notebookId)/pages/delete", method: "POST", json: Body(pageIds: pageIds)))
+    }
+
+    func reorderPages(notebookId: String, pageIds: [String]) async throws -> Notebook {
+        struct Body: Encodable { var pageIds: [String] }
+        return try decode(Notebook.self, await request("notebooks/\(notebookId)/pages/reorder", method: "POST", json: Body(pageIds: pageIds)))
+    }
+
+    struct PageTransfer: Decodable { var notebook: Notebook; var pages: [Page] }
+
+    func duplicatePages(_ pageIds: [String], into notebookId: String, afterPage: Int) async throws -> PageTransfer {
+        struct Body: Encodable { var pageIds: [String]; var targetNotebookId: String; var afterPage: Int }
+        return try decode(PageTransfer.self, await request("pages/duplicate", method: "POST", json: Body(pageIds: pageIds, targetNotebookId: notebookId, afterPage: afterPage)))
+    }
+
+    func movePages(_ pageIds: [String], into notebookId: String, afterPage: Int) async throws -> PageTransfer {
+        struct Body: Encodable { var pageIds: [String]; var targetNotebookId: String; var afterPage: Int }
+        return try decode(PageTransfer.self, await request("pages/move", method: "POST", json: Body(pageIds: pageIds, targetNotebookId: notebookId, afterPage: afterPage)))
+    }
+
+
     func setView(notebookId: String, pageId: String) async throws {
         struct Body: Encodable { var notebookId: String; var pageId: String }
         _ = try await request("view", method: "POST", json: Body(notebookId: notebookId, pageId: pageId))
     }
 
-    func uploadSnapshot(pageId: String, png: Data, textBoxes: [TextBox]) async throws {
-        struct Body: Encodable { var png: String; var textBoxes: [TextBox] }
-        _ = try await request("pages/\(pageId)/snapshot", method: "PUT", json: Body(png: png.base64EncodedString(), textBoxes: textBoxes))
+    /// strokeCount lets Claude tell an empty page from one whose ink hasn't synced.
+    func uploadSnapshot(pageId: String, png: Data, textBoxes: [TextBox], strokeCount: Int) async throws {
+        struct Body: Encodable { var png: String; var textBoxes: [TextBox]; var strokeCount: Int }
+        _ = try await request("pages/\(pageId)/snapshot", method: "PUT", json: Body(png: png.base64EncodedString(), textBoxes: textBoxes, strokeCount: strokeCount))
     }
 
-    func uploadDrawing(pageId: String, data: Data) async throws {
-        _ = try await request("pages/\(pageId)/drawing", method: "PUT", body: data)
+    func uploadDrawing(pageId: String, data: Data, strokeCount: Int) async throws {
+        _ = try await request("pages/\(pageId)/drawing", method: "PUT", body: data, query: [URLQueryItem(name: "strokes", value: String(strokeCount))])
     }
 
     func drawing(pageId: String) async throws -> Data? {
         do { return try await request("pages/\(pageId)/drawing") } catch let e as APIError where e.status == 404 { return nil }
     }
 
-    func importPDF(_ data: Data, title: String) async throws -> Notebook {
-        try decode(Notebook.self, await request("notebooks/import-pdf", method: "POST", body: data, contentType: "application/pdf", query: [URLQueryItem(name: "title", value: title)]))
+    func importPDF(_ data: Data, title: String, folderId: String? = nil) async throws -> Notebook {
+        var query = [URLQueryItem(name: "title", value: title)]
+        if let folderId { query.append(URLQueryItem(name: "folderId", value: folderId)) }
+        return try decode(Notebook.self, await request("notebooks/import-pdf", method: "POST", body: data, contentType: "application/pdf", query: query))
     }
 
     func pdf(file: String) async throws -> Data {
@@ -185,6 +251,12 @@ struct API {
 final class LiveConnection: ObservableObject {
     @Published private(set) var connected = false
     var onEvent: ((LiveEvent) -> Void)?
+    /// Requests from Claude (open a page, confirm a delete). The library owns navigation, so it handles
+    /// these whichever screen is showing, while onEvent belongs to the screen on top.
+    var onCommand: ((LiveEvent) -> Void)?
+    /// Library metadata must refresh even while the editor owns onEvent.
+    var onLibraryEvent: ((LiveEvent) -> Void)?
+    static let commands: Set<String> = ["openPage", "deleteRequest"]
     private var task: URLSessionWebSocketTask?
     private var running = false
 
@@ -225,7 +297,8 @@ final class LiveConnection: ObservableObject {
                 case .success(let message):
                     self.connected = true
                     if case .string(let text) = message, let event = try? JSONDecoder().decode(LiveEvent.self, from: Data(text.utf8)) {
-                        self.onEvent?(event)
+                        self.onLibraryEvent?(event)
+                        if Self.commands.contains(event.type) { self.onCommand?(event) } else { self.onEvent?(event) }
                     }
                     self.receive(on: task)
                 case .failure:

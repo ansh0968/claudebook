@@ -8,7 +8,9 @@ on:
     paths: ["ios/**", ".github/workflows/ios-smoke.yml"]
   workflow_dispatch:
 
-concurrency: ios-smoke
+concurrency:
+  group: ios-smoke-${{ github.ref }}
+  cancel-in-progress: false
 
 permissions:
   contents: write
@@ -105,19 +107,31 @@ jobs:
           echo "view after scrolling: $(api notebooks | jq -c .view) (page 2 is $PAGE2)"
           mcp '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"draw_on_page","arguments":{"items":[
             {"type":"rect","x":90,"y":120,"w":820,"h":200,"color":"#3B82F6"},
-            {"type":"text","x":560,"y":360,"text":"page 2!","size":44}]}}}'
+            {"type":"text","x":560,"y":360,"text":"page 2!","size":44},
+            {"type":"arrow","from":[120,460],"to":[460,460],"head":"both","color":"#3B82F6"},
+            {"type":"text","x":290,"y":450,"text":"λ = 2 m → Ω, μ, θ","size":32,"anchor":"bottom-center"},
+            {"type":"path","points":[[120,560],[260,500],[400,580],[540,520]],"dashed":true,"head":"end","head_filled":true,"color":"#E5484D"},
+            {"type":"svg","d":"M600,560 A120,120 0 0 1 840,560","head":"both","dashed":true},
+            {"type":"ellipse","center":[300,700],"rx":120,"ry":60,"fill":"#30A46C55"},
+            {"type":"math","latex":"\\begin{vmatrix} a & b \\\\ c & d \\end{vmatrix} \\begin{array}{|c|c|} \\hline 1 & 2 \\\\ \\hline 3 & 4 \\\\ \\hline \\end{array} A \\xrightarrow[\\Delta]{H_2SO_4} B","x":500,"y":640,"size":36}]}}}'
           sleep 5
           xcrun simctl io "$UDID" screenshot shots/7-claude-page2.png
           # Claude inserts a page at the start: everything on screen should stay put, ink included.
           mcp "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"tools/call\",\"params\":{\"name\":\"add_pages\",\"arguments\":{\"notebook_id\":\"$PDF_NB\",\"after_page\":0,\"background\":\"lined\"}}}"
           sleep 6
           xcrun simctl io "$UDID" screenshot shots/8-page-inserted.png
+          # Claude flips the iPad back to the first page.
+          mcp "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"tools/call\",\"params\":{\"name\":\"open_page\",\"arguments\":{\"notebook_id\":\"$PDF_NB\",\"page_number\":1}}}"
+          sleep 4
+          xcrun simctl io "$UDID" screenshot shots/8b-open-page-1.png
           api notebooks/$PDF_NB | jq -c '[.pages[] | {id, pdf: .pdf.page, claude: (.claudeLayer | length), v: .snapshotVersion}]'
           xcrun simctl spawn "$UDID" log show --last 5m --style compact --predicate 'process == "ClaudeBook" AND messageType >= 16' | tail -40 || true
           echo "--- server log"; tail -20 $RUNNER_TEMP/server.log
       - name: Chemistry tools and refreshed UI
         working-directory: ios
         run: |
+          cat ClaudeBook/Models.swift ../scripts/test-library-models.swift > "$RUNNER_TEMP/library-model-test.swift"
+          swift "$RUNNER_TEMP/library-model-test.swift"
           UDID=$(xcrun simctl list devices available -j | jq -r '[.devices[][] | select(.name | test("iPad Pro"))][0].udid')
           xcrun simctl terminate "$UDID" in.clarifiq.claudebook || true
           node ../scripts/smoke-fixture.mjs
@@ -130,7 +144,9 @@ jobs:
             xcodebuild -project ClaudeBook.xcodeproj -scheme ClaudeBook -configuration Debug \
             -destination "id=$UDID" -derivedDataPath test-build -resultBundlePath TestResults.xcresult \
             -parallel-testing-enabled NO CODE_SIGNING_ALLOWED=NO test > ui-test.log 2>&1 \
-            || { tail -150 ui-test.log; exit 1; }
+            || { cp ui-test.log shots/ui-test.log; grep -n -B25 ": error:" ui-test.log | tail -200; grep -n -A6 "^Failing tests" ui-test.log; exit 1; }
+          # CRUD UI tests deliberately empty the disposable library; restore study fixtures.
+          node ../scripts/smoke-fixture.mjs
           node ../scripts/smoke-fixture.mjs reveal
           xcrun simctl terminate "$UDID" in.clarifiq.claudebook || true
           xcrun simctl launch "$UDID" in.clarifiq.claudebook
@@ -145,11 +161,66 @@ jobs:
           xcrun simctl launch "$UDID" in.clarifiq.claudebook
           sleep 5
           xcrun simctl io "$UDID" screenshot shots/12-library-refreshed.png
+          # Folders and scratch pads, reached through a test route since CI can't tap.
+          shot() {
+            xcrun simctl terminate "$UDID" in.clarifiq.claudebook || true
+            SIMCTL_CHILD_CLAUDEBOOK_TEST_ROUTE="$1" xcrun simctl launch "$UDID" in.clarifiq.claudebook
+            sleep "${3:-5}"
+            xcrun simctl io "$UDID" screenshot "shots/$2.png"
+          }
+          shot "folder:Chemistry" 14-folder
+          shot "folder:Organic" 15-subfolder
+          shot "scratch" 16-scratch-pads
+          shot "notebook:Scratch · quick" 17-scratch-editor 8
+          xcrun simctl ui "$UDID" appearance dark
+          shot "" 18-library-dark
+          shot "scratch" 19-scratch-pads-dark
+          xcrun simctl ui "$UDID" appearance light
           # First-run screen, as seen after a fresh install (empty secret, nothing in the Keychain).
           xcrun simctl terminate "$UDID" in.clarifiq.claudebook
           SIMCTL_CHILD_CLAUDEBOOK_SECRET= xcrun simctl launch "$UDID" in.clarifiq.claudebook
           sleep 4
           xcrun simctl io "$UDID" screenshot shots/13-setup.png
+      - name: Drawing acceptance scenes
+        working-directory: ios
+        run: |
+          UDID=$(xcrun simctl list devices available -j | jq -r '[.devices[][] | select(.name | test("iPad Pro"))][0].udid')
+          xcrun simctl terminate "$UDID" in.clarifiq.claudebook || true
+          node ../scripts/drawing-fixture.mjs chemistry
+          export SIMCTL_CHILD_CLAUDEBOOK_SERVER=$BASE SIMCTL_CHILD_CLAUDEBOOK_SECRET=$SECRET
+          export SIMCTL_CHILD_CLAUDEBOOK_AUTOOPEN=1
+          unset SIMCTL_CHILD_CLAUDEBOOK_TEST_STROKE SIMCTL_CHILD_CLAUDEBOOK_TEST_SCROLL
+          xcrun simctl launch "$UDID" in.clarifiq.claudebook
+          sleep 8
+          xcrun simctl io "$UDID" screenshot shots/15-chemistry-ipad.png
+      - name: Graph models and acceptance scene
+        working-directory: ios
+        run: |
+          cat ClaudeBook/Models.swift ../scripts/test-graph-models.swift > "$RUNNER_TEMP/graph-model-test.swift"
+          swift "$RUNNER_TEMP/graph-model-test.swift"
+          UDID=$(xcrun simctl list devices available -j | jq -r '[.devices[][] | select(.name | test("iPad Pro"))][0].udid')
+          xcrun simctl terminate "$UDID" in.clarifiq.claudebook || true
+          node ../scripts/graphs-fixture.mjs
+          export SIMCTL_CHILD_CLAUDEBOOK_SERVER=$BASE SIMCTL_CHILD_CLAUDEBOOK_SECRET=$SECRET
+          export SIMCTL_CHILD_CLAUDEBOOK_AUTOOPEN=1
+          unset SIMCTL_CHILD_CLAUDEBOOK_TEST_STROKE SIMCTL_CHILD_CLAUDEBOOK_TEST_SCROLL
+          xcrun simctl launch "$UDID" in.clarifiq.claudebook
+          sleep 8
+          xcrun simctl io "$UDID" screenshot shots/17-graphs-ipad.png
+      - name: Physics acceptance scene
+        working-directory: ios
+        run: |
+          cat ClaudeBook/Models.swift ../scripts/test-physics-models.swift > "$RUNNER_TEMP/physics-model-test.swift"
+          swift "$RUNNER_TEMP/physics-model-test.swift"
+          UDID=$(xcrun simctl list devices available -j | jq -r '[.devices[][] | select(.name | test("iPad Pro"))][0].udid')
+          xcrun simctl terminate "$UDID" in.clarifiq.claudebook || true
+          node ../scripts/physics-fixture.mjs
+          export SIMCTL_CHILD_CLAUDEBOOK_SERVER=$BASE SIMCTL_CHILD_CLAUDEBOOK_SECRET=$SECRET
+          export SIMCTL_CHILD_CLAUDEBOOK_AUTOOPEN=1
+          unset SIMCTL_CHILD_CLAUDEBOOK_TEST_STROKE SIMCTL_CHILD_CLAUDEBOOK_TEST_SCROLL
+          xcrun simctl launch "$UDID" in.clarifiq.claudebook
+          sleep 8
+          xcrun simctl io "$UDID" screenshot shots/19-physics-ipad.png
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -172,10 +243,24 @@ jobs:
         working-directory: ios
         run: |
           [ -d shots ] || exit 0
-          cp -R shots $RUNNER_TEMP/shots
-          cd $RUNNER_TEMP && rm -rf pub && mkdir pub && cd pub
-          git init -q -b ci-screenshots
-          cp ../shots/*.png .
-          echo "Smoke test for ${GITHUB_SHA::7}, run $GITHUB_RUN_ID" > README.md
-          git add . && git -c user.name=claudebook-ci -c user.email=ci@users.noreply.github.com commit -qm "Screenshots for ${GITHUB_SHA::7}"
-          git push -qf "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" ci-screenshots
+          # Keep each branch/run's evidence without replacing previous smoke results.
+          git fetch origin refs/heads/ci-screenshots:refs/remotes/origin/ci-screenshots
+          git worktree add "$RUNNER_TEMP/smoke-pub" origin/ci-screenshots
+          TARGET="$RUNNER_TEMP/smoke-pub/runs/${GITHUB_REF_NAME//\//-}/$GITHUB_RUN_ID"
+          mkdir -p "$TARGET"
+          cp shots/*.png "$TARGET/"
+          cp shots/*.log "$TARGET/" 2>/dev/null || true
+          echo "Smoke test for $GITHUB_SHA, run $GITHUB_RUN_ID" > "$TARGET/README.md"
+          cd "$RUNNER_TEMP/smoke-pub"
+          git add .
+          git -c user.name=claudebook-ci -c user.email=ci@users.noreply.github.com commit -qm "Screenshots for ${GITHUB_SHA::7}"
+          # Other branches may publish while this simulator is running. Rebase
+          # only our new run directory onto the latest screenshots, then retry.
+          for attempt in 1 2 3 4 5; do
+            git fetch origin refs/heads/ci-screenshots:refs/remotes/origin/ci-screenshots
+            git -c user.name=claudebook-ci -c user.email=ci@users.noreply.github.com rebase origin/ci-screenshots
+            if git push origin HEAD:ci-screenshots; then exit 0; fi
+            sleep "$attempt"
+          done
+          echo "Could not publish screenshots after five concurrent-update retries" >&2
+          exit 1

@@ -8,6 +8,13 @@ enum StudyPalette {
     static let background = Color(uiColor: UIColor { $0.userInterfaceStyle == .dark ? UIColor(hex: "#151D1F") : UIColor(hex: "#F5F1E9") })
 }
 
+extension Notification.Name {
+    /// Claude asked to flip to a page in the notebook that's already open. userInfo: notebookId, pageId.
+    static let claudeOpenPage = Notification.Name("claudeOpenPage")
+    static let pagesDeleted = Notification.Name("pagesDeleted")
+    static let localDrawingChanged = Notification.Name("localDrawingChanged")
+}
+
 struct NotebookDestination: Hashable {
     var notebookId: String
     var pageId: String? = nil
@@ -122,298 +129,13 @@ struct SetupView: View {
     }
 }
 
-struct LibraryView: View {
-    var onSignOut: () -> Void
-    @EnvironmentObject private var live: LiveConnection
-    @State private var notebooks: [Notebook] = []
-    @State private var error: String?
-    @State private var newTitle = ""
-    @State private var showNew = false
-    @State private var showImport = false
-    @State private var importing = false
-    @State private var path: [NotebookDestination] = []
-    @State private var searchText = ""
-    @State private var searchHits: [API.SearchHit] = []
-    @State private var searching = false
-    @State private var searchError: String?
-    @State private var renaming: Notebook?
-    @State private var renameTitle = ""
-    @State private var deleting: Notebook?
-    @Environment(\.colorScheme) private var colorScheme
-
-    private var openQuestions: Int {
-        notebooks.reduce(0) { $0 + $1.openDoubts }
-    }
-
-    var body: some View {
-        NavigationStack(path: $path) {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 24) {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("Your notebooks").font(.system(.largeTitle, design: .rounded, weight: .bold))
-                            .foregroundStyle(colorScheme == .dark ? Color.white : Color(red: 0.16, green: 0.22, blue: 0.23))
-                        HStack(spacing: 6) {
-                            Text("\(notebooks.count) notebook\(notebooks.count == 1 ? "" : "s")")
-                            if openQuestions > 0 {
-                                Text("·")
-                                Label("\(openQuestions) open question\(openQuestions == 1 ? "" : "s") for Claude", systemImage: "questionmark.bubble.fill")
-                                    .foregroundStyle(StudyPalette.coral)
-                            }
-                        }
-                        .font(.subheadline.weight(.medium)).foregroundStyle(.secondary)
-                    }
-
-                    HStack(spacing: 10) {
-                        Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-                        TextField("Search your handwriting", text: $searchText)
-                            .textInputAutocapitalization(.never)
-                            .autocorrectionDisabled()
-                            .accessibilityLabel("Search handwritten notes")
-                            .accessibilityIdentifier("library.search")
-                        if searching { ProgressView().controlSize(.small) }
-                        if !searchText.isEmpty {
-                            Button { searchText = "" } label: { Image(systemName: "xmark.circle.fill") }
-                                .foregroundStyle(.secondary)
-                                .accessibilityLabel("Clear search")
-                        }
-                    }
-                    .padding(.horizontal, 16).padding(.vertical, 13)
-                    .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 14))
-
-                    if !searchText.trimmingCharacters(in: .whitespaces).isEmpty {
-                        if let searchError {
-                            ContentUnavailableView("Search unavailable", systemImage: "wifi.exclamationmark", description: Text(searchError))
-                        } else if searchHits.isEmpty && !searching {
-                            ContentUnavailableView.search(text: searchText)
-                        } else {
-                            LazyVStack(spacing: 10) {
-                                ForEach(searchHits) { hit in
-                                    Button {
-                                        path.append(NotebookDestination(notebookId: hit.notebookId, pageId: hit.pageId,
-                                                                        region: PageRegion(x: hit.box.x, y: hit.box.y, w: hit.box.w, h: hit.box.h)))
-                                    } label: {
-                                        HStack(spacing: 14) {
-                                            Image(systemName: "text.magnifyingglass")
-                                                .font(.title3).frame(width: 38, height: 38)
-                                                .foregroundStyle(StudyPalette.teal)
-                                                .background(StudyPalette.teal.opacity(0.10), in: RoundedRectangle(cornerRadius: 10))
-                                            VStack(alignment: .leading, spacing: 3) {
-                                                Text(hit.box.text).font(.body.weight(.medium)).lineLimit(2)
-                                                Text("\(hit.notebookTitle) · Page \(hit.pageNumber)")
-                                                    .font(.caption).foregroundStyle(.secondary)
-                                            }
-                                            Spacer()
-                                            Image(systemName: "chevron.right").font(.caption).foregroundStyle(.tertiary)
-                                        }
-                                        .padding(14)
-                                        .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 14))
-                                    }
-                                    .buttonStyle(.plain)
-                                }
-                            }
-                        }
-                    } else if notebooks.isEmpty {
-                        ContentUnavailableView("Your first notebook", systemImage: "book.closed", description: Text("Create a notebook or import a PDF to begin."))
-                            .frame(maxWidth: .infinity)
-                    } else {
-                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 180, maximum: 240), spacing: 24)], spacing: 28) {
-                            ForEach(notebooks.sorted { $0.lastActivity > $1.lastActivity }) { nb in
-                                NavigationLink(value: NotebookDestination(notebookId: nb.id)) { NotebookCard(notebook: nb, tint: color(for: nb.id)) }
-                                    .buttonStyle(.plain)
-                                    .accessibilityIdentifier("notebook.\(nb.id)")
-                                    .contextMenu {
-                                        Button { renameTitle = nb.title; renaming = nb } label: { Label("Rename", systemImage: "pencil") }
-                                        Button(role: .destructive) { deleting = nb } label: { Label("Delete", systemImage: "trash") }
-                                    }
-                            }
-                        }
-                    }
-                    if let error { Text(error).foregroundStyle(.red) }
-                }
-                .padding(28)
-            }
-            .background(StudyPalette.background)
-            .navigationTitle("ClaudeBook")
-            .navigationBarTitleDisplayMode(.inline)
-            .alert("Rename notebook", isPresented: Binding(get: { renaming != nil }, set: { if !$0 { renaming = nil } })) {
-                TextField("Title", text: $renameTitle)
-                Button("Save") { if let nb = renaming { Task { await rename(nb, to: renameTitle) } } }
-                Button("Cancel", role: .cancel) {}
-            }
-            .confirmationDialog("Delete “\(deleting?.title ?? "")”?", isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } }),
-                                titleVisibility: .visible) {
-                Button("Delete notebook", role: .destructive) { if let nb = deleting { Task { await delete(nb) } } }
-            } message: {
-                Text("Its pages, your ink and Claude's marks are removed from ClaudeBook. This can't be undone.")
-            }
-            .navigationDestination(for: NotebookDestination.self) { destination in
-                NotebookEditor(notebookId: destination.notebookId, initialPageId: destination.pageId, initialRegion: destination.region)
-            }
-            .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    Menu {
-                        Button("Disconnect server", role: .destructive) { Credentials.secret = ""; onSignOut() }
-                    } label: {
-                        Label(live.connected ? "Live" : "Offline", systemImage: live.connected ? "dot.radiowaves.left.and.right" : "wifi.slash")
-                    }
-                }
-                ToolbarItemGroup(placement: .topBarTrailing) {
-                    if importing { ProgressView() }
-                    AppearanceMenu()
-                    Button { showImport = true } label: { Label("Import PDF", systemImage: "square.and.arrow.down") }
-                        .accessibilityLabel("Import PDF")
-                    Button { showNew = true } label: { Label("New notebook", systemImage: "plus") }
-                        .buttonStyle(.borderedProminent)
-                }
-            }
-            .fileImporter(isPresented: $showImport, allowedContentTypes: [.pdf]) { result in
-                if case .success(let url) = result { Task { await importPDF(url) } }
-            }
-            .alert("New notebook", isPresented: $showNew) {
-                TextField("Title", text: $newTitle)
-                Button("Create") { Task { await create() } }
-                Button("Cancel", role: .cancel) {}
-            }
-            .refreshable { await load() }
-            .task(id: searchText) {
-                let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
-                searchError = nil
-                searchHits = []
-                guard !query.isEmpty else { searching = false; return }
-                searching = true
-                try? await Task.sleep(for: .milliseconds(300))
-                guard !Task.isCancelled else { return }
-                do {
-                    let results = try await API.current?.search(query) ?? []
-                    guard !Task.isCancelled else { return }
-                    searchHits = results
-                } catch {
-                    guard !Task.isCancelled else { return }
-                    searchError = error.localizedDescription
-                }
-                searching = false
-            }
-            .task {
-                let view = await load()
-                // CI smoke test: jump straight into the open notebook.
-                if ProcessInfo.processInfo.environment["CLAUDEBOOK_AUTOOPEN"] == "1", let id = view?.notebookId { path = [NotebookDestination(notebookId: id)] }
-            }
-            .onAppear {
-                live.onEvent = { e in if e.type == "notebook" { Task { await load() } } }
-            }
-        }
-    }
-
-    @discardableResult
-    private func load() async -> ViewState? {
-        do {
-            let list = try await API.current?.notebooks()
-            notebooks = list?.notebooks ?? []
-            error = nil
-            return list?.view
-        } catch {
-            self.error = error.localizedDescription
-            return nil
-        }
-    }
-
-    private func importPDF(_ url: URL) async {
-        importing = true
-        defer { importing = false }
-        let scoped = url.startAccessingSecurityScopedResource()
-        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
-        do {
-            let data = try Data(contentsOf: url)
-            guard let nb = try await API.current?.importPDF(data, title: url.deletingPathExtension().lastPathComponent) else { return }
-            await load()
-            path.append(NotebookDestination(notebookId: nb.id))
-        } catch {
-            self.error = error.localizedDescription
-        }
-    }
-
-    private func create() async {
-        do {
-            let title = newTitle.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard let nb = try await API.current?.createNotebook(title: title.isEmpty ? "Untitled" : title, background: .lined) else { return }
-            newTitle = ""
-            await load()
-            path.append(NotebookDestination(notebookId: nb.id))
-        } catch { self.error = error.localizedDescription }
-    }
-
-    private func rename(_ nb: Notebook, to title: String) async {
-        let title = title.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !title.isEmpty, title != nb.title else { return }
-        do { try await API.current?.renameNotebook(nb.id, title: title); await load() }
-        catch { self.error = error.localizedDescription }
-    }
-
-    private func delete(_ nb: Notebook) async {
-        do {
-            try await API.current?.deleteNotebook(nb.id)
-            for page in nb.pages { try? FileManager.default.removeItem(at: LocalDrawings.url(page.id)) }
-            await load()
-        } catch { self.error = error.localizedDescription }
-    }
-
-    /// Same cover color every launch (String.hashValue changes per launch).
-    private func color(for id: String) -> Color {
-        let palette: [Color] = [Color(red: 0.77, green: 0.39, blue: 0.30), Color(red: 0.22, green: 0.48, blue: 0.46),
-                                Color(red: 0.39, green: 0.44, blue: 0.58), Color(red: 0.64, green: 0.47, blue: 0.36),
-                                Color(red: 0.49, green: 0.38, blue: 0.55), Color(red: 0.36, green: 0.52, blue: 0.36)]
-        return palette[id.unicodeScalars.reduce(0) { ($0 &* 31 &+ Int($1.value)) & 0xFFFF } % palette.count]
-    }
-}
-
-struct NotebookCard: View {
-    let notebook: Notebook
-    let tint: Color
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            RoundedRectangle(cornerRadius: 13)
-                .fill(tint.gradient)
-                .aspectRatio(0.76, contentMode: .fit)
-                .overlay(alignment: .leading) {
-                    Rectangle().fill(.black.opacity(0.12)).frame(width: 12).padding(.leading, 8)
-                }
-                .overlay(alignment: .topTrailing) {
-                    if notebook.openDoubts > 0 {
-                        Label("\(notebook.openDoubts)", systemImage: "questionmark")
-                            .font(.subheadline.weight(.bold)).foregroundStyle(tint)
-                            .padding(.horizontal, 10).padding(.vertical, 5)
-                            .background(.white, in: Capsule())
-                            .padding(14)
-                    } else {
-                        Image(systemName: "sparkle").font(.title2).foregroundStyle(.white.opacity(0.62)).padding(18)
-                    }
-                }
-                .overlay(alignment: .bottomLeading) {
-                    Text(notebook.title).font(.system(.title3, design: .rounded, weight: .bold))
-                        .foregroundStyle(.white).lineLimit(3).padding(18)
-                }
-                .shadow(color: tint.opacity(0.17), radius: 10, y: 5)
-            VStack(alignment: .leading, spacing: 2) {
-                Text("\(notebook.pages.count) page\(notebook.pages.count == 1 ? "" : "s")")
-                    .font(.subheadline.weight(.medium))
-                if let edited = notebook.lastActivityDate {
-                    Text("Edited \(edited, format: .relative(presentation: .named))")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
-            }
-            .padding(.horizontal, 4)
-        }
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel("\(notebook.title), \(notebook.pages.count) pages\(notebook.openDoubts > 0 ? ", \(notebook.openDoubts) open questions" : "")")
-    }
-}
-
 struct NotebookEditor: View {
     let notebookId: String
     var initialPageId: String? = nil
     var initialRegion: PageRegion? = nil
     @EnvironmentObject private var live: LiveConnection
+    @EnvironmentObject private var library: LibraryModel
+    @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.colorScheme) private var colorScheme
     @AppStorage("invertPDFs") private var invertPDFs = true
@@ -436,7 +158,17 @@ struct NotebookEditor: View {
         NotebookCanvas(controller: controller, dark: colorScheme == .dark, invertPDFs: invertPDFs)
             .ignoresSafeArea(edges: .bottom)
             .overlay {
-                if notebook == nil {
+                if let notebook, notebook.pages.isEmpty {
+                    ContentUnavailableView {
+                        Label("No pages", systemImage: "doc")
+                    } description: { Text("Add a page to start writing in this notebook.") } actions: {
+                        Button("Add a page") { Task { await addPage(after: -1) } }
+                            .buttonStyle(.borderedProminent).disabled(addingPage)
+                            .accessibilityIdentifier("editor.emptyAdd")
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(StudyPalette.background)
+                } else if notebook == nil {
                     if let loadError {
                         ContentUnavailableView {
                             Label("Couldn’t open notebook", systemImage: "wifi.exclamationmark")
@@ -464,7 +196,7 @@ struct NotebookEditor: View {
                     .padding(.horizontal, 22).padding(.top, 10)
                 }
             }
-            .navigationTitle(notebook.map { "\($0.title) · \(index + 1)/\($0.pages.count)" } ?? "")
+            .navigationTitle(notebook.map { $0.pages.isEmpty ? $0.title : "\($0.title) · \(index + 1)/\($0.pages.count)" } ?? "")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItemGroup(placement: .topBarLeading) {
@@ -477,6 +209,21 @@ struct NotebookEditor: View {
                         .accessibilityLabel("Add a page")
                 }
                 ToolbarItemGroup(placement: .topBarTrailing) {
+                    if let notebook, notebook.isScratch {
+                        // Scratch pads delete themselves after a week; one tap files this one as a real notebook.
+                        Button { controller.flush(); library.ask(.keep(notebook)) } label: {
+                            // Toolbars drop a Label's title; spell it out so "Keep" can't be missed.
+                            HStack(spacing: 5) {
+                                Image(systemName: "tray.and.arrow.down")
+                                Text("Keep")
+                            }
+                            .font(.subheadline.weight(.semibold))
+                        }
+                        .buttonStyle(.bordered)
+                        .tint(StudyPalette.teal)
+                        .accessibilityLabel("Keep this scratch pad, \(ExpiryBadge.text(notebook.expiryDate)) before it deletes itself")
+                        .accessibilityIdentifier("editor.keep")
+                    }
                     Image(systemName: syncIcon).foregroundStyle(sync == "offline" ? .red : .secondary)
                         .accessibilityLabel(sync == "synced" ? "All changes saved" : "Sync status: \(sync)")
                     Button {
@@ -487,10 +234,18 @@ struct NotebookEditor: View {
                         Label("Ask Claude", systemImage: askingClaude ? "xmark.circle" : "questionmark.bubble")
                     }
                     .tint(StudyPalette.coral)
-                    .disabled(notebook == nil || markingDoubt)
+                    .disabled(notebook?.pages.isEmpty != false || markingDoubt)
                     .accessibilityLabel(askingClaude ? "Cancel question selection" : "Ask Claude about part of this page")
                     .accessibilityIdentifier("editor.askClaude")
                     Menu {
+                        if let notebook {
+                            Section("Notebook") {
+                                Button { controller.flush(); library.ask(.renameNotebook(notebook)) } label: { Label("Rename notebook", systemImage: "pencil") }
+                                    .accessibilityIdentifier("editor.renameNotebook")
+                                Button(role: .destructive) { library.ask(.deleteNotebook(notebook)) } label: { Label("Delete notebook", systemImage: "trash") }
+                                    .accessibilityIdentifier("editor.deleteNotebook")
+                            }
+                        }
                         Section {
                             Toggle(isOn: $pencilOnly) { Label("Draw with Apple Pencil only", systemImage: "applepencil") }
                         }
@@ -509,9 +264,17 @@ struct NotebookEditor: View {
             .sheet(isPresented: $showPages) {
                 if let notebook {
                     // Layer events update the controller directly; thumbnails should show those changes too.
-                    PageGrid(notebook: notebookWithCurrentPages(notebook), current: index) { i in
+                    PageGrid(notebook: notebookWithCurrentPages(notebook), currentPageId: controller.currentPage?.id,
+                             beforeMutation: { discarding in
+                                 if discarding { await controller.pauseUploads() }
+                                 else { try await controller.flushAndWait() }
+                             }, onChanged: { updated in
+                                 applyNotebook(updated)
+                                 controller.flush()
+                                 Task { await library.load() }
+                             }, onFailure: { controller.flush() }) { pageId in
                         showPages = false
-                        controller.scrollTo(page: i, animated: false)
+                        if let i = controller.pages.firstIndex(where: { $0.id == pageId }) { controller.scrollTo(page: i, animated: false) }
                     }
                 }
             }
@@ -520,6 +283,8 @@ struct NotebookEditor: View {
             .onChange(of: scenePhase) { _, p in if p != .active { controller.flush() } }
             .task { await load() }
             .onAppear {
+                library.prepareNotebookDeletion = { id in if id == notebookId { await controller.pauseUploads() } }
+                library.resumeNotebookUploads = { id in if id == notebookId { controller.flush() } }
                 controller.onSyncState = { s in sync = s }
                 controller.onPageChange = { i in index = i }
                 controller.onPullToAdd = { Task { await addPage(after: controller.pages.count - 1) } }
@@ -561,7 +326,23 @@ struct NotebookEditor: View {
                     if !live.connected { await load() }
                 }
             }
-            .onDisappear { controller.flush(); controller.cancelDoubtSelection() }
+            .onReceive(NotificationCenter.default.publisher(for: .claudeOpenPage)) { note in
+                guard note.userInfo?["notebookId"] as? String == notebookId, let pageId = note.userInfo?["pageId"] as? String else { return }
+                Task {
+                    // A page Claude just added may not be loaded yet.
+                    if !controller.pages.contains(where: { $0.id == pageId }) { await load() }
+                    if let i = controller.pages.firstIndex(where: { $0.id == pageId }) { controller.scrollTo(page: i, animated: true) }
+                }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .pagesDeleted)) { note in
+                guard let ids = note.userInfo?["pageIds"] as? [String] else { return }
+                controller.discardPages(ids)
+            }
+            .onDisappear {
+                controller.flush(); controller.cancelDoubtSelection()
+                library.prepareNotebookDeletion = nil
+                library.resumeNotebookUploads = nil
+            }
     }
 
     private var syncIcon: String {
@@ -585,10 +366,17 @@ struct NotebookEditor: View {
             guard let api = API.current else { return }
             nb = try await api.notebook(notebookId)
             loadError = nil
-        } catch { loadError = error.localizedDescription; return }
-        notebook = nb
-        controller.setNotebook(nb)
-        index = controller.currentIndex
+        } catch {
+            if let apiError = error as? APIError, apiError.status == 404 {
+                let ids = controller.pages.map(\.id)
+                controller.discardPages(ids)
+                notebook = nil
+                dismiss()
+                Task { await library.load() }
+            } else { notice = error.localizedDescription; loadError = error.localizedDescription }
+            return
+        }
+        applyNotebook(nb)
         if !initialJumpDone, let initialPageId, let target = nb.pages.firstIndex(where: { $0.id == initialPageId }) {
             initialJumpDone = true
             if let initialRegion {
@@ -598,6 +386,19 @@ struct NotebookEditor: View {
             }
         }
         runTestHooks()
+    }
+
+    private func applyNotebook(_ updated: Notebook) {
+        let selected = controller.currentPage?.id
+        let oldIndex = index
+        notebook = updated
+        controller.setNotebook(updated)
+        index = controller.currentIndex
+        if let selected, let i = updated.pages.firstIndex(where: { $0.id == selected }) {
+            controller.scrollTo(page: i, animated: false)
+        } else if !updated.pages.isEmpty {
+            controller.scrollTo(page: min(oldIndex, updated.pages.count - 1), animated: false)
+        }
     }
 
     /// Hooks for the CI smoke test, which can't touch the screen.
@@ -617,17 +418,18 @@ struct NotebookEditor: View {
 
     /// Insert a blank page after page `i` and scroll to it.
     private func addPage(after i: Int) async {
-        guard !addingPage, let nb = notebook, nb.pages.indices.contains(i) else { return }
+        guard !addingPage, let nb = notebook else { return }
+        let after = nb.pages.isEmpty ? -1 : min(max(-1, i), nb.pages.count - 1)
         addingPage = true
         defer { addingPage = false; controller.endPullToAdd() }
         do {
-            try await API.current?.addPage(notebookId: nb.id, afterIndex: i, background: nb.pages[i].background)
+            try await API.current?.addPage(notebookId: nb.id, afterIndex: after, background: nb.pages.isEmpty ? .lined : nb.pages[max(0, after)].background)
         } catch {
-            sync = "offline"
+            notice = "Couldn’t add a page: \(error.localizedDescription)"
             return
         }
         await load()
-        controller.scrollTo(page: i + 1, animated: true)
+        controller.scrollTo(page: after + 1, animated: true)
     }
 
     private func undoClaude(count: Int?) {
@@ -700,40 +502,6 @@ struct AppearanceMenu: View {
     }
 }
 
-/// All pages of a notebook as thumbnails. Tap one to jump there.
-struct PageGrid: View {
-    let notebook: Notebook
-    let current: Int
-    var onPick: (Int) -> Void
-    @Environment(\.dismiss) private var dismiss
-
-    var body: some View {
-        NavigationStack {
-            ScrollView {
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 140), spacing: 20)], spacing: 20) {
-                    ForEach(Array(notebook.pages.enumerated()), id: \.element.id) { i, page in
-                        Button { onPick(i) } label: {
-                            VStack(spacing: 6) {
-                                PageThumbnail(page: page)
-                                    .overlay(RoundedRectangle(cornerRadius: 4).stroke(i == current ? Color.accentColor : .clear, lineWidth: 3))
-                                Text("\(i + 1)").font(.caption).foregroundStyle(.secondary)
-                            }
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel("Page \(i + 1)\(i == current ? ", current page" : "")")
-                        .accessibilityIdentifier("page.\(page.id)")
-                    }
-                }
-                .padding(20)
-            }
-            .navigationTitle(notebook.title)
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
-            .background(StudyPalette.background)
-        }
-    }
-}
-
 struct PageThumbnail: View {
     let page: Page
     @Environment(\.colorScheme) private var colorScheme
@@ -749,7 +517,10 @@ struct PageThumbnail: View {
         .aspectRatio(PageGeometry.width / PageGeometry.height, contentMode: .fit)
         .clipShape(RoundedRectangle(cornerRadius: 4))
         .shadow(color: .black.opacity(0.12), radius: 4, y: 1)
-        .task(id: "\(page.id)-\(dark)-\(invertPDFs)") { image = await render() }
+        .task(id: "\(page.id)-\(page.snapshotVersion)-\(dark)-\(invertPDFs)") { image = await render() }
+        .onReceive(NotificationCenter.default.publisher(for: .localDrawingChanged)) { note in
+            if note.userInfo?["pageId"] as? String == page.id { Task { image = await render() } }
+        }
     }
 
     private func render() async -> UIImage {

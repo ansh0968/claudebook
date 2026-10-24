@@ -12,15 +12,30 @@ enum LocalDrawings {
 
     static func url(_ pageId: String) -> URL { dir.appending(path: "\(pageId).pkdrawing") }
 
+    private static let deletedKey = "deletedPageIds"
+    static func isDeleted(_ id: String) -> Bool { Set(UserDefaults.standard.stringArray(forKey: deletedKey) ?? []).contains(id) }
+
+    /// Only called after the server confirms deletion. Late saves and upload retries
+    /// must not recreate a drawing when an editor disappears during that deletion.
+    static func remove(_ ids: [String]) {
+        var deleted = Set(UserDefaults.standard.stringArray(forKey: deletedKey) ?? [])
+        deleted.formUnion(ids)
+        UserDefaults.standard.set(Array(deleted), forKey: deletedKey)
+        PendingUploads.all.subtract(ids)
+        for id in ids { try? FileManager.default.removeItem(at: url(id)) }
+    }
+
     static func exists(_ pageId: String) -> Bool { FileManager.default.fileExists(atPath: url(pageId).path) }
 
     static func load(_ pageId: String) -> PKDrawing? {
-        guard let data = try? Data(contentsOf: url(pageId)) else { return nil }
+        guard !isDeleted(pageId), let data = try? Data(contentsOf: url(pageId)) else { return nil }
         return try? PKDrawing(data: data)
     }
 
     static func save(_ drawing: PKDrawing, pageId: String) {
+        guard !isDeleted(pageId) else { return }
         try? drawing.dataRepresentation().write(to: url(pageId), options: .atomic)
+        NotificationCenter.default.post(name: .localDrawingChanged, object: nil, userInfo: ["pageId": pageId])
     }
 }
 
@@ -31,7 +46,7 @@ enum PendingUploads {
 
     static var all: Set<String> {
         get { Set(UserDefaults.standard.stringArray(forKey: key) ?? []) }
-        set { UserDefaults.standard.set(Array(newValue), forKey: key) }
+        set { UserDefaults.standard.set(Array(newValue.filter { !LocalDrawings.isDeleted($0) }), forKey: key) }
     }
 }
 

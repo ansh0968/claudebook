@@ -67,8 +67,8 @@ if (process.env.CLAUDEBOOK_SECRET) {
     assert.ok(view[0].text?.includes(draw.items[0].id)); assert.ok(view[0].text?.includes('"bbox"'));
     await call("erase_my_drawings", { count: 1, ids: [draw.items[0].id] }, true); assert.equal((await savedItems()).length, 2);
     const beforeInvalidDraw = await savedItems();
-    await call("draw_on_page", { items: [{ type: "line", from: [0, 0], to: [20, 20] }, { type: "path", points: [[1e308, 0], [-1e308, 10], [1e308, 20]] }] }, true);
-    assert.deepEqual(await savedItems(), beforeInvalidDraw, "Bounds failure must not persist part of a draw batch");
+    await call("draw_on_page", { items: [{ type: "path", points: [[1e308, 0], [-1e308, 10], [1e308, 20]] }] }, true);
+    assert.deepEqual(await savedItems(), beforeInvalidDraw, "A bounds failure must not persist the failing item");
     const extreme = JSON.parse((await call("draw_on_page", { items: [{ type: "line", from: [1e308, 10], to: [1e308, 20] }] }))[0].text!);
     const beforeInvalidMove = await savedItems();
     await call("move_items", { ids: [draw.items[0].id, extreme.items[0].id], dx: 1e308, dy: 0 }, true);

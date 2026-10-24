@@ -462,6 +462,9 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
         let anchorDelta = anchor.flatMap { id in pages.firstIndex { $0.id == id } }.map { topY - NotebookLayout.offset($0) }
         notebookId = notebook.id
         pages = notebook.pages
+        let retained = Set(pages.map(\.id))
+        drawings = drawings.filter { retained.contains($0.key) }
+        fingerprints = fingerprints.filter { retained.contains($0.key) }
         for page in pages where drawings[page.id] == nil {
             let drawing = LocalDrawings.load(page.id) ?? PKDrawing()
             drawings[page.id] = drawing
@@ -482,13 +485,17 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
             currentIndex = max(0, min(saved, pages.count - 1))
             pendingScroll = NotebookLayout.offset(currentIndex)
             applyPendingScroll()
-            restoreBackups()
             if !pendingIds.isEmpty { scheduleUpload(delay: 1) }
         } else if let anchor, let anchorDelta, let i = pages.firstIndex(where: { $0.id == anchor }) {
             // Keep whatever was on screen in place, even if pages were inserted above it.
             scroll(toY: NotebookLayout.offset(i) + anchorDelta, animated: false)
             updateCurrentPage(force: true)
+        } else {
+            currentIndex = min(currentIndex, max(0, pages.count - 1))
+            if !pages.isEmpty { scrollTo(page: currentIndex, animated: false); updateCurrentPage(force: true) }
         }
+        // Newly duplicated/moved pages can have a server backup too.
+        restoreBackups()
         footer.text = "Pull up to add a page"
     }
 
@@ -667,6 +674,7 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
             }
             var restored: [String: PKDrawing] = [:]
             for (id, data, reached) in results {
+                guard self.pages.contains(where: { $0.id == id }), !LocalDrawings.isDeleted(id) else { continue }
                 if let data, let drawing = try? PKDrawing(data: data) { restored[id] = drawing }
                 // The server has no ink for this page either: remember that so we don't ask again,
                 // unless the user has drawn on it in the meantime (that already saved a file).
@@ -676,7 +684,7 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
             }
             guard !restored.isEmpty else { return }
             commitNow()
-            for (id, drawing) in restored where drawings[id]?.strokes.isEmpty ?? true {
+            for (id, drawing) in restored where pages.contains(where: { $0.id == id }) && !LocalDrawings.isDeleted(id) && (drawings[id]?.strokes.isEmpty ?? true) {
                 drawings[id] = drawing
                 fingerprints[id] = Self.fingerprint(drawing.strokes, dy: 0)
                 LocalDrawings.save(drawing, pageId: id)
@@ -775,6 +783,46 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
         return PendingUploads.all.filter { ids.contains($0) }
     }
 
+    /// Capture current ink, cancel queued work and wait out any request already in
+    /// flight. Explicit deletion may discard unsynced ink, so it does not upload.
+    func pauseUploads() async {
+        let previous = uploadTask
+        previous?.cancel()
+        commitNow()
+        let queued = uploadTask
+        queued?.cancel()
+        await previous?.value
+        await queued?.value
+        uploadTask = nil
+    }
+
+    /// Duplicating a page must use its latest saved handwriting, not an older backup.
+    func flushAndWait() async throws {
+        await pauseUploads()
+        await uploadPending()
+        if !pendingIds.isEmpty {
+            throw NSError(domain: "ClaudeBook", code: 1, userInfo: [NSLocalizedDescriptionKey: "Couldn't save the latest handwriting. Check your connection and try again."])
+        }
+    }
+
+    /// Called after confirmed deletion, before the editor's final disappearance flush.
+    func discardPages(_ ids: [String]) {
+        let removed = Set(ids)
+        guard pages.contains(where: { removed.contains($0.id) }) else { return }
+        commitTask?.cancel(); uploadTask?.cancel(); viewTask?.cancel()
+        pages.removeAll { removed.contains($0.id) }
+        for id in ids {
+            drawings.removeValue(forKey: id); fingerprints.removeValue(forKey: id)
+            if let views = onScreen.removeValue(forKey: id) {
+                views.paper.removeFromSuperview(); views.claude.removeFromSuperview()
+            }
+        }
+        currentIndex = min(currentIndex, max(0, pages.count - 1))
+        rebuildCanvasDrawing()
+        layoutContent()
+        updateHintButtons()
+    }
+
     /// Upload right away (used when leaving the notebook or the app going to background).
     func flush() {
         commitNow()
@@ -797,7 +845,7 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
         var failed = false
         for id in pendingIds {
             guard !Task.isCancelled else { return }
-            guard let page = pages.first(where: { $0.id == id }) else { continue }
+            guard !LocalDrawings.isDeleted(id), let page = pages.first(where: { $0.id == id }) else { continue }
             let drawing = drawings[id] ?? PKDrawing()
             PendingUploads.all.remove(id)
             do {
@@ -808,10 +856,14 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
                 // Without the PDF the snapshot would hide it from Claude, so let the server's own render stand.
                 if page.pdf == nil || pdf != nil {
                     let png = PageSnapshot.png(drawing: drawing, background: page.background, pdf: pdf)
-                    try await api.uploadSnapshot(pageId: id, png: png, textBoxes: boxes)
+                    try await api.uploadSnapshot(pageId: id, png: png, textBoxes: boxes, strokeCount: drawing.strokes.count)
                 }
-                try await api.uploadDrawing(pageId: id, data: drawing.dataRepresentation())
+                try await api.uploadDrawing(pageId: id, data: drawing.dataRepresentation(), strokeCount: drawing.strokes.count)
             } catch {
+                if let apiError = error as? APIError, apiError.status == 404 {
+                    LocalDrawings.remove([id])
+                    continue
+                }
                 PendingUploads.all.insert(id)
                 if Task.isCancelled { return }
                 failed = true

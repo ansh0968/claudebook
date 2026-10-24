@@ -239,19 +239,70 @@ enum ClaudeRenderer {
         let color = adapt(UIColor(hex: item.color ?? defaultColor), dark: dark)
         ctx.saveGState()
         defer { ctx.restoreGState() }
+        // Centre is computed after server positioning/anchors, and translated on moves.
+        if let degrees = item.rotation, let center = item.rotationCenter, center.count == 2 {
+            ctx.translateBy(x: center[0], y: center[1])
+            ctx.rotate(by: degrees.truncatingRemainder(dividingBy: 360) * .pi / 180)
+            ctx.translateBy(x: -center[0], y: -center[1])
+        }
         ctx.setStrokeColor(color.cgColor)
         ctx.setLineWidth(item.width ?? 3)
         ctx.setLineCap(.round)
         ctx.setLineJoin(.round)
+
+        if let parts = item.parts {
+            for part in parts {
+                ctx.saveGState()
+                if let clip = part.clip {
+                    ctx.addPath(outline(item, clip))
+                    ctx.clip()
+                }
+                ctx.setAlpha(part.opacity ?? 1)
+                ctx.setLineWidth(part.width ?? 3)
+                ctx.setLineDash(phase: 0, lengths: (part.dash ?? []).map { CGFloat($0) })
+                let path = outline(item, part.d)
+                if let fill = part.fill, fill != "none" {
+                    ctx.setFillColor(adapt(UIColor(hex: fill), dark: dark).cgColor)
+                    ctx.addPath(path)
+                    ctx.fillPath()
+                }
+                if let stroke = part.stroke, stroke != "none" {
+                    ctx.setStrokeColor(adapt(UIColor(hex: stroke), dark: dark).cgColor)
+                    ctx.addPath(path)
+                    ctx.strokePath()
+                }
+                ctx.restoreGState()
+            }
+            return
+        }
 
         func pt(_ a: [Double]?) -> CGPoint? {
             guard let a, a.count >= 2 else { return nil }
             return CGPoint(x: a[0], y: a[1])
         }
         func strokeAndFill(_ path: CGPath) {
-            if let fill = item.fill, fill != "none" {
+            let filled = item.fill.map { $0 != "none" } ?? false
+            if filled, let fill = item.fill {
                 ctx.addPath(path)
                 ctx.setFillColor(adapt(UIColor(hex: fill), dark: dark).cgColor)
+                ctx.fillPath()
+            }
+            // A fill with no color is a fill-only shape, same as the server.
+            guard !filled || item.color != nil else { return }
+            ctx.addPath(path)
+            ctx.strokePath()
+        }
+        func dash() {
+            if item.dashed == true { ctx.setLineDash(phase: 0, lengths: [10, 8]) }
+        }
+        /// Heads are never dashed; filled ones are stroked too so their tips match the line's round cap.
+        func heads() {
+            guard let d = item.headD, !d.isEmpty else { return }
+            ctx.setLineDash(phase: 0, lengths: [])
+            let path = outline(item, d)
+            if item.headFilled == true {
+                ctx.addPath(path)
+                ctx.setFillColor(color.cgColor)
                 ctx.fillPath()
             }
             ctx.addPath(path)
@@ -269,38 +320,35 @@ enum ClaudeRenderer {
             } else {
                 ctx.addPath(smoothPath(pts, closed: item.closed ?? false))
             }
+            dash()
             ctx.strokePath()
+            heads()
         case "line":
             guard let a = pt(item.from), let b = pt(item.to) else { return }
             if item.dashed == true { ctx.setLineDash(phase: 0, lengths: [10, 8]) }
             ctx.move(to: a); ctx.addLine(to: b); ctx.strokePath()
         case "arrow":
             guard let a = pt(item.from), let b = pt(item.to) else { return }
+            // Newer arrows carry their heads (none, start, end, both, filled) as head_d.
+            if item.headD != nil || item.head != nil {
+                dash()
+                ctx.move(to: a); ctx.addLine(to: b); ctx.strokePath()
+                heads()
+                return
+            }
             let angle = atan2(b.y - a.y, b.x - a.x), head = 10 + (item.width ?? 3) * 2
             ctx.move(to: a); ctx.addLine(to: b)
             ctx.move(to: CGPoint(x: b.x - head * cos(angle - 0.45), y: b.y - head * sin(angle - 0.45)))
             ctx.addLine(to: b)
             ctx.addLine(to: CGPoint(x: b.x - head * cos(angle + 0.45), y: b.y - head * sin(angle + 0.45)))
             ctx.strokePath()
-        case "curved_arrow":
-            guard let a = pt(item.from), let b = pt(item.to) else { return }
-            let dx = b.x - a.x, dy = b.y - a.y
-            let length = hypot(dx, dy)
-            guard length > 0 else { return }
-            let bend = CGFloat(item.bend ?? 40)
-            let normal = CGPoint(x: -dy / length, y: dx / length)
-            let control = CGPoint(x: (a.x + b.x) / 2 + normal.x * bend,
-                                  y: (a.y + b.y) / 2 + normal.y * bend)
-            ctx.move(to: a)
-            ctx.addQuadCurve(to: b, control: control)
-            let angle = atan2(b.y - control.y, b.x - control.x)
-            let head = CGFloat(10 + (item.width ?? 3) * 2)
-            let barbs = [-0.45, 0.45].map { offset in
-                CGPoint(x: b.x - head * cos(angle + offset), y: b.y - head * sin(angle + offset))
-            }
-            let selected = item.halfHead == true ? [barbs[bend >= 0 ? 1 : 0]] : barbs
-            for barb in selected { ctx.move(to: barb); ctx.addLine(to: b) }
+        case "curved_arrow", "curly":
+            guard let d = item.d else { return }
+            ctx.setLineCap(.butt)
+            ctx.addPath(outline(item, d))
             ctx.strokePath()
+            ctx.setLineCap(.round)
+            heads()
         case "ellipse":
             guard let c = pt(item.center), let rx = item.rx else { return }
             let ry = item.ry ?? rx
@@ -331,7 +379,9 @@ enum ClaudeRenderer {
             UIGraphicsPopContext()
         case "svg":
             guard let d = item.d else { return }
+            dash()
             strokeAndFill(outline(item, d))
+            heads()
         case "math", "molecule":
             // The server typesets LaTeX into one flattened path in page coordinates.
             guard let d = item.d else { return }
