@@ -56,6 +56,34 @@ final class NotebookLayoutTests: XCTestCase {
         overlay.isHidden = false
         overlay.isUserInteractionEnabled = false
         XCTAssertNil(overlay.hitTest(CGPoint(x: 70, y: 70), with: nil))
+        overlay.isUserInteractionEnabled = true
+        let outside = UIButton(frame: CGRect(x: 190, y: 50, width: 44, height: 44))
+        overlay.addSubview(outside)
+        XCTAssertNil(overlay.hitTest(CGPoint(x: 210, y: 70), with: nil))
+    }
+
+    @MainActor
+    func testHintOverlayExposesControlsOutsidePencilKitAndFollowsVisibility() throws {
+        let controller = NotebookCanvasController()
+        controller.loadViewIfNeeded()
+        controller.view.frame = CGRect(x: 0, y: 0, width: 1000, height: 1000)
+        controller.view.layoutIfNeeded()
+        let overlay = try XCTUnwrap(controller.view.subviews.compactMap { $0 as? ControlOverlay }.first)
+        XCTAssertTrue(overlay.superview === controller.view)
+        XCTAssertFalse(overlay.isDescendant(of: controller.canvas))
+        let chip = UIButton(frame: CGRect(x: 50, y: 50, width: 44, height: 44))
+        chip.isAccessibilityElement = true
+        overlay.addSubview(chip)
+        overlay.refreshAccessibilityElements()
+        XCTAssertFalse(overlay.isAccessibilityElement)
+        XCTAssertTrue(overlay.accessibilityElements?.first as? UIButton === chip)
+        controller.showClaude = false
+        XCTAssertTrue(overlay.isHidden)
+        XCTAssertTrue(overlay.accessibilityElements?.isEmpty == true)
+        XCTAssertNil(overlay.hitTest(CGPoint(x: 70, y: 70), with: nil))
+        controller.showClaude = true
+        XCTAssertTrue(overlay.accessibilityElements?.first as? UIButton === chip)
+        XCTAssertTrue(overlay.hitTest(CGPoint(x: 70, y: 70), with: nil) === chip)
     }
 
     func testNewItemWireFieldsDecodeWithoutChangingNames() throws {

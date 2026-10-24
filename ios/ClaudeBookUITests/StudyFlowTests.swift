@@ -49,7 +49,11 @@ final class StudyFlowTests: XCTestCase {
         defer { app.terminate() }
         try openFirstPage(app, pageId: page.id)
         let chip = app.buttons["hint.\(hint.id)"]
-        XCTAssertTrue(chip.waitForExistence(timeout: 5))
+        guard chip.waitForExistence(timeout: 5) else {
+            print(app.debugDescription)
+            XCTFail("Hidden hint button is missing from the accessibility hierarchy")
+            return
+        }
         for _ in 0..<3 {
             if chip.isHittable { break }
             app.swipeUp()

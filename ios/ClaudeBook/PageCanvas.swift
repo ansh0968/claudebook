@@ -45,12 +45,19 @@ enum NotebookLayout {
 /// Lets only its controls take touches; PencilKit still receives ink and scroll gestures elsewhere.
 final class ControlOverlay: UIView {
     override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
-        guard !isHidden, alpha > 0.01, isUserInteractionEnabled else { return nil }
+        guard !isHidden, alpha > 0.01, isUserInteractionEnabled, bounds.contains(point) else { return nil }
         for child in subviews.reversed() {
             let target = child.hitTest(convert(point, to: child), with: event)
             if let target { return target }
         }
         return nil
+    }
+
+    func refreshAccessibilityElements() {
+        isAccessibilityElement = false
+        accessibilityElements = isHidden ? [] : subviews.filter {
+            $0.isAccessibilityElement && !$0.isHidden && $0.alpha > 0.01 && $0.frame.intersects(bounds)
+        }
     }
 }
 
@@ -117,7 +124,8 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
     let canvas = PKCanvasView()
     let toolPicker = PKToolPicker()
     private let paperContainer = UIView()
-    private let claudeContainer = ControlOverlay()
+    private let claudeContainer = UIView()
+    private let hintOverlay = ControlOverlay()
     private var hintButtons: [String: UIButton] = [:]
     private var selectionOverlay: RegionSelectionView?
     private let footer = UILabel()
@@ -172,13 +180,26 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
             canvas.trailingAnchor.constraint(equalTo: view.trailingAnchor),
         ])
 
-        // Paper goes under PencilKit's content; Claude's layer sits above it with only hint chips taking taps.
+        // Paper and Claude's tiled ink live in notebook coordinates and never take touches.
         for container in [paperContainer, claudeContainer] {
             container.backgroundColor = .clear
+            container.isUserInteractionEnabled = false
         }
-        paperContainer.isUserInteractionEnabled = false
         canvas.insertSubview(paperContainer, at: 0)
         canvas.addSubview(claudeContainer)
+
+        // PencilKit owns its accessibility tree. Keep real hint controls beside the canvas so both
+        // VoiceOver and touch can reach them, converting their positions into viewport coordinates.
+        hintOverlay.translatesAutoresizingMaskIntoConstraints = false
+        hintOverlay.backgroundColor = .clear
+        hintOverlay.clipsToBounds = true
+        view.addSubview(hintOverlay)
+        NSLayoutConstraint.activate([
+            hintOverlay.topAnchor.constraint(equalTo: canvas.topAnchor),
+            hintOverlay.bottomAnchor.constraint(equalTo: canvas.bottomAnchor),
+            hintOverlay.leadingAnchor.constraint(equalTo: canvas.leadingAnchor),
+            hintOverlay.trailingAnchor.constraint(equalTo: canvas.trailingAnchor),
+        ])
 
         footer.text = "Pull up to add a page"
         footer.font = .preferredFont(forTextStyle: .footnote)
@@ -197,6 +218,7 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
 
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
+        updateHintButtons()
         let width = canvas.bounds.width
         guard width > 0, width != lastWidth else { return }
         // Fit the page to the width; allow zooming in 5x from there. Keep the same spot on screen on rotation.
@@ -397,7 +419,11 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
 
     var showClaude: Bool {
         get { !claudeContainer.isHidden }
-        set { claudeContainer.isHidden = !newValue }
+        set {
+            claudeContainer.isHidden = !newValue
+            hintOverlay.isHidden = !newValue
+            hintOverlay.refreshAccessibilityElements()
+        }
     }
 
     func setAppearance(dark: Bool, invertPDFs: Bool) {
@@ -563,6 +589,8 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
                 let button: UIButton
                 if let existing = hintButtons[key] { button = existing } else {
                     button = UIButton(type: .system)
+                    button.isAccessibilityElement = true
+                    button.accessibilityTraits = .button
                     button.accessibilityIdentifier = "hint.\(item.id)"
                     button.accessibilityHint = "Reveal Claude's hidden hint"
                     button.addAction(UIAction { [weak self, weak button] _ in
@@ -576,21 +604,24 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
                             } catch { self?.onHintError?(error.localizedDescription) }
                         }
                     }, for: .touchUpInside)
-                    claudeContainer.addSubview(button)
+                    hintOverlay.addSubview(button)
                     hintButtons[key] = button
                 }
                 button.accessibilityLabel = item.label ?? "Hint"
                 let s = canvas.zoomScale
                 // The tiled layer draws the chip in page units. Its transparent target grows to 44pt.
-                let chip = CGRect(x: CGFloat(x) * s, y: (NotebookLayout.offset(index) + CGFloat(y)) * s,
-                                  width: CGFloat(item.w ?? 100) * s, height: CGFloat(item.h ?? 34) * s)
+                let pageChip = CGRect(x: CGFloat(x) * s, y: (NotebookLayout.offset(index) + CGFloat(y)) * s,
+                                      width: CGFloat(item.w ?? 100) * s, height: CGFloat(item.h ?? 34) * s)
+                let chip = claudeContainer.convert(pageChip, to: hintOverlay)
                 button.frame = chip.insetBy(dx: -max(0, (44 - chip.width) / 2), dy: -max(0, (44 - chip.height) / 2))
+                button.isHidden = !button.frame.intersects(hintOverlay.bounds)
             }
         }
         for key in hintButtons.keys.filter({ !wanted.contains($0) }) {
             hintButtons[key]?.removeFromSuperview()
             hintButtons[key] = nil
         }
+        hintOverlay.refreshAccessibilityElements()
     }
 
     private func applyHint(_ item: ClaudeItem, pageId: String) {
