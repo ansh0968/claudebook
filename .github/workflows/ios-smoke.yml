@@ -8,7 +8,9 @@ on:
     paths: ["ios/**", ".github/workflows/ios-smoke.yml"]
   workflow_dispatch:
 
-concurrency: ios-smoke
+concurrency:
+  group: ios-smoke-${{ github.ref }}
+  cancel-in-progress: false
 
 permissions:
   contents: write
@@ -196,10 +198,23 @@ jobs:
         working-directory: ios
         run: |
           [ -d shots ] || exit 0
-          cp -R shots $RUNNER_TEMP/shots
-          cd $RUNNER_TEMP && rm -rf pub && mkdir pub && cd pub
-          git init -q -b ci-screenshots
-          cp ../shots/*.png .
-          echo "Smoke test for ${GITHUB_SHA::7}, run $GITHUB_RUN_ID" > README.md
-          git add . && git -c user.name=claudebook-ci -c user.email=ci@users.noreply.github.com commit -qm "Screenshots for ${GITHUB_SHA::7}"
-          git push -qf "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" ci-screenshots
+          # Keep each branch/run's evidence without replacing previous smoke results.
+          git fetch origin refs/heads/ci-screenshots:refs/remotes/origin/ci-screenshots
+          git worktree add "$RUNNER_TEMP/smoke-pub" origin/ci-screenshots
+          TARGET="$RUNNER_TEMP/smoke-pub/runs/${GITHUB_REF_NAME//\//-}/$GITHUB_RUN_ID"
+          mkdir -p "$TARGET"
+          cp shots/*.png "$TARGET/"
+          echo "Smoke test for $GITHUB_SHA, run $GITHUB_RUN_ID" > "$TARGET/README.md"
+          cd "$RUNNER_TEMP/smoke-pub"
+          git add .
+          git -c user.name=claudebook-ci -c user.email=ci@users.noreply.github.com commit -qm "Screenshots for ${GITHUB_SHA::7}"
+          # Other branches may publish while this simulator is running. Rebase
+          # only our new run directory onto the latest screenshots, then retry.
+          for attempt in 1 2 3 4 5; do
+            git fetch origin refs/heads/ci-screenshots:refs/remotes/origin/ci-screenshots
+            git -c user.name=claudebook-ci -c user.email=ci@users.noreply.github.com rebase origin/ci-screenshots
+            if git push origin HEAD:ci-screenshots; then exit 0; fi
+            sleep "$attempt"
+          done
+          echo "Could not publish screenshots after five concurrent-update retries" >&2
+          exit 1
