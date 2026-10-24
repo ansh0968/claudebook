@@ -35,8 +35,9 @@ const capScale = (font: opentype.Font) => {
   return kalam && own ? Math.min(1.25, Math.max(0.8, kalam / own)) : 1;
 };
 
-// Playpen's capital omega has feet that read as an underlined O at note sizes; Noto's is unmistakable.
-const PLAYPEN_SKIP = new Set(["Ω", "Ω"]);
+// At note sizes Playpen's capital omega reads as an underlined O and its lambda as a backwards ∂.
+// Noto's versions are unmistakable.
+const PLAYPEN_SKIP = new Set(["Ω", "Ω", "λ"]);
 
 /** The first four fonts are hand-drawn (Kalam, Playpen Sans); the rest are typeset Noto. */
 const HANDWRITTEN = 4;
