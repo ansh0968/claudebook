@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { spawnSync } from "node:child_process";
 import sharp from "sharp";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
@@ -76,6 +77,16 @@ const partial = prepareBatch([{ type: "spring", from: [10, 10], to: [10, 10] }, 
 assert.equal(partial.items.length, 1); assert.equal(partial.warnings.length, 1); assert.match(partial.warnings[0].warning, /endpoints/);
 assert.throws(() => prepareItems([{ type: "spring", from: [10, 10], to: [10, 10] }]), /endpoints/);
 assert.throws(() => prepareItems([{ type: "rect", x: 0, y: 0, w: 1000, h: 1000, fill_pattern: "cross", pattern_spacing: 0.001 }]), /10000/);
+// Keep a regression in a disposable process so a coordinate-increment loop cannot hang the suite.
+const physicsModule = new URL(`physics${path.extname(new URL(import.meta.url).pathname)}`, import.meta.url).href;
+const extremePattern = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", `import { patternParts } from ${JSON.stringify(physicsModule)}; try { patternParts("M100000000000000000000,0h65536v1h-65536Z", "cross"); process.exit(2); } catch (e) { if (!/spacing.*coordinates/.test(e.message)) throw e; }`], { timeout: 10000, encoding: "utf8" });
+assert.equal(extremePattern.error, undefined, String(extremePattern.error));
+assert.equal(extremePattern.status, 0, extremePattern.stderr);
+for (const fill_pattern of ["cross", "dot", "hatch"] as const) for (const d of ["M100,100", "M100,100v100", "M100,100h100"]) {
+  const item = prepareItems([{ type: "svg", d, fill_pattern }])[0];
+  assert.ok(Object.values(itemBBox(item)).every(Number.isFinite));
+}
+assert.throws(() => prepareItems([{ type: "rect", x: 1e308, y: 0, w: 7e307, h: 1, fill_pattern: "hatch", pattern_spacing: 1e307 }]), /finite/);
 const output = path.join(process.env.CLAUDEBOOK_TEST_ARTIFACTS ?? os.tmpdir(), "claudebook-physics.png");
 fs.mkdirSync(path.dirname(output), { recursive: true });
 await sharp(Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="1000"><rect width="1000" height="1000" fill="white"/>${items.map(itemToSvg).join("")}</svg>`)).png().toFile(output);
