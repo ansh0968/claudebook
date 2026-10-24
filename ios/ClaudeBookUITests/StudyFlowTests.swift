@@ -190,8 +190,7 @@ final class StudyFlowTests: XCTestCase {
         defer { app.terminate() }
         try requireCRUDReady(app.buttons["editor.pages"])
         app.buttons["editor.pages"].tap()
-        try requireCRUDReady(app.buttons["pages.actions.\(first)"])
-        app.buttons["pages.actions.\(first)"].tap()
+        try openMenu(app.buttons["pages.actions.\(first)"])
         try requireCRUDReady(app.buttons["pages.duplicate.\(first)"])
         app.buttons["pages.duplicate.\(first)"].tap()
         let duplicated: SmokeNotebook = try await eventually {
@@ -201,8 +200,7 @@ final class StudyFlowTests: XCTestCase {
         let copy = duplicated.pages[1].id
         XCTAssertNotEqual(copy, first)
         XCTAssertEqual(duplicated.pages[2].id, notebook.pages[1].id)
-        try requireCRUDReady(app.buttons["pages.actions.\(copy)"])
-        app.buttons["pages.actions.\(copy)"].tap()
+        try openMenu(app.buttons["pages.actions.\(copy)"])
         try requireCRUDReady(app.buttons["pages.down.\(copy)"])
         app.buttons["pages.down.\(copy)"].tap()
         let reordered: SmokeNotebook = try await eventually {
@@ -210,8 +208,7 @@ final class StudyFlowTests: XCTestCase {
             return current.pages.last?.id == copy ? current : nil
         }
         XCTAssertEqual(reordered.pages.map(\.id), [first, notebook.pages[1].id, copy])
-        try requireCRUDReady(app.buttons["pages.actions.\(copy)"])
-        app.buttons["pages.actions.\(copy)"].tap()
+        try openMenu(app.buttons["pages.actions.\(copy)"])
         try requireCRUDReady(app.buttons["pages.delete.\(copy)"])
         app.buttons["pages.delete.\(copy)"].tap()
         try requireCRUDReady(app.buttons["pages.confirmDelete"])
@@ -221,8 +218,7 @@ final class StudyFlowTests: XCTestCase {
             return current.pages.count == 2 ? current : nil
         }
         XCTAssertEqual(deleted.pages.map(\.id), notebook.pages.map(\.id))
-        try requireCRUDReady(app.buttons["pages.actions.\(first)"])
-        app.buttons["pages.actions.\(first)"].tap()
+        try openMenu(app.buttons["pages.actions.\(first)"])
         try requireCRUDReady(app.buttons["Move to notebook…"])
         app.buttons["Move to notebook…"].tap()
         try requireCRUDReady(app.buttons["pages.target.\(target.id)"])
@@ -245,8 +241,7 @@ final class StudyFlowTests: XCTestCase {
         defer { app.terminate() }
         try requireCRUDReady(app.buttons["editor.pages"])
         app.buttons["editor.pages"].tap()
-        try requireCRUDReady(app.buttons["pages.actions.\(pageId)"])
-        app.buttons["pages.actions.\(pageId)"].tap()
+        try openMenu(app.buttons["pages.actions.\(pageId)"])
         try requireCRUDReady(app.buttons["pages.delete.\(pageId)"])
         app.buttons["pages.delete.\(pageId)"].tap()
         try requireCRUDReady(app.buttons["pages.confirmDelete"])
@@ -290,6 +285,19 @@ final class StudyFlowTests: XCTestCase {
         }
         XCTAssertTrue(empty)
         try requireCRUDReady(app.buttons["library.emptyCreate"])
+    }
+
+    /// SwiftUI menus inside list rows can report not hittable even while they take taps,
+    /// so wait for the loaded, enabled control and tap its centre.
+    @MainActor
+    private func openMenu(_ element: XCUIElement, timeout: TimeInterval = 12) throws {
+        let ready = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == true AND enabled == true"), object: element)
+        guard XCTWaiter.wait(for: [ready], timeout: timeout) == .completed else {
+            print("UI hierarchy when \(element) was not ready:\n\(XCUIApplication().debugDescription)")
+            XCTFail("Menu did not become ready: \(element)")
+            throw SmokeError.timeout
+        }
+        element.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
     }
 
     @MainActor

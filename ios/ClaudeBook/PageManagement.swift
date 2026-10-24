@@ -53,6 +53,8 @@ struct PageGrid: View {
                         .accessibilityLabel("Page \(index + 1)\(page.id == currentPageId ? ", current page" : "")")
                         .accessibilityIdentifier("page.\(page.id)")
                         Menu { actions(page, index: index) } label: { Image(systemName: "ellipsis.circle").font(.title3).padding(8) }
+                            // Borderless keeps the menu its own tap target instead of the whole list row.
+                            .buttonStyle(.borderless)
                             .accessibilityLabel("Actions for page \(index + 1)")
                             .accessibilityIdentifier("pages.actions.\(page.id)")
                     }

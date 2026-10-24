@@ -800,8 +800,8 @@ struct ShelfView: View {
                     Button("New notebook") { model.ask(.newNotebook(folderId: nil)) }
                         .buttonStyle(.borderedProminent).accessibilityIdentifier("library.emptyCreate")
                 }
-                .accessibilityIdentifier("library.empty")
-                    .frame(maxWidth: .infinity)
+                // No identifier on the container: it would replace the button's own "library.emptyCreate".
+                .frame(maxWidth: .infinity)
             } else if !isRoot && model.subfolders(of: folderId).isEmpty {
                 ContentUnavailableView {
                     Label("Nothing in here yet", systemImage: "folder")
