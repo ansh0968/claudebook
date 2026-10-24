@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { arrowHead, curvedArrowPaths, flattenPath, pathBounds } from "./geometry.js";
-import { ItemSchema, itemBBox, itemToSvg, prepareBatch, prepareItems, translateItem } from "./items.js";
+import { arrowHead, curvedArrowPaths, flattenPath, pathBounds, type Point } from "./geometry.js";
+import { ItemSchema, itemBBox, itemToSvg, moleculeAtomsForDisplay, prepareBatch, prepareItems, translateItem } from "./items.js";
 
 const arrows = prepareItems([
   ItemSchema.parse({ type: "curly", from: [100, 200], to: [300, 200] }),
@@ -31,9 +31,37 @@ for (const bend of [-80, 0, 80]) {
   assert.ok(shaft.x + shaft.w < 300, "No shaft through the head tip");
   assert.match(itemToSvg({ type: "curly", from: [100, 200], to: [300, 200], bend }), /fill="#D97757"/);
 }
+// Oblique arrows must preserve the same terminal tangent and signed outside barb.
+for (const to of [[260, 320], [40, 320], [40, 80]] as Point[]) for (const bend of [-80, 80]) {
+  const from: Point = [100, 200], dx = to[0] - from[0], dy = to[1] - from[1], length = Math.hypot(dx, dy);
+  const control: Point = [(from[0] + to[0]) / 2 - dy / length * bend, (from[1] + to[1]) / 2 + dx / length * bend];
+  const angle = Math.atan2(to[1] - control[1], to[0] - control[0]);
+  const full = curvedArrowPaths(from, to, 3, bend), half = curvedArrowPaths(from, to, 3, bend, true);
+  assert.equal(full.head, arrowHead(to, angle, 3, true));
+  const [, base, barb] = flattenPath(half.head)[0];
+  assert.ok(Math.abs((base[0] - control[0]) * Math.sin(angle) - (base[1] - control[1]) * Math.cos(angle)) < 0.01, "Shaft endpoint preserves the terminal tangent");
+  const outside = -Math.sin(angle) * (barb[0] - base[0]) + Math.cos(angle) * (barb[1] - base[1]);
+  assert.ok(bend < 0 ? outside < 0 : outside > 0);
+}
 const molecule = prepareItems([{ type: "molecule", smiles: "CC(=O)O", x: 100, y: 100, size: 200, show_carbons: true }])[0];
 assert.deepEqual(molecule.elements, { "0": "C", "1": "C", "2": "O", "3": "O" });
 assert.equal(Object.keys(molecule.atoms!).length, 4);
+// Synthetic optional physics metadata exercises integration without importing that branch.
+const rotated = { ...molecule, atoms: { "0": [110, 100] as Point, "1": [100, 80] as Point }, rotation: 90, rotation_center: [100, 100] as Point };
+const storedAtoms = structuredClone(rotated.atoms);
+const display = moleculeAtomsForDisplay(rotated)!;
+assert.ok(Math.abs(display["0"][0] - 100) < 1e-10 && Math.abs(display["0"][1] - 110) < 1e-10);
+assert.ok(Math.abs(display["1"][0] - 120) < 1e-10 && Math.abs(display["1"][1] - 100) < 1e-10);
+assert.deepEqual(rotated.atoms, storedAtoms, "Displaying rotated atoms must not change stored coordinates");
+assert.equal(moleculeAtomsForDisplay(molecule), molecule.atoms);
+assert.equal(moleculeAtomsForDisplay({ ...rotated, rotation: 0 }), rotated.atoms);
+// Physics translates its rotation centre alongside the prepared geometry.
+const shifted = { ...translateItem(rotated, 25, -12), rotation: rotated.rotation, rotation_center: [125, 88] as Point };
+const shiftedDisplay = moleculeAtomsForDisplay(shifted)!;
+for (const [id, [x, y]] of Object.entries(display)) {
+  assert.ok(Math.abs(shiftedDisplay[id][0] - (x + 25)) < 1e-10);
+  assert.ok(Math.abs(shiftedDisplay[id][1] - (y - 12)) < 1e-10);
+}
 const box = itemBBox(molecule);
 for (const [x, y] of Object.values(molecule.atoms!)) assert.ok(x >= box.x && x <= box.x + box.w && y >= box.y && y <= box.y + box.h);
 const aim = prepareItems([{ type: "curved_arrow", from: molecule.atoms!["2"], to: molecule.atoms!["3"] }])[0];
