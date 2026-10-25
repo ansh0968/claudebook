@@ -21,7 +21,7 @@ Write equations and corrected working with "math" items (LaTeX), one line per it
 Text supports Unicode symbols with font fallbacks, Unicode sub/superscripts and inline scripts such as H_2O, OH^- and x^{2}. If a text character is unsupported the draw fails clearly; use math for that symbol.
 For chemistry use mhchem inside math items: \\ce{H2O}, \\ce{OH-}, \\ce{SO4^2-}, \\ce{^{14}_{6}C}, \\ce{A + B -> C}, \\ce{A <=> B}, \\ce{A ->[above][below] B}.
 Your drawings live on a separate layer the user can hide or undo, so don't be shy, but keep the page readable and never cover the user's writing with text.
-Every draw returns each item's id and bbox, plus per-item warnings (bad LaTeX, unknown keys, off-page): read them, they mean an item was skipped or misplaced. x,y on text and math is the top-left unless you set anchor. Use dry_run to measure before placing, and offset to shift a whole batch.
+Every draw returns each item's id and bbox, plus per-item warnings (unknown types, invalid fields, bad LaTeX, unknown keys, off-page): read them, they mean an item was skipped or misplaced. Invalid items are skipped individually, including in dry_run; e.g. a valid rect beside {type:"squiggle"} still draws. x,y on text and math is the top-left unless you set anchor. Use dry_run to measure before placing, and offset to shift a whole batch.
 After drawing, call view_page to check the result and fix anything that landed in the wrong place.
 Page descriptions list item ids, labels and bounding boxes. Use erase_my_drawings with ids or group to remove selected items, move_items with ids, dx, dy to reposition them, and copy_items to duplicate them. Name related drawings with an item group.
 Use curved_arrow (alias curly) for reaction mechanisms: {type:"curly",from:[100,200],to:[250,200],bend:-60,head:"half"}. head:"full" draws an electron pair; half_head:true remains supported.
@@ -224,7 +224,7 @@ export function buildMcpServer(store: Store) {
       title: "Draw on a page",
       description: `Add ink to a page on your own layer: circles, straight or curved arrows, lines, paths, highlights, text, LaTeX math, SMILES molecules, hidden hints or SVG paths. Returns every item's id and bbox, and per-item warnings: an item with bad LaTeX/SMILES/SVG or an unknown key is skipped while the rest draw, and items that leave the page are flagged. Coordinates are 0..${PAGE_W} x 0..${PAGE_H}. Defaults to the open page.`,
       inputSchema: {
-        items: z.array(LooseItemSchema).min(1),
+        items: z.array(LooseItemSchema).min(1).describe('Drawing items. Unknown types and invalid fields are skipped with indexed warnings; e.g. [{type:"rect",x:100,y:100,w:50,h:40},{type:"squiggle"}] draws the rect'),
         offset,
         dry_run: z.boolean().optional().describe("Measure only: return ids, bboxes and warnings without drawing anything"),
         page_id: z.string().optional(),

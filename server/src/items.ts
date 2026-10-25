@@ -171,8 +171,11 @@ const outlined = (item: ItemInput) => !("fill" in item && item.fill && item.fill
 /** Every key each item type accepts, so unknown keys can be reported instead of silently dropped. */
 const itemKeys = new Map(ItemSchema.options.map((o) => [String((o.shape.type as z.ZodLiteral<string>).value), new Set(Object.keys(o.shape))]));
 
-/** The same item types, but keeping unknown keys so draw_on_page can warn about them. */
-export const LooseItemSchema = z.union(ItemSchema.options.map((o) => (o.description ? o.loose().describe(o.description) : o.loose())) as unknown as [z.ZodTypeAny, z.ZodTypeAny, ...z.ZodTypeAny[]]);
+/** Keep real types first for tool discovery; let malformed items reach per-item validation. */
+export const LooseItemSchema = z.union([
+  ...ItemSchema.options.map((o) => (o.description ? o.loose().describe(o.description) : o.loose())),
+  z.object({ type: z.string() }).loose().describe('Invalid items are skipped individually, e.g. {type:"squiggle"}; use one of the real types above'),
+] as unknown as [z.ZodTypeAny, z.ZodTypeAny, ...z.ZodTypeAny[]]);
 
 export interface ItemWarning { item: number; type?: string; id?: string; warning: string }
 
@@ -185,13 +188,28 @@ export function prepareBatch(raw: Record<string, unknown>[], existing: Item[] = 
   raw.forEach((input, index) => {
     const type = String(input.type);
     const allowed = itemKeys.get(type);
+    if (!allowed) {
+      warnings.push({ item: index, type, warning: `Skipped: unknown type "${type}". Types: ${[...itemKeys.keys()].join(", ")}` });
+      return;
+    }
     const unknown = allowed ? Object.keys(input).filter((k) => !allowed.has(k)) : [];
     if (unknown.length) {
       warnings.push({ item: index, type, warning: `Skipped: ${type} has no ${unknown.map((k) => `"${k}"`).join(", ")}. It accepts ${[...allowed!].join(", ")}` });
       return;
     }
+    // Validate against the known type so errors name its fields, not every union option.
+    const schema = ItemSchema.options.find((o) => String(o.shape.type.value) === type)!;
+    const parsed = schema.safeParse(input);
+    if (!parsed.success) {
+      const details = parsed.error.issues.map((issue) => {
+        const field = issue.path.join(".");
+        return issue.code === "invalid_type" ? `${type} needs "${field}" (${issue.expected})` : `${type} "${field}": ${issue.message}`;
+      });
+      warnings.push({ item: index, type, warning: `Skipped: ${details.join("; ")}` });
+      return;
+    }
     try {
-      const [item] = prepareItems([ItemSchema.parse(input)], [...existing, ...items]);
+      const [item] = prepareItems([parsed.data], [...existing, ...items]);
       itemBBox(item);
       items.push(item);
       indexes.push(index);
