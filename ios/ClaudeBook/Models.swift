@@ -19,6 +19,8 @@ struct TextBox: Codable, Hashable {
     var y: Double
     var w: Double
     var h: Double
+    var alts: [String]? = nil
+    var confidence: Double? = nil
 }
 
 struct PageRegion: Codable, Hashable {
