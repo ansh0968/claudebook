@@ -4,7 +4,7 @@ import { z } from "zod";
 import { LooseItemSchema, itemBBox, itemLabel, moleculeAtomsForDisplay, offPageWarning, prepareBatch, translateItem, type Item, type ItemWarning } from "./items.js";
 import { compileTypst, downloadPdf, savePdf } from "./pdf.js";
 import { pdfTextPage, describePdfText } from "./pdf-text.js";
-import { TYPST_IMPORTS } from "./typst-packages.js";
+import { TYPST_COMPATIBILITY, TYPST_IMPORTS } from "./typst-packages.js";
 import { clampRegion, renderPage, type Region } from "./render.js";
 import { PAGE_H, PAGE_W, type Notebook, type Page, type Store } from "./store.js";
 import { parsePageRegion } from "./regions.js";
@@ -34,6 +34,7 @@ To give the user something to write on (worksheets, notes, practice questions), 
 PDF-backed pages include their own text with page-coordinate line boxes, filtered when zoomed. This is separate from recognized handwriting; scanned pages may have no text layer.
 create_pdf ships these exact Typst imports offline (Typst 0.13.1):
 ${TYPST_IMPORTS}
+${TYPST_COMPATIBILITY}
 Notebook/page management: use list_pages to get stable page ids, delete_pages to remove requested pages (including user ink), reorder_pages with a complete ordered id list, duplicate_pages for independent copies, and move_pages to move existing page ids to another notebook. after_page counts target pages before insertion (0=front, default=end), after removal for moves. For a notebook the user explicitly wants deleted, use delete_notebook with direct:true; otherwise omit direct to request iPad confirmation. Empty notebooks can be refilled with add_pages.
 Example drawing: #canvas({ draw.line((0,0),(2,1)); draw.circle((1,1),radius:0.4) }). Chemistry: #ch("H2O").
 The library is organised in folders (list_notebooks shows them). Put new notebooks and PDFs in the folder that fits with the folder parameter, and file notebooks with move_notebook. Scratch pads are temporary and delete themselves a week after their last edit unless the user keeps them.`;
@@ -512,8 +513,8 @@ export function buildMcpServer(store: Store) {
         "Typeset a document and drop it into ClaudeBook as notebook pages the user can write on. Use it for worksheets, revision notes and practice questions. " +
         "Write Typst markup, not LaTeX (math is $x^2$ inline or $ x = (-b plus.minus sqrt(b^2 - 4a c)) / (2a) $ on its own line, #pagebreak() for new pages). " +
         "Pages are A4. Leave generous blank space under each question for handwriting, e.g. #v(6cm). Makes a new notebook unless notebook_id is given (then pages are appended). " +
-        `Offline packages (exact imports):\n${TYPST_IMPORTS}\nExample: #canvas({ draw.line((0,0),(2,1)); draw.circle((1,1),radius:0.4) }). PDF text with coordinates appears in view_page/get_current_page.`,
-      inputSchema: { title: z.string(), typst: z.string().describe(`Complete Typst source. Offline package imports:\n${TYPST_IMPORTS}`), notebook_id: z.string().optional(), folder: folderParam },
+        `Offline packages (exact imports):\n${TYPST_IMPORTS}\n${TYPST_COMPATIBILITY}\nExample: #canvas({ draw.line((0,0),(2,1)); draw.circle((1,1),radius:0.4) }). PDF text with coordinates appears in view_page/get_current_page.`,
+      inputSchema: { title: z.string(), typst: z.string().describe(`Complete Typst source. Offline package imports:\n${TYPST_IMPORTS}\n${TYPST_COMPATIBILITY}`), notebook_id: z.string().optional(), folder: folderParam },
     },
     async ({ title, typst, notebook_id, folder }) => {
       const prefixed = !/#set page\(/.test(typst);

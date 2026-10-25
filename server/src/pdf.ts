@@ -7,6 +7,7 @@ import { promisify } from "node:util";
 import { nanoid } from "nanoid";
 import sharp from "sharp";
 import { PAGE_H, PAGE_W, type Store } from "./store.js";
+import { typstFailureMessage } from "./typst-packages.js";
 
 const run = promisify(execFile);
 const TYPST = process.env.TYPST_BIN ?? "typst";
@@ -69,7 +70,7 @@ export async function compileTypst(source: string, assets: Record<string, Buffer
       await run(TYPST, ["compile", "--root", dir, "--diagnostic-format", "short", "main.typ", "out.pdf"], { cwd: dir, timeout: 30_000 });
     } catch (e) {
       const err = e as { stderr?: string; killed?: boolean; message: string };
-      throw new Error(err.killed ? "Typst timed out after 30s" : (err.stderr || err.message).trim());
+      throw new Error(err.killed ? "Typst timed out after 30s" : typstFailureMessage(source, err.stderr || err.message));
     }
     return fs.readFileSync(path.join(dir, "out.pdf"));
   } finally {
