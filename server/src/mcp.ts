@@ -15,6 +15,8 @@ const INSTRUCTIONS = `ClaudeBook is the user's handwritten notebook app on iPad.
 Pages use a fixed coordinate space: x 0..${PAGE_W} left to right, y 0..${PAGE_H} top to bottom.
 Workflow: call get_current_page first (it shows what the user has open, with a labelled blue coordinate grid and the positions of recognized handwriting).
 When checking work or reading small handwriting, zoom into each region (the zoom parameter) before judging it; the full-page image is too small to read every symbol.
+After reading maths from the image, save it with set_transcript so future page descriptions and search can use your reading, e.g. {region:{x:100,y:200,w:400,h:80},text:"2πrh + 4πr²",latex:"2\\\\pi r h + 4\\\\pi r^2"}. Vision is unreliable for maths; zoom in on low-confidence lines and compare alternatives. Recheck stale transcripts against the image and save the same rectangle again to replace them. Transcripts survive snapshots; any page stroke-count change marks them stale (changes elsewhere can flag them, and equal-count edits cannot be detected). Uploads without stroke counts also mark them stale.
+search_notes searches Vision candidates and Claude transcripts using maths-aware spellings, e.g. query:"4pir^2" also finds "4πr²". Results identify source and stale transcript readings.
 When the user says to check their doubts, inspect the open doubts listed on the page, zoom into each marked region, explain it, and resolve_doubt only after addressing it.
 Use those coordinates to aim. Prefer simple shapes: an ellipse with padding around a mistake, an arrow pointing at it, short text next to it.
 Write equations and corrected working with "math" items (LaTeX), one line per item; use "text" items for words. A single line of math is about 0.55 x size tall. Math x,y positions the true ink top-left (or the chosen anchor), including tall fractions; e.g. {type:"math",latex:"x^2",x:300,y:500,anchor:"center"} centers its ink at (300,500).
@@ -82,13 +84,25 @@ export function buildMcpServer(store: Store) {
       try { lines.push(...describePdfText(await pdfTextPage(store, page.pdf.file, page.pdf.page), region)); }
       catch (error) { lines.push(`PDF text unavailable: ${(error as Error).message}`); }
     }
-    // When zoomed, only list handwriting that overlaps the zoomed area.
-    const boxes = region
-      ? page.textBoxes.filter((b) => b.x < region.x + region.w && b.x + b.w > region.x && b.y < region.y + region.h && b.y + b.h > region.y)
-      : page.textBoxes;
+    const overlaps = (b: Region) => !region || (b.x < region.x + region.w && b.x + b.w > region.x && b.y < region.y + region.h && b.y + b.h > region.y);
+    const transcripts = page.transcripts.filter(t => overlaps(t.region));
+    if (transcripts.length) {
+      lines.push("Claude's transcripts (x, y, w, h):");
+      for (const t of transcripts) {
+        const r = t.region;
+        lines.push(`- ${t.id}: [${r.x}, ${r.y}, ${r.w}, ${r.h}] ${t.text}${t.latex ? ` (LaTeX: ${t.latex})` : ""}${t.stale ? " (stale: ink may have changed; zoom in and save this region again)" : ""}`);
+      }
+    }
+    // A stale reading must not suppress current Vision text. Partial coverage
+    // also keeps the entire line, so neighboring writing does not disappear.
+    const boxes = page.textBoxes.filter(b => overlaps(b) && !transcripts.some(t => !t.stale &&
+      t.region.x <= b.x && t.region.y <= b.y && t.region.x + t.region.w >= b.x + b.w && t.region.y + t.region.h >= b.y + b.h));
     if (boxes.length) {
       lines.push("Recognized handwriting (x, y, w, h):");
-      for (const b of boxes) lines.push(`- [${Math.round(b.x)}, ${Math.round(b.y)}, ${Math.round(b.w)}, ${Math.round(b.h)}] ${b.text}`);
+      for (const b of boxes) {
+        const alts = b.alts?.filter(alt => alt !== b.text);
+        lines.push(`- [${Math.round(b.x)}, ${Math.round(b.y)}, ${Math.round(b.w)}, ${Math.round(b.h)}] ${b.text}${b.confidence !== undefined && b.confidence < 0.7 ? " (low confidence, zoom in)" : ""}${alts?.length ? ` (alternatives: ${alts.join(" | ")})` : ""}`);
+      }
     }
     if (page.claudeLayer.length) {
       lines.push("Your existing items (bbox is {x,y,w,h} in page units):");
@@ -353,11 +367,33 @@ export function buildMcpServer(store: Store) {
   );
 
   server.registerTool(
+    "set_transcript",
+    {
+      title: "Save a reading of handwritten maths",
+      description: "After zooming in and reading maths from the image, save your transcript so descriptions and search can find it later. Survives snapshots; the same rectangle replaces its previous reading. Page-wide stroke-count changes (or uploads without counts) flag it stale; same-count edits cannot be detected. Recheck stale readings before saving again. Example: {region:{x:100,y:200,w:400,h:80},text:'2πrh + 4πr²',latex:'2\\pi r h + 4\\pi r^2'}.",
+      inputSchema: {
+        page_id: z.string().optional().describe("Page id; omit for the open page"),
+        region: z.object({ x: z.number().finite(), y: z.number().finite(), w: z.number().finite().positive(), h: z.number().finite().positive() })
+          .describe("Rectangle containing the writing, in 1000 x 1414 page coordinates, e.g. {x:100,y:200,w:400,h:80}"),
+        text: z.string().trim().min(1).max(20000).describe("Your reading, e.g. 2πrh + 4πr²"),
+        latex: z.string().trim().min(1).max(20000).optional().describe("Optional LaTeX for search, e.g. 2\\pi r h + 4\\pi r^2"),
+      },
+    },
+    async ({ page_id, region, text: reading, latex }) => {
+      const found = resolvePage(page_id);
+      if (!found) return fail("Page not found.");
+      const crop = parsePageRegion(region);
+      if (!crop) return fail(`Region must fit within ${PAGE_W} x ${PAGE_H} page coordinates.`);
+      return text(JSON.stringify({ page_id: found.page.id, transcript: store.setTranscript(found.page.id, crop, reading, latex) }));
+    },
+  );
+
+  server.registerTool(
     "search_notes",
     {
-      title: "Search recognized handwriting",
-      description: "Find matching recognized handwriting across all notebooks (case insensitive). Returns notebook and page ids, page numbers and the matching text boxes in page coordinates. Use view_page with zoom to inspect a match.",
-      inputSchema: { query: z.string().trim().min(1) },
+      title: "Search handwriting and maths transcripts",
+      description: "Search Vision text and alternatives, plus Claude transcripts and LaTeX, across notebooks. Ignores case/spacing and normalizes π, powers/subscripts, multiplication and fractions. Example: query:'4pir^2' finds '4πr²'. Results include source (claude or vision), stale on transcripts, notebook/page ids and matching boxes in page coordinates. Use view_page with zoom to verify stale or uncertain matches.",
+      inputSchema: { query: z.string().trim().min(1).describe("Words or maths, e.g. 2πrh or 4pir^2") },
       annotations: { readOnlyHint: true },
     },
     async ({ query }) => text(JSON.stringify({ results: store.searchNotes(query) })),

@@ -86,17 +86,21 @@ enum PageSnapshot {
         return await Task.detached(priority: .userInitiated) {
             let request = VNRecognizeTextRequest()
             request.recognitionLevel = .accurate
-            request.usesLanguageCorrection = true
+            // Language correction turns mathematical symbols into plausible words.
+            request.usesLanguageCorrection = false
             try? VNImageRequestHandler(cgImage: cg).perform([request])
             return (request.results ?? []).compactMap { o -> TextBox? in
-                guard let text = o.topCandidates(1).first?.string else { return nil }
+                let candidates = o.topCandidates(3)
+                guard let best = candidates.first else { return nil }
                 // Vision boxes are normalized with the origin at the bottom left.
                 let b = o.boundingBox
-                return TextBox(text: text,
+                return TextBox(text: best.string,
                                x: b.minX * PageGeometry.width,
                                y: (1 - b.maxY) * PageGeometry.height,
                                w: b.width * PageGeometry.width,
-                               h: b.height * PageGeometry.height)
+                               h: b.height * PageGeometry.height,
+                               alts: candidates.map { $0.string },
+                               confidence: Double(best.confidence))
             }
         }.value
     }
