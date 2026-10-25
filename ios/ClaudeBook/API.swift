@@ -4,13 +4,13 @@ import Security
 /// Server address + shared secret. The secret lives in the Keychain.
 enum Credentials {
     private static let urlKey = "serverURL"
-    private static let account = "claudebook-secret"
+    private static let account = "claudebook-preview-secret"
 
     /// CI's simulator smoke test points the app at a throwaway local server through these.
     private static let env = ProcessInfo.processInfo.environment
 
     static var serverURL: String {
-        get { env["CLAUDEBOOK_SERVER"] ?? UserDefaults.standard.string(forKey: urlKey) ?? "https://book.clarifiq.in" }
+        get { env["CLAUDEBOOK_SERVER"] ?? UserDefaults.standard.string(forKey: urlKey) ?? "https://freedom-indexes-personnel-stages.trycloudflare.com" }
         set { UserDefaults.standard.set(newValue, forKey: urlKey) }
     }
 

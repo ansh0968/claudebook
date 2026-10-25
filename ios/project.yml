@@ -25,10 +25,10 @@ targets:
           NSAllowsLocalNetworking: true
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: in.clarifiq.claudebook
+        PRODUCT_BUNDLE_IDENTIFIER: in.clarifiq.claudebook.preview
         TARGETED_DEVICE_FAMILY: "2"
         GENERATE_INFOPLIST_FILE: YES
-        INFOPLIST_KEY_CFBundleDisplayName: ClaudeBook
+        INFOPLIST_KEY_CFBundleDisplayName: ClaudeBook Test
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
         INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES

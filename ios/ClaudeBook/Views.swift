@@ -71,7 +71,7 @@ struct SetupView: View {
                         .frame(width: 112, height: 112)
                         .clipShape(RoundedRectangle(cornerRadius: 26, style: .continuous))
                         .shadow(color: .black.opacity(0.12), radius: 12, y: 6)
-                    Text("ClaudeBook")
+                    Text("ClaudeBook Test")
                         .font(.system(size: 34, weight: .semibold, design: .serif))
                     Text("Write on paper, and Claude can see it and write back.")
                         .font(.callout)
@@ -80,7 +80,7 @@ struct SetupView: View {
                 }
                 VStack(alignment: .leading, spacing: 12) {
                     Text("Server").font(.footnote.weight(.semibold)).foregroundStyle(.secondary)
-                    TextField("https://book.clarifiq.in", text: $url)
+                    TextField("Test server URL", text: $url)
                         .textInputAutocapitalization(.never)
                         .keyboardType(.URL)
                         .autocorrectionDisabled()
