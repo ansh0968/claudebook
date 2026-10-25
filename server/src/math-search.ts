@@ -19,19 +19,37 @@ function scripts(value: string, chars: string, marker: string) {
   return result;
 }
 
+function bracedArgument(value: string, start: number) {
+  if (value[start] !== "{") return;
+  let depth = 0;
+  for (let i = start; i < value.length; i++) {
+    if (value[i] === "{") depth++;
+    if (value[i] === "}" && --depth === 0) return { text: value.slice(start + 1, i), end: i + 1 };
+  }
+}
+
+function fractions(value: string): string {
+  // Fraction arguments may themselves contain script groups or fractions.
+  // Read balanced braces before discarding them from the final search key.
+  let result = "", from = 0;
+  for (const match of value.matchAll(/\\(?:d?frac|tfrac)\{/g)) {
+    const start = match.index;
+    if (start < from) continue;
+    const numerator = bracedArgument(value, start + match[0].length - 1);
+    const denominator = numerator && bracedArgument(value, numerator.end);
+    if (!numerator || !denominator) continue;
+    result += value.slice(from, start) + fractions(numerator.text) + "/" + fractions(denominator.text);
+    from = denominator.end;
+  }
+  return result + value.slice(from);
+}
+
 export function normalizeMathSearch(value: string): string {
-  let key = scripts(scripts(value, superscripts, "^"), subscripts, "_")
+  const key = scripts(scripts(value, superscripts, "^"), subscripts, "_")
     .toLowerCase()
     .replace(/\\(?:left|right)\b/g, "")
     .replace(/π|\\pi\b/g, "pi")
     .replace(/×|·|\\(?:times|cdot)\b/g, "*")
     .replace(/[−–]/g, "-").replace(/\s+/gu, "");
-  // Reduce innermost fractions first, so nested fractions also lose their
-  // LaTeX wrappers without a regex mistaking a brace for an argument boundary.
-  let previous: string;
-  do {
-    previous = key;
-    key = key.replace(/\\(?:d?frac|tfrac)\{([^{}]*)\}\{([^{}]*)\}/g, "$1/$2");
-  } while (key !== previous);
-  return key.replace(/[{}]/g, "");
+  return fractions(key).replace(/[{}]/g, "");
 }

@@ -16,6 +16,9 @@ for (const [left, right] of [
   ["xᵢ", "x_i"], ["xⁿ", "x^n"], ["xₓ", "x_x"],
   ["2πrh", "2\\pi r h"], ["a × b · c", "a\\times b\\cdot c"],
   ["\\frac{1}{2}", "1/2"], ["\\dfrac{\\frac{a}{b}}{c}", "a/b/c"],
+  ["\\frac{x^{2}}{2}", "x^2/2"], ["\\frac{a_{n}}{b}", "a_n/b"],
+  ["\\frac{\\frac{x^{2}}{a_{n}}}{\\frac{b}{c^{3}}}", "x^2/a_n/b/c^3"],
+  ["\\frac{{x^{2}}}{2} + \\tfrac{a_{n}}{b^{3}}", "x^2/2+a_n/b^3"],
   ["\\left( X^{2} \\right)", "(x²)"],
 ]) assert.equal(normalizeMathSearch(left), normalizeMathSearch(right), `${left} should match ${right}`);
 assert.notEqual(normalizeMathSearch("x2"), normalizeMathSearch("x²"), "ordinary digits are not exponents");
