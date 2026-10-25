@@ -65,15 +65,13 @@ const dashOf = (cls: string): [number, number] | undefined =>
 /**
  * Typeset `latex` with its top-left at (x, y). `size` is roughly the height of one line of text,
  * matching the `text` item, so math and handwriting-style text sit nicely together.
- * The returned box always starts exactly at (x, y), even when an accent or tall delimiter
- * pokes outside MathJax's own layout box.
+ * The visible ink and returned box start exactly at (x, y), excluding layout padding.
  */
 export function renderMath(latex: string, x: number, y: number, size = 36): MathShape {
   const { adaptor, doc } = init();
   const node = doc.convert(latex, { display: true }) as LiteElement;
   const svg = adaptor.tags(node, "svg")[0];
   if (!svg) throw new Error("MathJax produced no SVG");
-  const [minX, minY, vw, vh] = String(adaptor.getAttribute(svg, "viewBox")).split(/\s+/).map(Number);
   const attr = (el: LiteElement, k: string) => adaptor.getAttribute(el, k) as string | undefined;
   const num = (el: LiteElement, k: string, fallback = 0) => {
     const v = parseFloat(attr(el, k) ?? "");
@@ -144,14 +142,12 @@ export function renderMath(latex: string, x: number, y: number, size = 36): Math
 
   // MathJax units are 1/1000 em. Make 1em = 0.8 * size, same ratio the text item uses.
   const s = (size * 0.8) / 1000;
-  // Anything that pokes above or left of MathJax's layout box (a wide \vec, a tall bar) moves
-  // the whole formula, so (x, y) stays the true top-left of what lands on the page.
+  // Layout struts and side bearings are invisible. Anchors and placement must use ink,
+  // including the real curve extrema, so even tall formulas land at the requested point.
   const raw = parts.join("");
   const ink = pathBounds(raw);
-  const left = Math.min(minX, ink.x), top = Math.min(minY, ink.y);
-  const right = Math.max(minX + vw, ink.x + ink.w), bottom = Math.max(minY + vh, ink.y + ink.h);
-  const toPage = `translate(${x},${y}) scale(${s}) translate(${-left},${-top})`;
+  const toPage = `translate(${x},${y}) scale(${s}) translate(${-ink.x},${-ink.y})`;
   // Absolute, unshortened commands keep the iPad's small path parser on its well-trodden paths.
   const d = parts.map((p) => svgpath(p).transform(toPage).abs().unshort().round(2).toString()).join("");
-  return { d, w: +((right - left) * s).toFixed(1), h: +((bottom - top) * s).toFixed(1) };
+  return { d, w: +(ink.w * s).toFixed(1), h: +(ink.h * s).toFixed(1) };
 }

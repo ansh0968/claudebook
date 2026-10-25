@@ -6,6 +6,7 @@ import { nanoid } from "nanoid";
 import type { Item } from "./items.js";
 import { translateItem } from "./items.js";
 import { renderHandwriting } from "./handwriting.js";
+import { normalizeMathSearch } from "./math-search.js";
 
 // Every page uses the same logical coordinate space so Claude can reason in round numbers.
 // A4 ratio. The iPad app scales this to whatever size it draws at.
@@ -16,6 +17,9 @@ export type Background = "blank" | "lined" | "grid" | "dotted";
 
 export interface TextBox {
   text: string;
+  /** Up to three Vision candidates, including the best candidate in text. */
+  alts?: string[];
+  confidence?: number;
   x: number;
   y: number;
   w: number;
@@ -23,6 +27,18 @@ export interface TextBox {
 }
 
 export interface PageRegion { x: number; y: number; w: number; h: number }
+
+export interface Transcript {
+  id: string;
+  source: "claude";
+  region: PageRegion;
+  text: string;
+  latex?: string;
+  createdAt: string;
+  snapshotVersion: number;
+  strokeCount?: number;
+  stale: boolean;
+}
 
 export interface Doubt {
   id: string;
@@ -44,6 +60,8 @@ export interface Page {
   strokeCount?: number;
   /** Handwriting recognized on device, in page coordinates. */
   textBoxes: TextBox[];
+  /** Claude's image readings survive Vision refreshes. */
+  transcripts: Transcript[];
   doubts: Doubt[];
   claudeLayer: Item[];
   updatedAt: string;
@@ -110,7 +128,10 @@ export class Store {
       : { notebooks: [], folders: [], view: { notebookId: null, pageId: null, updatedAt: null } };
     this.db.folders ??= [];
     // Older db.json files have no doubts field. Normalize once so every API response has an array.
-    for (const notebook of this.db.notebooks) for (const page of notebook.pages) page.doubts ??= [];
+    for (const notebook of this.db.notebooks) for (const page of notebook.pages) {
+      page.doubts ??= [];
+      page.transcripts ??= [];
+    }
     if (!existingDatabase) this.seed();
   }
 
@@ -398,6 +419,7 @@ export class Store {
           if ("axes" in item && item.axes && itemIds.has(item.axes)) item.axes = itemIds.get(item.axes)!;
         }
         copy.doubts = copy.doubts.map(d => ({ ...d, id: nanoid(10), pageId: copy.id, createdAt: now() }));
+        copy.transcripts = copy.transcripts.map(t => ({ ...t, id: nanoid(10) }));
         for (const file of [this.snapshotPath.bind(this), this.drawingPath.bind(this)]) {
           if (fs.existsSync(file(page.id))) {
             copiedFiles.push(file(copy.id));
@@ -416,7 +438,7 @@ export class Store {
   }
 
   newPage(background: Background = "blank"): Page {
-    return { id: nanoid(10), background, snapshotVersion: 0, textBoxes: [], doubts: [], claudeLayer: [], updatedAt: now() };
+    return { id: nanoid(10), background, snapshotVersion: 0, textBoxes: [], transcripts: [], doubts: [], claudeLayer: [], updatedAt: now() };
   }
 
   addDoubt(pageId: string, region: PageRegion): Doubt {
@@ -449,13 +471,53 @@ export class Store {
   }
 
   searchNotes(query: string) {
-    const needle = query.trim().toLocaleLowerCase();
+    const needle = normalizeMathSearch(query);
     if (!needle) return [];
-    return this.db.notebooks.flatMap((notebook) => notebook.pages.flatMap((page, index) =>
-      page.textBoxes.filter((box) => box.text.toLocaleLowerCase().includes(needle)).map((box) => ({
-        notebookId: notebook.id, notebookTitle: notebook.title, pageId: page.id, pageNumber: index + 1, box,
-      })),
-    ));
+    return this.db.notebooks.flatMap(notebook => notebook.pages.flatMap((page, index) => {
+      const location = { notebookId: notebook.id, notebookTitle: notebook.title, pageId: page.id, pageNumber: index + 1 };
+      const matches = (value: string) => normalizeMathSearch(value).includes(needle);
+      return [
+        ...page.transcripts.filter(t => matches(t.text) || (t.latex !== undefined && matches(t.latex))).map(t => ({
+          ...location, source: "claude" as const, stale: t.stale, transcript: t,
+          box: { ...t.region, text: t.text },
+        })),
+        ...page.textBoxes.filter(b => matches(b.text) || b.alts?.some(matches)).map(box => ({
+          ...location, source: "vision" as const, box,
+        })),
+      ];
+    }));
+  }
+
+  /** Saving the same rectangle replaces its reading and clears its stale flag. */
+  setTranscript(pageId: string, region: PageRegion, text: string, latex?: string): Transcript {
+    const found = this.findPage(pageId);
+    if (!found) throw new Error(`No page ${pageId}`);
+    if (![region.x, region.y, region.w, region.h].every(Number.isFinite) || region.x < 0 || region.y < 0 ||
+      region.w <= 0 || region.h <= 0 || region.x + region.w > PAGE_W || region.y + region.h > PAGE_H) {
+      throw new RangeError(`Transcript region must fit within ${PAGE_W} x ${PAGE_H} page coordinates`);
+    }
+    if (!text.trim()) throw new Error("Transcript text must not be empty");
+    const page = found.page;
+    const at = page.transcripts.findIndex(t => t.region.x === region.x && t.region.y === region.y && t.region.w === region.w && t.region.h === region.h);
+    const transcript: Transcript = {
+      id: at < 0 ? nanoid(10) : page.transcripts[at].id, source: "claude", region: { ...region }, text,
+      ...(latex === undefined ? {} : { latex }), createdAt: now(), snapshotVersion: page.snapshotVersion,
+      ...(page.strokeCount === undefined ? {} : { strokeCount: page.strokeCount }), stale: false,
+    };
+    if (at < 0) page.transcripts.push(transcript);
+    else page.transcripts[at] = transcript;
+    page.updatedAt = now();
+    this.save();
+    return transcript;
+  }
+
+  private invalidateTranscripts(page: Page, strokeCount?: number) {
+    // Uploads expose only a page-wide stroke count, not per-region ink. Flag
+    // every reading on count changes; equal-count replacements cannot be detected.
+    // Missing counts cannot prove freshness, so those uploads are conservative too.
+    for (const t of page.transcripts) {
+      if (strokeCount === undefined || t.strokeCount === undefined || strokeCount !== t.strokeCount) t.stale = true;
+    }
   }
 
   revealHint(pageId: string, itemId: string) {
@@ -534,6 +596,7 @@ export class Store {
     const found = this.findPage(pageId);
     if (!found) throw new Error(`No page ${pageId}`);
     fs.writeFileSync(this.snapshotPath(pageId), png);
+    this.invalidateTranscripts(found.page, strokeCount);
     found.page.snapshotVersion++;
     found.page.inkSyncedAt = now();
     if (strokeCount !== undefined) found.page.strokeCount = strokeCount;
@@ -551,6 +614,7 @@ export class Store {
     const found = this.findPage(pageId);
     if (!found) throw new Error(`No page ${pageId}`);
     fs.writeFileSync(this.drawingPath(pageId), data);
+    this.invalidateTranscripts(found.page, strokeCount);
     found.page.inkSyncedAt = now();
     if (strokeCount !== undefined) found.page.strokeCount = strokeCount;
     this.save();

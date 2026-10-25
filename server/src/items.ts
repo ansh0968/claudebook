@@ -50,7 +50,7 @@ export const ItemSchema = z.union([
   z.object({ type: z.literal("svg"), d: z.string(), color, width, fill, dashed, head: head("none"), head_filled: headFilled, rotation, ...patternFields, group })
     .describe("Raw SVG path data in page coordinates, for figures and diagrams"),
   z.object({ type: z.literal("math"), latex: z.string(), x: z.number(), y: z.number(), size: z.number().optional(), color, anchor, rotation, group })
-    .describe("Typeset math from LaTeX, e.g. x = \\frac{-b \\pm \\sqrt{b^2-4ac}}{2a}. Use this for every equation and corrected working step, and for any symbol, subscript or charge. Chemistry works with mhchem: \\ce{H2SO4}, \\ce{OH-}, \\ce{A + B -> C}. x,y is the top-left, size is the line height, default 36; one line is about 0.55 x size tall, fractions and matrices more. Arrow labels: \\xrightarrow[below]{above} or \\ce{A ->[above][below] B}. One line per item"),
+    .describe("Typeset math from LaTeX, e.g. x = \\frac{-b \\pm \\sqrt{b^2-4ac}}{2a}. Use this for every equation and corrected working step, and for any symbol, subscript or charge. Chemistry works with mhchem: \\ce{H2SO4}, \\ce{OH-}, \\ce{A + B -> C}. x,y is the true ink top-left unless anchor is set; bbox excludes invisible layout padding. size is the line height, default 36; one line is about 0.55 x size tall, fractions and matrices more. Arrow labels: \\xrightarrow[below]{above} or \\ce{A ->[above][below] B}. One line per item"),
   z.object({ type: z.literal("molecule"), smiles: z.string(), x: z.number(), y: z.number(), size: z.number().positive().optional(), show_carbons: z.boolean().optional().describe('Label every carbon. Example: show_carbons:true'), explicit_h: z.boolean().optional().describe('Draw every hydrogen atom and bond. Example: explicit_h:true'), color, rotation, group })
     .describe('Chemical structure from SMILES. Returns atoms (index to [x,y]) and elements maps in page units. x,y is top-left; size is longest side, default 180. Example: {type:"molecule",smiles:"CC(=O)O",x:100,y:200,show_carbons:true}'),
   z.object({ type: z.literal("hint"), x: z.number(), y: z.number(), text: z.string(), label: z.string().optional(), size: z.number().positive().optional(), revealed: z.boolean().optional(), color, group })
@@ -171,8 +171,11 @@ const outlined = (item: ItemInput) => !("fill" in item && item.fill && item.fill
 /** Every key each item type accepts, so unknown keys can be reported instead of silently dropped. */
 const itemKeys = new Map(ItemSchema.options.map((o) => [String((o.shape.type as z.ZodLiteral<string>).value), new Set(Object.keys(o.shape))]));
 
-/** The same item types, but keeping unknown keys so draw_on_page can warn about them. */
-export const LooseItemSchema = z.union(ItemSchema.options.map((o) => (o.description ? o.loose().describe(o.description) : o.loose())) as unknown as [z.ZodTypeAny, z.ZodTypeAny, ...z.ZodTypeAny[]]);
+/** Keep real types first for tool discovery; let malformed items reach per-item validation. */
+export const LooseItemSchema = z.union([
+  ...ItemSchema.options.map((o) => (o.description ? o.loose().describe(o.description) : o.loose())),
+  z.object({ type: z.string() }).loose().describe('Invalid items are skipped individually, e.g. {type:"squiggle"}; use one of the real types above'),
+] as unknown as [z.ZodTypeAny, z.ZodTypeAny, ...z.ZodTypeAny[]]);
 
 export interface ItemWarning { item: number; type?: string; id?: string; warning: string }
 
@@ -185,13 +188,28 @@ export function prepareBatch(raw: Record<string, unknown>[], existing: Item[] = 
   raw.forEach((input, index) => {
     const type = String(input.type);
     const allowed = itemKeys.get(type);
+    if (!allowed) {
+      warnings.push({ item: index, type, warning: `Skipped: unknown type "${type}". Types: ${[...itemKeys.keys()].join(", ")}` });
+      return;
+    }
     const unknown = allowed ? Object.keys(input).filter((k) => !allowed.has(k)) : [];
     if (unknown.length) {
       warnings.push({ item: index, type, warning: `Skipped: ${type} has no ${unknown.map((k) => `"${k}"`).join(", ")}. It accepts ${[...allowed!].join(", ")}` });
       return;
     }
+    // Validate against the known type so errors name its fields, not every union option.
+    const schema = ItemSchema.options.find((o) => String(o.shape.type.value) === type)!;
+    const parsed = schema.safeParse(input);
+    if (!parsed.success) {
+      const details = parsed.error.issues.map((issue) => {
+        const field = issue.path.join(".");
+        return issue.code === "invalid_type" ? `${type} needs "${field}" (${issue.expected})` : `${type} "${field}": ${issue.message}`;
+      });
+      warnings.push({ item: index, type, warning: `Skipped: ${details.join("; ")}` });
+      return;
+    }
     try {
-      const [item] = prepareItems([ItemSchema.parse(input)], [...existing, ...items]);
+      const [item] = prepareItems([parsed.data], [...existing, ...items]);
       itemBBox(item);
       items.push(item);
       indexes.push(index);

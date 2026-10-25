@@ -4,7 +4,7 @@ import { z } from "zod";
 import { LooseItemSchema, itemBBox, itemLabel, moleculeAtomsForDisplay, offPageWarning, prepareBatch, translateItem, type Item, type ItemWarning } from "./items.js";
 import { compileTypst, downloadPdf, savePdf } from "./pdf.js";
 import { pdfTextPage, describePdfText } from "./pdf-text.js";
-import { TYPST_IMPORTS } from "./typst-packages.js";
+import { TYPST_COMPATIBILITY, TYPST_IMPORTS } from "./typst-packages.js";
 import { clampRegion, renderPage, type Region } from "./render.js";
 import { PAGE_H, PAGE_W, type Notebook, type Page, type Store } from "./store.js";
 import { parsePageRegion } from "./regions.js";
@@ -15,13 +15,15 @@ const INSTRUCTIONS = `ClaudeBook is the user's handwritten notebook app on iPad.
 Pages use a fixed coordinate space: x 0..${PAGE_W} left to right, y 0..${PAGE_H} top to bottom.
 Workflow: call get_current_page first (it shows what the user has open, with a labelled blue coordinate grid and the positions of recognized handwriting).
 When checking work or reading small handwriting, zoom into each region (the zoom parameter) before judging it; the full-page image is too small to read every symbol.
+After reading maths from the image, save it with set_transcript so future page descriptions and search can use your reading, e.g. {region:{x:100,y:200,w:400,h:80},text:"2πrh + 4πr²",latex:"2\\\\pi r h + 4\\\\pi r^2"}. Vision is unreliable for maths; zoom in on low-confidence lines and compare alternatives. Recheck stale transcripts against the image and save the same rectangle again to replace them. Transcripts survive snapshots; any page stroke-count change marks them stale (changes elsewhere can flag them, and equal-count edits cannot be detected). Uploads without stroke counts also mark them stale.
+search_notes searches Vision candidates and Claude transcripts using maths-aware spellings, e.g. query:"4pir^2" also finds "4πr²". Results identify source and stale transcript readings.
 When the user says to check their doubts, inspect the open doubts listed on the page, zoom into each marked region, explain it, and resolve_doubt only after addressing it.
 Use those coordinates to aim. Prefer simple shapes: an ellipse with padding around a mistake, an arrow pointing at it, short text next to it.
-Write equations and corrected working with "math" items (LaTeX), one line per item; use "text" items for words. A single line of math is about 0.55 x size tall.
+Write equations and corrected working with "math" items (LaTeX), one line per item; use "text" items for words. A single line of math is about 0.55 x size tall. Math x,y positions the true ink top-left (or the chosen anchor), including tall fractions; e.g. {type:"math",latex:"x^2",x:300,y:500,anchor:"center"} centers its ink at (300,500).
 Text supports Unicode symbols with font fallbacks, Unicode sub/superscripts and inline scripts such as H_2O, OH^- and x^{2}. If a text character is unsupported the draw fails clearly; use math for that symbol.
 For chemistry use mhchem inside math items: \\ce{H2O}, \\ce{OH-}, \\ce{SO4^2-}, \\ce{^{14}_{6}C}, \\ce{A + B -> C}, \\ce{A <=> B}, \\ce{A ->[above][below] B}.
 Your drawings live on a separate layer the user can hide or undo, so don't be shy, but keep the page readable and never cover the user's writing with text.
-Every draw returns each item's id and bbox, plus per-item warnings (bad LaTeX, unknown keys, off-page): read them, they mean an item was skipped or misplaced. x,y on text and math is the top-left unless you set anchor. Use dry_run to measure before placing, and offset to shift a whole batch.
+Every draw returns each item's id and bbox, plus per-item warnings (unknown types, invalid fields, bad LaTeX, unknown keys, off-page): read them, they mean an item was skipped or misplaced. Invalid items are skipped individually, including in dry_run; e.g. a valid rect beside {type:"squiggle"} still draws. x,y on text and math is the top-left unless you set anchor. Use dry_run to measure before placing, and offset to shift a whole batch.
 After drawing, call view_page to check the result and fix anything that landed in the wrong place.
 Page descriptions list item ids, labels and bounding boxes. Use erase_my_drawings with ids or group to remove selected items, move_items with ids, dx, dy to reposition them, and copy_items to duplicate them. Name related drawings with an item group.
 Use curved_arrow (alias curly) for reaction mechanisms: {type:"curly",from:[100,200],to:[250,200],bend:-60,head:"half"}. head:"full" draws an electron pair; half_head:true remains supported.
@@ -34,6 +36,7 @@ To give the user something to write on (worksheets, notes, practice questions), 
 PDF-backed pages include their own text with page-coordinate line boxes, filtered when zoomed. This is separate from recognized handwriting; scanned pages may have no text layer.
 create_pdf ships these exact Typst imports offline (Typst 0.13.1):
 ${TYPST_IMPORTS}
+${TYPST_COMPATIBILITY}
 Notebook/page management: use list_pages to get stable page ids, delete_pages to remove requested pages (including user ink), reorder_pages with a complete ordered id list, duplicate_pages for independent copies, and move_pages to move existing page ids to another notebook. after_page counts target pages before insertion (0=front, default=end), after removal for moves. For a notebook the user explicitly wants deleted, use delete_notebook with direct:true; otherwise omit direct to request iPad confirmation. Empty notebooks can be refilled with add_pages.
 Example drawing: #canvas({ draw.line((0,0),(2,1)); draw.circle((1,1),radius:0.4) }). Chemistry: #ch("H2O").
 The library is organised in folders (list_notebooks shows them). Put new notebooks and PDFs in the folder that fits with the folder parameter, and file notebooks with move_notebook. Scratch pads are temporary and delete themselves a week after their last edit unless the user keeps them.`;
@@ -81,13 +84,25 @@ export function buildMcpServer(store: Store) {
       try { lines.push(...describePdfText(await pdfTextPage(store, page.pdf.file, page.pdf.page), region)); }
       catch (error) { lines.push(`PDF text unavailable: ${(error as Error).message}`); }
     }
-    // When zoomed, only list handwriting that overlaps the zoomed area.
-    const boxes = region
-      ? page.textBoxes.filter((b) => b.x < region.x + region.w && b.x + b.w > region.x && b.y < region.y + region.h && b.y + b.h > region.y)
-      : page.textBoxes;
+    const overlaps = (b: Region) => !region || (b.x < region.x + region.w && b.x + b.w > region.x && b.y < region.y + region.h && b.y + b.h > region.y);
+    const transcripts = page.transcripts.filter(t => overlaps(t.region));
+    if (transcripts.length) {
+      lines.push("Claude's transcripts (x, y, w, h):");
+      for (const t of transcripts) {
+        const r = t.region;
+        lines.push(`- ${t.id}: [${r.x}, ${r.y}, ${r.w}, ${r.h}] ${t.text}${t.latex ? ` (LaTeX: ${t.latex})` : ""}${t.stale ? " (stale: ink may have changed; zoom in and save this region again)" : ""}`);
+      }
+    }
+    // A stale reading must not suppress current Vision text. Partial coverage
+    // also keeps the entire line, so neighboring writing does not disappear.
+    const boxes = page.textBoxes.filter(b => overlaps(b) && !transcripts.some(t => !t.stale &&
+      t.region.x <= b.x && t.region.y <= b.y && t.region.x + t.region.w >= b.x + b.w && t.region.y + t.region.h >= b.y + b.h));
     if (boxes.length) {
       lines.push("Recognized handwriting (x, y, w, h):");
-      for (const b of boxes) lines.push(`- [${Math.round(b.x)}, ${Math.round(b.y)}, ${Math.round(b.w)}, ${Math.round(b.h)}] ${b.text}`);
+      for (const b of boxes) {
+        const alts = b.alts?.filter(alt => alt !== b.text);
+        lines.push(`- [${Math.round(b.x)}, ${Math.round(b.y)}, ${Math.round(b.w)}, ${Math.round(b.h)}] ${b.text}${b.confidence !== undefined && b.confidence < 0.7 ? " (low confidence, zoom in)" : ""}${alts?.length ? ` (alternatives: ${alts.join(" | ")})` : ""}`);
+      }
     }
     if (page.claudeLayer.length) {
       lines.push("Your existing items (bbox is {x,y,w,h} in page units):");
@@ -224,7 +239,7 @@ export function buildMcpServer(store: Store) {
       title: "Draw on a page",
       description: `Add ink to a page on your own layer: circles, straight or curved arrows, lines, paths, highlights, text, LaTeX math, SMILES molecules, hidden hints or SVG paths. Returns every item's id and bbox, and per-item warnings: an item with bad LaTeX/SMILES/SVG or an unknown key is skipped while the rest draw, and items that leave the page are flagged. Coordinates are 0..${PAGE_W} x 0..${PAGE_H}. Defaults to the open page.`,
       inputSchema: {
-        items: z.array(LooseItemSchema).min(1),
+        items: z.array(LooseItemSchema).min(1).describe('Drawing items. Unknown types and invalid fields are skipped with indexed warnings; e.g. [{type:"rect",x:100,y:100,w:50,h:40},{type:"squiggle"}] draws the rect'),
         offset,
         dry_run: z.boolean().optional().describe("Measure only: return ids, bboxes and warnings without drawing anything"),
         page_id: z.string().optional(),
@@ -352,11 +367,33 @@ export function buildMcpServer(store: Store) {
   );
 
   server.registerTool(
+    "set_transcript",
+    {
+      title: "Save a reading of handwritten maths",
+      description: "After zooming in and reading maths from the image, save your transcript so descriptions and search can find it later. Survives snapshots; the same rectangle replaces its previous reading. Page-wide stroke-count changes (or uploads without counts) flag it stale; same-count edits cannot be detected. Recheck stale readings before saving again. Example: {region:{x:100,y:200,w:400,h:80},text:'2πrh + 4πr²',latex:'2\\pi r h + 4\\pi r^2'}.",
+      inputSchema: {
+        page_id: z.string().optional().describe("Page id; omit for the open page"),
+        region: z.object({ x: z.number().finite(), y: z.number().finite(), w: z.number().finite().positive(), h: z.number().finite().positive() })
+          .describe("Rectangle containing the writing, in 1000 x 1414 page coordinates, e.g. {x:100,y:200,w:400,h:80}"),
+        text: z.string().trim().min(1).max(20000).describe("Your reading, e.g. 2πrh + 4πr²"),
+        latex: z.string().trim().min(1).max(20000).optional().describe("Optional LaTeX for search, e.g. 2\\pi r h + 4\\pi r^2"),
+      },
+    },
+    async ({ page_id, region, text: reading, latex }) => {
+      const found = resolvePage(page_id);
+      if (!found) return fail("Page not found.");
+      const crop = parsePageRegion(region);
+      if (!crop) return fail(`Region must fit within ${PAGE_W} x ${PAGE_H} page coordinates.`);
+      return text(JSON.stringify({ page_id: found.page.id, transcript: store.setTranscript(found.page.id, crop, reading, latex) }));
+    },
+  );
+
+  server.registerTool(
     "search_notes",
     {
-      title: "Search recognized handwriting",
-      description: "Find matching recognized handwriting across all notebooks (case insensitive). Returns notebook and page ids, page numbers and the matching text boxes in page coordinates. Use view_page with zoom to inspect a match.",
-      inputSchema: { query: z.string().trim().min(1) },
+      title: "Search handwriting and maths transcripts",
+      description: "Search Vision text and alternatives, plus Claude transcripts and LaTeX, across notebooks. Ignores case/spacing and normalizes π, powers/subscripts, multiplication and fractions. Example: query:'4pir^2' finds '4πr²'. Results include source (claude or vision), stale on transcripts, notebook/page ids and matching boxes in page coordinates. Use view_page with zoom to verify stale or uncertain matches.",
+      inputSchema: { query: z.string().trim().min(1).describe("Words or maths, e.g. 2πrh or 4pir^2") },
       annotations: { readOnlyHint: true },
     },
     async ({ query }) => text(JSON.stringify({ results: store.searchNotes(query) })),
@@ -512,8 +549,8 @@ export function buildMcpServer(store: Store) {
         "Typeset a document and drop it into ClaudeBook as notebook pages the user can write on. Use it for worksheets, revision notes and practice questions. " +
         "Write Typst markup, not LaTeX (math is $x^2$ inline or $ x = (-b plus.minus sqrt(b^2 - 4a c)) / (2a) $ on its own line, #pagebreak() for new pages). " +
         "Pages are A4. Leave generous blank space under each question for handwriting, e.g. #v(6cm). Makes a new notebook unless notebook_id is given (then pages are appended). " +
-        `Offline packages (exact imports):\n${TYPST_IMPORTS}\nExample: #canvas({ draw.line((0,0),(2,1)); draw.circle((1,1),radius:0.4) }). PDF text with coordinates appears in view_page/get_current_page.`,
-      inputSchema: { title: z.string(), typst: z.string().describe(`Complete Typst source. Offline package imports:\n${TYPST_IMPORTS}`), notebook_id: z.string().optional(), folder: folderParam },
+        `Offline packages (exact imports):\n${TYPST_IMPORTS}\n${TYPST_COMPATIBILITY}\nExample: #canvas({ draw.line((0,0),(2,1)); draw.circle((1,1),radius:0.4) }). PDF text with coordinates appears in view_page/get_current_page.`,
+      inputSchema: { title: z.string(), typst: z.string().describe(`Complete Typst source. Offline package imports:\n${TYPST_IMPORTS}\n${TYPST_COMPATIBILITY}`), notebook_id: z.string().optional(), folder: folderParam },
     },
     async ({ title, typst, notebook_id, folder }) => {
       const prefixed = !/#set page\(/.test(typst);
