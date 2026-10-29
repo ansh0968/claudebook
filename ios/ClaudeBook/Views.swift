@@ -529,6 +529,9 @@ struct PageThumbnail: View {
     }
 
     private func render() async -> UIImage {
+        for file in Set(page.claudeLayer.filter { $0.type == "image" }.compactMap(\.file)) {
+            _ = await ImageCache.load(file)
+        }
         var pdf: CGPDFPage?
         if let ref = page.pdf { pdf = await PDFCache.page(ref) }
         let drawing = LocalDrawings.load(page.id) ?? PKDrawing()
