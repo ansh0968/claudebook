@@ -714,9 +714,9 @@ enum Geo {
         let mean = sides.reduce(0, +) / CGFloat(n)
         let spread = sqrt(sides.reduce(CGFloat(0)) { $0 + ($1 - mean) * ($1 - mean) } / CGFloat(n)) / mean
         // Triangles are often meant to be isosceles or scalene, so only nearly perfect ones become equilateral.
-        guard spread < (n == 3 ? 0.07 : 0.18) else { return nil }
+        guard spread < (n == 3 ? 0.07 : 0.22) else { return nil }
         let expected = 360 / CGFloat(n)
-        for i in 0..<n where abs(turn(p[(i + n - 1) % n], p[i], p[(i + 1) % n]) - expected) > (n == 3 ? 7 : 15) { return nil }
+        for i in 0..<n where abs(turn(p[(i + n - 1) % n], p[i], p[(i + 1) % n]) - expected) > (n == 3 ? 7 : 20) { return nil }
         let c = centroid(p)
         let radius = p.reduce(CGFloat(0)) { $0 + $1.distance(to: c) } / CGFloat(n)
         let step = 2 * CGFloat.pi / CGFloat(n)
