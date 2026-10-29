@@ -209,18 +209,22 @@ struct SparkShape: Shape {
         let c = CGPoint(x: rect.midX, y: rect.midY)
         let r = min(rect.width, rect.height) / 2
         var p = Path()
+        // Typed so the Double overloads are picked; CGFloat math otherwise makes cos/sin ambiguous.
+        let cosD: (Double) -> Double = cos, sinD: (Double) -> Double = sin
         for i in 0..<rays {
             // Slightly uneven ray lengths and angles make it feel drawn rather than generated.
-            let wobble = [1.0, 0.86, 0.95, 0.8, 1.0, 0.9, 0.84, 0.97, 0.88, 0.93, 0.82][i % 11]
-            let a = Double(i) / Double(rays) * 2 * .pi - .pi / 2 + (i % 2 == 0 ? 0.04 : -0.03)
-            let len = r * wobble
-            let half = 0.11
-            let tip = CGPoint(x: c.x + cos(a) * len, y: c.y + sin(a) * len)
-            let l = CGPoint(x: c.x + cos(a - half) * r * 0.22, y: c.y + sin(a - half) * r * 0.22)
-            let rr = CGPoint(x: c.x + cos(a + half) * r * 0.22, y: c.y + sin(a + half) * r * 0.22)
+            let wobble: [CGFloat] = [1.0, 0.86, 0.95, 0.8, 1.0, 0.9, 0.84, 0.97, 0.88, 0.93, 0.82]
+            let jitter: CGFloat = i % 2 == 0 ? 0.04 : -0.03
+            let a: CGFloat = CGFloat(i) / CGFloat(rays) * 2 * .pi - .pi / 2 + jitter
+            let len = r * wobble[i % wobble.count]
+            let half: CGFloat = 0.11
+            let ca = CGFloat(cosD(Double(a))), sa = CGFloat(sinD(Double(a)))
+            func at(_ angle: CGFloat, _ dist: CGFloat) -> CGPoint {
+                CGPoint(x: c.x + CGFloat(cosD(Double(angle))) * dist, y: c.y + CGFloat(sinD(Double(angle))) * dist)
+            }
             p.move(to: c)
-            p.addLine(to: l)
-            p.addQuadCurve(to: rr, control: CGPoint(x: tip.x + cos(a) * r * 0.05, y: tip.y + sin(a) * r * 0.05))
+            p.addLine(to: at(a - half, r * 0.22))
+            p.addQuadCurve(to: at(a + half, r * 0.22), control: CGPoint(x: c.x + ca * (len + r * 0.05), y: c.y + sa * (len + r * 0.05)))
             p.closeSubpath()
         }
         p.addEllipse(in: CGRect(x: c.x - r * 0.24, y: c.y - r * 0.24, width: r * 0.48, height: r * 0.48))
