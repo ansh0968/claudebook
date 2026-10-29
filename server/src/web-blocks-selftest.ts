@@ -34,7 +34,7 @@ try {
   assert.deepEqual(added.bbox, { x: 100, y: 200, w: 700, h: 400 });
   assert.equal(item.autoplay, true);
   const fragment = fs.readFileSync(blockPath(store, item.file), "utf8");
-  assert.match(fragment, /viewport/); assert.match(fragment, /Content-Security-Policy/); assert.match(fragment, /height:100%/);
+  assert.match(fragment, /width=700,height=400/); assert.match(fragment, /Content-Security-Policy/); assert.match(fragment, /height:100%/);
   assert.equal(fragment.match(/data-claudebook-bridge/g)?.length, 1);
   assert.ok(fragment.indexOf("Content-Security-Policy") < fragment.indexOf("<button>"));
   const full = addBlock(store, page.id, { x: 0,y: 0,w: 300,h: 200,title: "Full",html: "<!doctype html><html><head><title>Document</title></head><body>Full document</body></html>" });
@@ -57,6 +57,7 @@ try {
   const fixed = JSON.parse(await call("update_web_block", { id: item.id,html: "<canvas>Fixed</canvas>",title: "Fixed",w: 650 }));
   assert.equal(fixed.id, item.id); assert.equal(fixed.rev, 2);
   item = page.claudeLayer.find(i => i.id === added.id)!; if (item.type !== "web") throw new Error("Expected web item");
+  assert.match(fs.readFileSync(blockPath(store,item.file),"utf8"), /width=650,height=400/);
   assert.equal(item.x, 100); assert.equal(item.y, 200); assert.equal(item.w, 650); assert.equal(item.poster, undefined); assert.deepEqual(item.logs, []);
   assert.ok(!fs.existsSync(blockPath(store, firstFile)));
   assert.doesNotMatch(await call("get_current_page", {}), /ReferenceError: g/);

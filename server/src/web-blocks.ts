@@ -13,11 +13,11 @@ import type { Store } from "./store.js";
 export const BLOCK_CSP = "default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval' https://cdnjs.cloudflare.com https://cdn.jsdelivr.net https://unpkg.com; style-src 'unsafe-inline' https://cdnjs.cloudflare.com https://cdn.jsdelivr.net https://unpkg.com; img-src data: blob: https://cdnjs.cloudflare.com https://cdn.jsdelivr.net https://unpkg.com; media-src data: blob: https://cdnjs.cloudflare.com https://cdn.jsdelivr.net https://unpkg.com; font-src data: https://cdnjs.cloudflare.com https://cdn.jsdelivr.net https://unpkg.com; connect-src https://cdnjs.cloudflare.com https://cdn.jsdelivr.net https://unpkg.com; worker-src blob:; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'";
 const bridge = `<script data-claudebook-bridge>(()=>{if(window.__claudebookBridge)return;window.__claudebookBridge=true;let count=0;const send=(kind,message)=>{if(count++>=100)return;try{window.webkit?.messageHandlers?.claudebook?.postMessage({kind,message:String(message).slice(0,1000)})}catch{}};const printable=v=>{try{return typeof v==='string'?v:JSON.stringify(v)}catch{return String(v)}};for(const kind of ['error','warn']){const original=console[kind];console[kind]=(...args)=>{send(kind,args.map(printable).join(' '));original.apply(console,args)}}window.addEventListener('error',e=>send('error',e.message+' (line '+e.lineno+')'));window.addEventListener('unhandledrejection',e=>send('error','Unhandled rejection: '+printable(e.reason)));window.addEventListener('load',()=>{requestAnimationFrame(()=>requestAnimationFrame(()=>send('poster-ready','ready')))});})();</script>`;
 
-export function wrapBlock(html: string) {
+export function wrapBlock(html: string, viewport?: { w: number; h: number }) {
   if (Buffer.byteLength(html, "utf8") > 1024 * 1024) throw new Error("html must be at most 1 MB (UTF-8)");
   // Prefix the policy before *any* authored content, including malformed full documents and scripts.
   // Browser HTML parsing merges a supplied full document's body into this skeleton.
-  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="${BLOCK_CSP}"><style>html,body{margin:0;height:100%;color-scheme:light dark}</style>${bridge}</head><body>${html}</body></html>`;
+  return `<!doctype html><html><head><meta charset="utf-8"><meta data-claudebook-viewport name="viewport" content="${viewport ? `width=${viewport.w},height=${viewport.h}` : "width=device-width,initial-scale=1"}"><meta http-equiv="Content-Security-Policy" content="${BLOCK_CSP}"><style>html,body{margin:0;height:100%;color-scheme:light dark}</style>${bridge}</head><body>${html}</body></html>`;
 }
 export function blockPath(store: Store, file: string) {
   if (!/^[a-f0-9]{64}\.(html|png)$/.test(file)) throw new Error("Invalid block file");
@@ -42,7 +42,7 @@ export const updateBlockSchema = z.object({ page_id: z.string().optional().descr
 export function addBlock(store: Store, pageId: string, raw: unknown) {
   const { page_id: _, html, ...fields } = addBlockSchema.parse(raw);
   if (!store.findPage(pageId)) throw new Error("Page not found");
-  const file = writeAsset(store, Buffer.from(wrapBlock(html)), "html");
+  const file = writeAsset(store, Buffer.from(wrapBlock(html, fields)), "html");
   const item: Item = { type: "web", ...fields, autoplay: fields.autoplay ?? true, file, rev: 1, id: nanoid(8), createdAt: new Date().toISOString() };
   store.addClaudeItems(pageId, [item]);
   return item;
@@ -50,7 +50,11 @@ export function addBlock(store: Store, pageId: string, raw: unknown) {
 export function updateBlock(store: Store, pageId: string, raw: unknown) {
   const { page_id: _, id, html, ...fields } = updateBlockSchema.parse(raw);
   const old = findBlock(store, pageId, id);
-  const file = html === undefined ? old.file : writeAsset(store, Buffer.from(wrapBlock(html)), "html");
+  const viewport = { w: fields.w ?? old.w, h: fields.h ?? old.h };
+  const document = html === undefined
+    ? fs.readFileSync(blockPath(store, old.file), "utf8").replace(/<meta data-claudebook-viewport name="viewport" content="[^"]*">/, `<meta data-claudebook-viewport name="viewport" content="width=${viewport.w},height=${viewport.h}">`)
+    : wrapBlock(html, viewport);
+  const file = writeAsset(store, Buffer.from(document), "html");
   const item: Item = { ...old, ...fields, file, rev: old.rev + 1, poster: undefined, posterAt: undefined, logs: [] };
   store.replaceClaudeItem(pageId, item);
   return item;
