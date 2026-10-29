@@ -25,7 +25,7 @@ enum HintChip {
         let pill = UIBezierPath(roundedRect: chip, cornerRadius: h / 2).cgPath
         ctx.saveGState()
         ctx.addPath(pill)
-        ctx.setFillColor(color.withAlphaComponent(opened ? (dark ? 0.08 : 0.05) : (dark ? 0.2 : 0.12)).cgColor)
+        ctx.setFillColor(color.withAlphaComponent(opened ? (dark ? 0.14 : 0.05) : (dark ? 0.28 : 0.12)).cgColor)
         ctx.fillPath()
         ctx.addPath(pill)
         ctx.setStrokeColor(color.withAlphaComponent(opened ? 0.6 : 1).cgColor)
@@ -35,7 +35,7 @@ enum HintChip {
         ctx.strokePath()
         ctx.restoreGState()
 
-        let ink = opened ? color.withAlphaComponent(0.75) : color
+        let ink = opened ? color.withAlphaComponent(dark ? 0.9 : 0.75) : color
         UIGraphicsPushContext(ctx)
         let iconBox = CGRect(x: chip.minX + h * 0.3, y: chip.midY - h * 0.25, width: h * 0.5, height: h * 0.5)
         let config = UIImage.SymbolConfiguration(pointSize: h * 0.5, weight: .semibold)

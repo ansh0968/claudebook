@@ -60,6 +60,8 @@ struct PageGrid: View {
                         }
                     }
                     .tag(page.id)
+                    // Selecting uses checkmarks only; the red delete badges would be a second, competing control.
+                    .deleteDisabled(selecting)
                     .listRowBackground(selection.contains(page.id) ? Theme.accentSoft : Theme.surface)
                     .contextMenu { if !selecting { actions(page, index: index) } }
                 }
