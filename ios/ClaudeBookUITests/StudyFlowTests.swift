@@ -457,7 +457,8 @@ final class StudyFlowTests: XCTestCase {
         }
         try openPicker()
         app.buttons["paper.color"].tap()
-        app.buttons["Black"].tap()
+        // PencilKit's palette also has a "Black" swatch, in its own window.
+        app.windows.element(boundBy: 0).buttons["Black"].tap()
         try selectPattern("cornell")
         let cornell: SmokeNotebook = try await eventually {
             let current: SmokeNotebook = try await self.api.request("notebooks/\(notebook.id)")
