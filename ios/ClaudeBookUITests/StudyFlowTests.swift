@@ -368,7 +368,7 @@ final class StudyFlowTests: XCTestCase {
         try requireReady(app.webViews.buttons["Clicked"])
         let _: SmokeItem = try await eventually {
             let current: SmokeNotebook = try await self.api.request("notebooks/\(notebook.id)")
-            return current.pages[0].claudeLayer.first { $0.id == block.id && $0.logs?.contains(where: { $0.contains("button changed") }) == true && $0.poster != nil && $0.logs?.contains(where: { $0.contains("viewport 800x400") }) == true }
+            return current.pages[0].claudeLayer.first { $0.id == block.id && $0.logs?.contains(where: { $0.contains("button changed") }) == true && $0.poster != nil && $0.logs?.contains(where: { $0.contains("initial viewport 800x400") }) == true }
         }
         let rendered = XCTAttachment(screenshot: app.screenshot()); rendered.name = "web-live-button"; rendered.lifetime = .keepAlways; add(rendered)
         let controls = app.buttons["web.menu.\(block.id)"]

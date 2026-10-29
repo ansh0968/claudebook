@@ -184,7 +184,7 @@ final class WebBlockCard: UIView, WKNavigationDelegate, WKUIDelegate {
                 let handler = WebBridge(); handler.card = self; self.bridge = handler; config.userContentController.add(handler, name: "claudebook")
                 let width = self.item.w ?? 800, height = self.item.h ?? 500
                 // A page-unit CSS viewport gives layouts the same geometry in-page and fullscreen.
-                let viewport = "document.addEventListener('DOMContentLoaded',()=>{document.querySelectorAll('meta[name=viewport]').forEach(m=>m.remove());let m=document.createElement('meta');m.name='viewport';m.content='width=\(width),height=\(height)';document.head.appendChild(m)});"
+                let viewport = "(()=>{const fixed='width=\(width),height=\(height)';const enforce=()=>{const own=document.querySelector('meta[data-claudebook-viewport]');if(!own)return;document.querySelectorAll('meta[name=viewport]').forEach(m=>{if(m!==own)m.remove()});if(own.content!==fixed)own.content=fixed};new MutationObserver(enforce).observe(document,{subtree:true,childList:true,attributes:true,attributeFilter:['content','name']});document.addEventListener('DOMContentLoaded',enforce)})();"
                 config.userContentController.addUserScript(WKUserScript(source: viewport, injectionTime: .atDocumentStart, forMainFrameOnly: true))
                 let view = WKWebView(frame: self.bounds, configuration: config)
                 view.navigationDelegate = self; view.uiDelegate = self; view.scrollView.isScrollEnabled = false
