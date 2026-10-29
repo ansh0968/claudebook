@@ -450,7 +450,7 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
         if !first && notebook.pages.map(\.id) == pages.map(\.id) {
             let changedPaper = notebook.pages.filter { next in pages.contains { $0.id == next.id && ($0.background != next.background || $0.paper != next.paper) } }.map(\.id)
             pages = notebook.pages
-            PendingUploads.all.formUnion(changedPaper.filter { LocalDrawings.exists($0) })
+            PendingUploads.all.formUnion(pages.filter { changedPaper.contains($0.id) && canRefreshPaperSnapshot($0) }.map(\.id))
             if !changedPaper.isEmpty { scheduleUpload(delay: 0.2) }
             for (id, views) in onScreen {
                 if let page = pages.first(where: { $0.id == id }) { views.paper.style = style(for: page); views.claude.update(items: page.claudeLayer, dark: page.usesDarkInkPalette(appDark: dark), doubts: page.doubts ?? []) }
@@ -658,8 +658,14 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
 
     /// Fresh install or new device: pull each page's ink backup from the server.
     /// Rebuild paper-baked snapshots only after the local ink is known, including after an offline change.
+    private func canRefreshPaperSnapshot(_ page: Page) -> Bool {
+        // An empty local file may be a placeholder for a legacy snapshot with no raw ink backup.
+        // Only replace that snapshot when we have actual strokes or the server confirms it is empty.
+        LocalDrawings.exists(page.id) && (drawings[page.id]?.strokes.isEmpty == false || page.strokeCount == 0 || page.snapshotVersion == 0)
+    }
+
     private func refreshPaperSnapshots() {
-        let stale = pages.filter { $0.paperSnapshotStale == true && LocalDrawings.exists($0.id) }.map(\.id)
+        let stale = pages.filter { $0.paperSnapshotStale == true && canRefreshPaperSnapshot($0) }.map(\.id)
         if !stale.isEmpty { PendingUploads.all.formUnion(stale); scheduleUpload(delay: 0.5) }
     }
 
