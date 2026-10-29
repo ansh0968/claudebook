@@ -29,6 +29,8 @@ const chemistryArrow = { from: pt, to: pt, bend: z.number().optional().describe(
 
 // z.union, not discriminatedUnion: the latter becomes `oneOf`, and OpenAI's tool schemas only take `anyOf`.
 export const ItemSchema = z.union([
+  z.object({ type: z.literal("image"), x: z.number(), y: z.number(), w: z.number().positive(), h: z.number().positive(), file: z.string(), fit: z.enum(["contain", "cover", "stretch"]).optional(), opacity: z.number().min(0).max(1).optional(), alt: z.string().optional(), rotation, group })
+    .describe('Stored raster image; use place_image to download/crop/store it. draw_on_page skips image items'),
   ...GraphSchemas,
   ...PhysicsSchemas,
   z.object({ type: z.literal("path"), points: z.array(pt).min(2), color, width, closed: z.boolean().optional(), smooth: z.boolean().optional(), dashed, head: head("none"), head_filled: headFilled, group })
@@ -187,6 +189,10 @@ export function prepareBatch(raw: Record<string, unknown>[], existing: Item[] = 
   const items: Item[] = [], indexes: number[] = [], warnings: ItemWarning[] = [];
   raw.forEach((input, index) => {
     const type = String(input.type);
+    if (type === "image") {
+      warnings.push({ item: index, type, warning: "Skipped: use place_image for images (URL, base64 or page crop)" });
+      return;
+    }
     const allowed = itemKeys.get(type);
     if (!allowed) {
       warnings.push({ item: index, type, warning: `Skipped: unknown type "${type}". Types: ${[...itemKeys.keys()].join(", ")}` });
@@ -268,7 +274,7 @@ function unrotatedBBox(item: Item): BBox {
       return pathBounds((shape.d ?? "") + (shape.head_d ?? ""), padding);
     }
     case "ellipse": return pointBounds([[item.center[0] - item.rx, item.center[1] - (item.ry ?? item.rx)], [item.center[0] + item.rx, item.center[1] + (item.ry ?? item.rx)]], padding);
-    case "rect": case "highlight": return pointBounds([[item.x, item.y], [item.x + item.w, item.y + item.h]], padding);
+    case "image": case "rect": case "highlight": return pointBounds([[item.x, item.y], [item.x + item.w, item.y + item.h]], padding);
     case "svg": return pathBounds(item.d + (item.head_d ?? ""), item.head_d ? Math.max(padding, (item.width ?? 3) / 2) : padding);
     default: {
       const shape = item.d === undefined ? prepareItems([item])[0] : item;
@@ -282,7 +288,7 @@ function unrotatedBBox(item: Item): BBox {
 export function itemLabel(item: Item): string {
   const value = item.type === "hint" ? (item.revealed ? item.text : item.label ?? "Hint")
     : item.type === "text" ? item.text : item.type === "math" ? item.latex
-    : item.type === "molecule" ? item.smiles : item.group ?? item.type;
+    : item.type === "molecule" ? item.smiles : item.type === "image" ? item.alt ?? "image" : item.group ?? item.type;
   return value.replace(/\s+/g, " ").slice(0, 80);
 }
 
@@ -314,7 +320,7 @@ export function translateItem(item: Item, dx: number, dy: number): Item {
   return moved;
 }
 
-type RenderItem = ItemInput & { d?: string; head_d?: string; head_filled?: boolean; parts?: Part[]; rotation_center?: Point };
+type RenderItem = ItemInput & { d?: string; head_d?: string; head_filled?: boolean; parts?: Part[]; rotation_center?: Point; image_href?: string };
 export function itemToSvg(item: RenderItem): string {
   if ("rotation" in item && item.rotation) {
     const prepared = item.rotation_center ? item : prepareItems([item])[0];
@@ -326,7 +332,7 @@ export function itemToSvg(item: RenderItem): string {
 function unrotatedSvg(item: RenderItem): string {
   if (item.parts) return partsToSvg(item.parts);
   if ("fill_pattern" in item && item.fill_pattern) return partsToSvg(prepareItems([item])[0].parts!);
-  const c = esc(item.color ?? DEFAULT_COLOR);
+  const c = esc(("color" in item ? item.color : undefined) ?? DEFAULT_COLOR);
   const w = "width" in item && item.width ? item.width : 3;
   const strokeOf = (color: string) => `stroke="${color}" stroke-width="${w}" stroke-linecap="round" stroke-linejoin="round"`;
   const stroke = strokeOf(c);
@@ -334,6 +340,10 @@ function unrotatedSvg(item: RenderItem): string {
   // Heads are never dashed; filled heads are also stroked so their tips match the line's round cap.
   const heads = item.head_d ? `<path d="${item.head_d}" fill="${"head_filled" in item && item.head_filled ? c : "none"}" ${stroke}/>` : "";
   switch (item.type) {
+    case "image": {
+      const href = item.image_href ?? `/api/images/${encodeURIComponent(item.file)}`;
+      return `<svg x="${item.x}" y="${item.y}" width="${item.w}" height="${item.h}" overflow="hidden"><image href="${esc(href)}" width="${item.w}" height="${item.h}" opacity="${item.opacity ?? 1}" preserveAspectRatio="${item.fit === "stretch" ? "none" : item.fit === "cover" ? "xMidYMid slice" : "xMidYMid meet"}"/></svg>`;
+    }
     case "spring": case "ground": case "axes": case "plot": case "shade": case "angle": case "point": return partsToSvg(prepareItems([item])[0].parts!);
     case "path":
       return `<path d="${pathData(item)}" fill="none" ${stroke}${dash}/>${heads}`;

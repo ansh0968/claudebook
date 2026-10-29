@@ -7,6 +7,7 @@ import { promisify } from "node:util";
 import { nanoid } from "nanoid";
 import sharp from "sharp";
 import { PAGE_H, PAGE_W, type Store } from "./store.js";
+import { downloadBytes } from "./download.js";
 import { typstFailureMessage } from "./typst-packages.js";
 
 const run = promisify(execFile);
@@ -78,25 +79,5 @@ export async function compileTypst(source: string, assets: Record<string, Buffer
   }
 }
 
-const MAX_DOWNLOAD = 50 * 1024 * 1024;
-
-/** Download a PDF over https, refusing local/private hosts and anything over 50MB. */
-export async function downloadPdf(url: string) {
-  const u = new URL(url);
-  if (u.protocol !== "https:") throw new Error("Only https URLs are allowed");
-  const host = u.hostname.replace(/^\[|\]$/g, "");
-  if (/^(localhost|0\.|10\.|127\.|169\.254\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|::1$|f[cd][0-9a-f]{2}:|fe80:)/i.test(host) || !host.includes(".") && !host.includes(":")) {
-    throw new Error("That host isn't allowed");
-  }
-  const res = await fetch(u, { signal: AbortSignal.timeout(60_000), redirect: "follow" });
-  if (!res.ok || !res.body) throw new Error(`Download failed: HTTP ${res.status}`);
-  if (Number(res.headers.get("content-length") ?? 0) > MAX_DOWNLOAD) throw new Error("PDF is larger than 50MB");
-  const chunks: Buffer[] = [];
-  let total = 0;
-  for await (const chunk of res.body as unknown as AsyncIterable<Uint8Array>) {
-    total += chunk.length;
-    if (total > MAX_DOWNLOAD) throw new Error("PDF is larger than 50MB");
-    chunks.push(Buffer.from(chunk));
-  }
-  return Buffer.concat(chunks);
-}
+/** Download a PDF using the same DNS-pinned, redirect-safe guard as images. */
+export const downloadPdf = (url: string) => downloadBytes(url, { maxBytes: 50 * 1024 * 1024, label: "PDF" });

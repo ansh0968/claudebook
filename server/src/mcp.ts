@@ -9,6 +9,7 @@ import { clampRegion, renderPage, type Region } from "./render.js";
 import { PAGE_H, PAGE_W, type Notebook, type Page, type Store } from "./store.js";
 import { parsePageRegion } from "./regions.js";
 import { logMistake } from "./study.js";
+import { registerImageTools } from "./images.js";
 import { registerPageTools } from "./page-management.js";
 
 import { registerPaperTools, backgroundSchema, paperSchema } from "./paper-tools.js";
@@ -27,6 +28,7 @@ Text supports Unicode symbols with font fallbacks, Unicode sub/superscripts and 
 For chemistry use mhchem inside math items: \\ce{H2O}, \\ce{OH-}, \\ce{SO4^2-}, \\ce{^{14}_{6}C}, \\ce{A + B -> C}, \\ce{A <=> B}, \\ce{A ->[above][below] B}.
 Your drawings live on a separate layer the user can hide or undo, so don't be shy, but keep the page readable and never cover the user's writing with text.
 Every draw returns each item's id and bbox, plus per-item warnings (unknown types, invalid fields, bad LaTeX, unknown keys, off-page): read them, they mean an item was skipped or misplaced. Invalid items are skipped individually, including in dry_run; e.g. a valid rect beside {type:"squiggle"} still draws. x,y on text and math is the top-left unless you set anchor. Use dry_run to measure before placing, and offset to shift a whole batch.
+Use place_image to paste a diagram from an HTTPS URL, base64 image or existing page/PDF crop: {x:100,y:200,w:400,source:{page_id:"source-page",region:{x:80,y:100,w:500,h:300}}}. Images support anchors, fit, rotation, opacity and group; move/copy/erase them by id. Neither Claude nor ChatGPT can forward images the user pasted in chat; use a URL/page crop or ask the user to import the file. draw_on_page skips image items.
 After drawing, call view_page to check the result and fix anything that landed in the wrong place.
 Page descriptions list item ids, labels and bounding boxes. Use erase_my_drawings with ids or group to remove selected items, move_items with ids, dx, dy to reposition them, and copy_items to duplicate them. Name related drawings with an item group.
 Use curved_arrow (alias curly) for reaction mechanisms: {type:"curly",from:[100,200],to:[250,200],bend:-60,head:"half"}. head:"full" draws an electron pair; half_head:true remains supported.
@@ -59,6 +61,7 @@ export function buildMcpServer(store: Store) {
   const server = new McpServer({ name: "claudebook", version: "0.1.0" }, { instructions: INSTRUCTIONS });
   registerPageTools(server, store);
   registerPaperTools(server, store);
+  registerImageTools(server, store);
 
   /** Resolve a page from optional ids, falling back to whatever the user has open. */
   function resolvePage(pageId?: string, notebookId?: string, pageNumber?: number) {

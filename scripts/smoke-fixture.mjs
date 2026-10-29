@@ -60,6 +60,10 @@ if (["reveal", "focus"].includes(process.argv[2])) {
     { type: "hint", x: 500, y: 950, label: "Hint 1", text: "Start at the electron-rich site.", size: 25, color: "#357A73" },
     { type: "text", x: 75, y: 1100, text: "What makes phenol more acidic?", size: 32, color: "#253A46" },
   ] });
+  // A real raster image on page 1 exercises authenticated fetch, async tile
+  // invalidation and rendering alongside ink. The SVG input is normalized by sharp.
+  const diagram = `<svg xmlns="http://www.w3.org/2000/svg" width="360" height="140"><rect width="360" height="140" rx="12" fill="#eef8f4"/><path d="M45 110V30M45 110H330M65 100Q160 15 315 60" fill="none" stroke="#357a73" stroke-width="5"/><circle cx="185" cy="53" r="9" fill="#c16f52"/><text x="200" y="115" font-size="20" fill="#253a46">image diagram</text></svg>`;
+  await tool("place_image", { page_id: page.id, x: 710, y: 95, w: 220, data: Buffer.from(diagram).toString("base64"), alt: "Image cache smoke diagram", group: "smoke-image" });
   await api(`pages/${page.id}/doubts`, { region: { x: 65, y: 1060, w: 800, h: 150 } });
   await api("view", { notebookId: notebook.id, pageId: page.id });
   await api("notebooks", { title: "Past papers", pages: 3, background: "lined" });
