@@ -257,7 +257,12 @@ private final class WebBlockFullscreen: UIViewController {
     override func viewDidLoad() {
         super.viewDidLoad(); view.backgroundColor = UIColor(StudyPalette.background); view.addSubview(card)
         let close = UIButton(type: .system); close.setTitle("Close fullscreen", for: .normal); close.tintColor = UIColor(StudyPalette.teal); close.accessibilityIdentifier = "web.fullscreen.close"
-        close.addAction(UIAction { [weak self] _ in self?.dismiss(animated: true) { self?.closed() } }, for: .touchUpInside); close.translatesAutoresizingMaskIntoConstraints = false; view.addSubview(close)
+        close.addAction(UIAction { [weak self] _ in
+            guard let self else { return }
+            let cleanup = self.closed
+            self.dismiss(animated: true, completion: cleanup)
+        }, for: .touchUpInside)
+        close.translatesAutoresizingMaskIntoConstraints = false; view.addSubview(close)
         NSLayoutConstraint.activate([close.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor), close.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor), close.heightAnchor.constraint(equalToConstant: 44)])
         card.userPaused = false; card.requestPlay?()
     }

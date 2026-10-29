@@ -663,8 +663,13 @@ export class Store {
       if (item.type === "web") { referenced.add(item.file); if (item.poster) referenced.add(item.poster); }
     }
     const directory = path.join(this.dataDir, "blocks");
-    if (fs.existsSync(directory)) for (const file of fs.readdirSync(directory)) {
-      if (/^[a-f0-9]{64}\.(html|png)$/.test(file) && !referenced.has(file)) fs.unlinkSync(path.join(directory, file));
+    try {
+      if (fs.existsSync(directory)) for (const file of fs.readdirSync(directory)) {
+        if (/^[a-f0-9]{64}\.(html|png)$/.test(file) && !referenced.has(file)) fs.unlinkSync(path.join(directory, file));
+      }
+    } catch (error) {
+      // Metadata is already saved. Retry cleanup later rather than fail an unrelated edit.
+      console.warn("Block cleanup deferred:", (error as Error).message);
     }
   }
 
