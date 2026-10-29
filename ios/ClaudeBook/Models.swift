@@ -126,7 +126,6 @@ struct ClaudeItem: Codable, Identifiable, Hashable {
     var side: String?
     var hatchLength: Double?
     var spacing: Double?
-    var file: String?
     var fit: String?
     var opacity: Double?
     var alt: String?
@@ -134,7 +133,7 @@ struct ClaudeItem: Codable, Identifiable, Hashable {
     enum CodingKeys: String, CodingKey {
         case title, file, rev, autoplay, poster, posterAt, logs
         case id, type, points, from, to, center, rx, ry, x, y, w, h, text, size, color, width, fill, d, closed, dashed, latex, smooth, bend, group, label, revealed, smiles, parts, graph, origin, vertex, at, axes, name, radius, filled
-        case file, fit, opacity, alt
+        case fit, opacity, alt
         case head
         case headFilled = "head_filled"
         case headD = "head_d"
@@ -222,7 +221,6 @@ struct ClaudeItem: Codable, Identifiable, Hashable {
         side = try c.decodeIfPresent(String.self, forKey: .side)
         hatchLength = try c.decodeIfPresent(Double.self, forKey: .hatchLength)
         spacing = try c.decodeIfPresent(Double.self, forKey: .spacing)
-        file = try c.decodeIfPresent(String.self, forKey: .file)
         fit = try c.decodeIfPresent(String.self, forKey: .fit)
         opacity = try c.decodeIfPresent(Double.self, forKey: .opacity)
         alt = try c.decodeIfPresent(String.self, forKey: .alt)
