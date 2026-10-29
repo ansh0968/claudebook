@@ -525,8 +525,10 @@ final class StudyFlowTests: XCTestCase {
         await fulfillment(of: [offscreen], timeout: 8)
         do {
             let _: SmokeItem = try await eventually {
+                // Blocks load with an opaque origin, so WebKit masks uncaught errors as "Script error."
+                // (known limitation; console.error/warn text still comes through in full).
                 let current: SmokeNotebook = try await self.api.request("notebooks/\(notebook.id)")
-                return current.pages[0].claudeLayer.first { $0.logs?.contains(where: { $0.contains("smoke load error") }) == true }
+                return current.pages[0].claudeLayer.first { $0.logs?.contains(where: { $0.contains("smoke load error") || $0.contains("Script error") }) == true }
             }
         } catch {
             let current: SmokeNotebook = try await api.request("notebooks/\(notebook.id)")
