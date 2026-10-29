@@ -338,7 +338,7 @@ final class StudyFlowTests: XCTestCase {
         defer { app.terminate() }
         try openFirstPage(app, pageId: page.id)
         func openPicker() throws {
-            app.buttons["Notebook options"].tap()
+            try openMenu(app.buttons["Notebook options"])
             try requireReady(app.buttons["editor.pageType"])
             app.buttons["editor.pageType"].tap()
             try requireReady(app.buttons["paper.color"])
