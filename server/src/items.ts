@@ -57,7 +57,7 @@ export const ItemSchema = z.union([
   z.object({ type: z.literal("molecule"), smiles: z.string(), x: z.number(), y: z.number(), size: z.number().positive().optional(), show_carbons: z.boolean().optional().describe('Label every carbon. Example: show_carbons:true'), explicit_h: z.boolean().optional().describe('Draw every hydrogen atom and bond. Example: explicit_h:true'), color, rotation, group })
     .describe('Chemical structure from SMILES. Returns atoms (index to [x,y]) and elements maps in page units. x,y is top-left; size is longest side, default 180. Example: {type:"molecule",smiles:"CC(=O)O",x:100,y:200,show_carbons:true}'),
   z.object({ type: z.literal("hint"), x: z.number(), y: z.number(), text: z.string(), label: z.string().optional(), size: z.number().positive().optional(), revealed: z.boolean().optional(), color, group })
-    .describe("Hidden hint chip. The user can tap it to reveal text; label defaults to Hint"),
+    .describe("Hint chip: only the short label (default Hint) shows on the page; tapping it opens a small pop-up pad with text, which wraps and never runs off the page, then hides again. Keep text to a few sentences"),
 ]);
 
 export type ItemInput = z.infer<typeof ItemSchema>;
@@ -144,11 +144,7 @@ function prepareItem(input: ItemInput, available: Item[]): Item {
     }
     if (i.type === "text") return anchored(base as typeof i & { id: string; createdAt: string }, renderHandwriting(i.text, i.x, i.y, i.size ?? 32)) as Item;
     if (i.type === "molecule") return { ...base, ...renderMolecule(i.smiles, i.x, i.y, i.size ?? 180, i) };
-    if (i.type === "hint") {
-      if (i.revealed) return { ...base, ...renderHandwriting(i.text, i.x, i.y, i.size ?? 32) };
-      const shape = renderHandwriting(i.label ?? "Hint", i.x + 12, i.y + 3, i.size ?? 32);
-      return { ...base, d: shape.d, w: shape.w + 24, h: (i.size ?? 32) + 6 };
-    }
+    if (i.type === "hint") return { ...base, ...hintChip(i) };
     if (i.type !== "math") {
       if (i.type === "svg") pathBounds(i.d);
       return base;
@@ -161,6 +157,13 @@ function prepareItem(input: ItemInput, available: Item[]): Item {
 }
 
 const DEFAULT_COLOR = "#D97757";
+
+/** A hint is always a small chip with its label, revealed or not: the text lives in the pad the app pops up, never inline on the page. */
+export function hintChip(item: { x: number; y: number; label?: string; size?: number }) {
+  const size = item.size ?? 32;
+  const shape = renderHandwriting(item.label ?? "Hint", item.x + 12, item.y + 3, size);
+  return { d: shape.d, w: shape.w + 24, h: size + 6 };
+}
 
 function normalizeSvg(d: string) {
   const path = svgpath(d);
@@ -278,10 +281,15 @@ function unrotatedBBox(item: Item): BBox {
     case "ellipse": return pointBounds([[item.center[0] - item.rx, item.center[1] - (item.ry ?? item.rx)], [item.center[0] + item.rx, item.center[1] + (item.ry ?? item.rx)]], padding);
     case "web": case "image": case "rect": case "highlight": return pointBounds([[item.x, item.y], [item.x + item.w, item.y + item.h]], padding);
     case "svg": return pathBounds(item.d + (item.head_d ?? ""), item.head_d ? Math.max(padding, (item.width ?? 3) / 2) : padding);
+    case "hint": {
+      // Recomputed rather than read from the item: hints revealed by older servers stored their text outline.
+      const chip = hintChip(item);
+      return pointBounds([[item.x, item.y], [item.x + chip.w, item.y + chip.h]], 0.75);
+    }
     default: {
       const shape = item.d === undefined ? prepareItems([item])[0] : item;
       const box = shape.d ? pathBounds(shape.d) : { x: item.x, y: item.y, w: 0, h: 0 };
-      return pointBounds([[item.x, item.y], [item.x + (shape.w ?? 0), item.y + (shape.h ?? 0)], [box.x, box.y], [box.x + box.w, box.y + box.h]], item.type === "hint" && !item.revealed ? 0.75 : 0);
+      return pointBounds([[item.x, item.y], [item.x + (shape.w ?? 0), item.y + (shape.h ?? 0)], [box.x, box.y], [box.x + box.w, box.y + box.h]]);
     }
   }
 }
@@ -376,9 +384,9 @@ function unrotatedSvg(item: RenderItem): string {
     case "svg":
       return `<path d="${esc(item.d)}" fill="${esc(item.fill ?? "none")}" ${outlined(item) ? stroke : 'stroke="none"'}${dash}/>${heads}`;
     case "hint": {
-      const shape = item.d === undefined ? prepareItems([item])[0] : item as Item;
-      const label = shape.d ? `<path d="${esc(shape.d)}" fill="${c}"/>` : "";
-      return item.revealed ? label : `<rect x="${item.x}" y="${item.y}" width="${shape.w}" height="${shape.h}" rx="8" fill="${c}" fill-opacity="0.1" stroke="${c}" stroke-width="1.5"/>${label}`;
+      // Opened hints keep their chip, just quieter, so the page reads the same before and after.
+      const chip = hintChip(item);
+      return `<rect x="${item.x}" y="${item.y}" width="${chip.w}" height="${chip.h}" rx="8" fill="${c}" fill-opacity="${item.revealed ? 0.04 : 0.1}" stroke="${c}" stroke-width="1.5"${item.revealed ? ' stroke-dasharray="5 4"' : ""}/><path d="${esc(chip.d)}" fill="${c}"/>`;
     }
     case "molecule": {
       const shape = item.d === undefined ? renderMolecule(item.smiles, item.x, item.y, item.size ?? 180, item) : item;

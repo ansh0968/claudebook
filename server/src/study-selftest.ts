@@ -86,7 +86,7 @@ try {
   assert(hint?.id && !hint.revealed, "hidden hint was not stored");
   const revealed = await api(`/pages/${pageId}/hints/${hint.id}/reveal`, "POST", {});
   assert(revealed.status === 200 && revealed.json.item.revealed === true, "hint reveal failed");
-  assert(revealed.json.item.d !== hint.d && revealed.json.item.id === hint.id, "revealing a hint must update its outline and preserve its id");
+  assert(revealed.json.item.d === hint.d && revealed.json.item.w === hint.w && revealed.json.item.id === hint.id, "revealing a hint must keep its chip (the text opens in a pad) and preserve its id");
   const again = await api(`/pages/${pageId}/hints/${hint.id}/reveal`, "POST", {});
   assert(again.status === 200 && again.json.item.id === hint.id && again.json.item.revealed, "hint reveal must be idempotent");
   assert((await api(`/pages/${pageId}/hints/missing/reveal`, "POST", {})).status === 404, "unknown hint should return 404");

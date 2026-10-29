@@ -71,6 +71,9 @@ const hint = prepared.find((i) => i.type === "hint" && !i.revealed)!;
 assert.equal(itemLabel(hint), "Hint 1");
 assert.ok(!itemToSvg(hint).includes("hidden-answer-sentinel"));
 assert.match(itemToSvg(hint), /<rect.*rx="8"/);
+const opened = prepared.find((i) => i.type === "hint" && i.revealed)!;
+assert.match(itemToSvg(opened), /<rect.*stroke-dasharray/, "an opened hint keeps a quieter chip");
+assert.ok(itemBBox(opened).w < 200, "an opened hint's text must not spill across the page");
 for (const smiles of ["c1ccccc1", "[Na+].[Cl-]", "[13CH3][C@H](O)C#N", "C/C=C\\C", "[O]"]) {
   const shape = renderMolecule(smiles, 12, 30, 160), bounds = pathBounds(shape.d);
   assert.ok(shape.d && shape.w > 0 && shape.h > 0, smiles);

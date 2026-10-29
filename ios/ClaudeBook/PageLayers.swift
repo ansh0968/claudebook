@@ -65,7 +65,7 @@ final class PaperView: TiledPageView {
     }
 
     static let lightPaper = UIColor(hex: "#FFFEFA")
-    static let darkPaper = UIColor(hex: "#1D2527")
+    static let darkPaper = UIColor(hex: "#252422")
 
     /// Draws in page units. Explicit paper colours take precedence over the app appearance.
     static func drawPaper(_ style: PaperStyle, in ctx: CGContext) {
@@ -402,26 +402,8 @@ enum ClaudeRenderer {
             ctx.setFillColor(color.cgColor)
             ctx.fillPath()
         case "hint":
-            if item.revealed != true, let chip = rect(item) {
-                let path = CGPath(roundedRect: chip, cornerWidth: 8, cornerHeight: 8, transform: nil)
-                ctx.addPath(path)
-                ctx.setFillColor(color.withAlphaComponent(dark ? 0.16 : 0.10).cgColor)
-                ctx.fillPath()
-                ctx.addPath(path)
-                ctx.setLineWidth(1.5)
-                ctx.strokePath()
-            }
-            if let d = item.d {
-                ctx.addPath(outline(item, d))
-                ctx.setFillColor(color.cgColor)
-                ctx.fillPath()
-            } else if let x = item.x, let y = item.y {
-                let text = item.revealed == true ? (item.text ?? "") : (item.label ?? "Hint")
-                let font = UIFont(name: "Noteworthy-Light", size: (item.size ?? 28) * 0.8) ?? .systemFont(ofSize: (item.size ?? 28) * 0.8)
-                UIGraphicsPushContext(ctx)
-                (text as NSString).draw(at: CGPoint(x: x + (item.revealed == true ? 0 : 12), y: y + (item.revealed == true ? 0 : 3)), withAttributes: [.font: font, .foregroundColor: color])
-                UIGraphicsPopContext()
-            }
+            // Always a chip: the text opens in a pad (HintPad), even for hints opened on older builds.
+            HintChip.draw(item, color: color, dark: dark, in: ctx)
         default:
             break
         }
