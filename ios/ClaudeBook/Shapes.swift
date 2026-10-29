@@ -229,8 +229,10 @@ enum ShapeRecognizer {
         }
         let m = r[r.count / 2]
         let size = max(chord, Geo.diagonal(r))
+        // A shaky hand adds length without changing the shape, so compare against the smoothed stroke.
+        let steady = Geo.arcLength(Geo.smooth(r))
         func fits(_ error: CGFloat, _ samples: [CGPoint]) -> Bool {
-            error < 0.03 * size && abs(Geo.arcLength(samples) - length) < 0.15 * length
+            error < 0.03 * size && abs(Geo.arcLength(samples) - steady) < 0.15 * steady
         }
         let quad = Geo.sampleQuad(a, m, b, count: 64)
         let arc = Geo.sampleArc(a, m, b, count: 64)
@@ -272,6 +274,8 @@ enum ShapeRecognizer {
             }
         }
         guard let tipIndex = best?.index else { return nil }
+        // A zigzag turns this sharply before the tip too; an arrow's shaft doesn't.
+        if tipIndex - k > k, (k..<(tipIndex - k)).contains(where: { Geo.turn(r[$0 - k], r[$0], r[$0 + k]) >= 100 }) { return nil }
         let tip = r[tipIndex]
         let headPoints = Array(r[tipIndex...])
         let chord = r[0].distance(to: tip)
@@ -281,7 +285,14 @@ enum ShapeRecognizer {
         let back = headPoints.reduce(CGFloat(0)) { $0 + Geo.dot($1 - tip, dir) } / CGFloat(headPoints.count)
         guard back < -0.02 * extent else { return nil }
         // A full head goes out to one barb, back to the tip and out again; a fishhook goes out once.
-        let full = Geo.arcLength(headPoints) > 1.8 * extent
+        var phase = 0
+        for q in headPoints {
+            let d = q.distance(to: tip)
+            if phase == 0 && d > 0.6 * extent { phase = 1 }
+            else if phase == 1 && d < 0.35 * extent { phase = 2 }
+            else if phase == 2 && d > 0.6 * extent { phase = 3; break }
+        }
+        let full = phase == 3
         let barb = headPoints.max { $0.distance(to: tip) < $1.distance(to: tip) } ?? tip
         let shaft = Geo.resample(Array(r[...tipIndex]), count: 96)
         guard var shape = openShape(shaft, length: Geo.arcLength(shaft)).map(tidy) else { return nil }
@@ -479,8 +490,34 @@ enum Geo {
         }
     }
 
+    /// Simplification puts corners slightly off where the pen turned; move each to the sharpest nearby point.
+    static func snapCorners(_ r: [CGPoint], _ verts: [CGPoint], closed: Bool) -> [CGPoint] {
+        let n = r.count
+        let k = max(2, Int((0.03 * CGFloat(n - 1)).rounded()))
+        let window = max(2, Int((1.5 * CGFloat(k)).rounded()))
+        func sharpness(_ i: Int) -> CGFloat {
+            if closed { return turn(r[(i - k + n) % n], r[i], r[(i + k) % n]) }
+            guard i - k >= 0, i + k < n else { return 0 }
+            return turn(r[i - k], r[i], r[i + k])
+        }
+        let inner = closed ? verts : Array(verts.dropFirst().dropLast())
+        var moved: [CGPoint] = []
+        for v in inner {
+            let i = r.indices.min { r[$0].distance(to: v) < r[$1].distance(to: v) } ?? 0
+            let nearby = (i - window...i + window).compactMap { j -> Int? in
+                closed ? (j % n + n) % n : (j >= 0 && j < n ? j : nil)
+            }
+            let best = nearby.max { sharpness($0) < sharpness($1) } ?? i
+            if moved.last.map({ $0.distance(to: r[best]) > 1e-6 }) ?? true { moved.append(r[best]) }
+        }
+        if closed, moved.count > 1, moved[0].distance(to: moved[moved.count - 1]) < 1e-6 { moved.removeLast() }
+        return closed ? moved : [verts[0]] + moved + [verts[verts.count - 1]]
+    }
+
     /// Keep only corners the pen really turned at. Nil when the stroke was a smooth curve after all.
-    static func sharpen(_ r: [CGPoint], _ verts: [CGPoint], closed: Bool) -> [CGPoint]? {
+    static func sharpen(_ r: [CGPoint], _ drawnVerts: [CGPoint], closed: Bool) -> [CGPoint]? {
+        let verts = snapCorners(r, drawnVerts, closed: closed)
+        guard verts.count >= (closed ? 3 : 2) else { return nil }
         let inner = closed ? verts : Array(verts.dropFirst().dropLast())
         let turns = localTurns(r, inner, closed: closed)
         let keep = zip(inner, turns).filter { $0.1 >= 22 }.map { $0.0 }
@@ -498,8 +535,9 @@ enum Geo {
         return meanLocal >= max(32, 0.5 * meanDrawn) ? out : nil
     }
 
-    /// No edge of a polyline may bow away from the ink.
-    static func straightSegments(_ r: [CGPoint], _ verts: [CGPoint]) -> Bool {
+    /// No edge of a polyline may bow away from the (smoothed) ink.
+    static func straightSegments(_ raw: [CGPoint], _ verts: [CGPoint]) -> Bool {
+        let r = smooth(raw)
         let segments = Array(zip(verts, verts.dropFirst()))
         for (a, b) in segments {
             let len = a.distance(to: b)
@@ -508,9 +546,23 @@ enum Geo {
                 let d = segmentDistance(q, a, b)
                 if segments.allSatisfy({ d <= segmentDistance(q, $0.0, $0.1) }) { worst = max(worst, d) }
             }
-            if worst > max(6, 0.1 * len) { return false }
+            if worst > max(6.5, 0.1 * len) { return false }
         }
         return true
+    }
+
+    /// A moving average over a few neighbours, ends kept, to take out hand tremor.
+    static func smooth(_ r: [CGPoint], radius: Int = 2) -> [CGPoint] {
+        guard r.count > 2 else { return r }
+        var out = [r[0]]
+        for i in 1..<(r.count - 1) {
+            let h = min(radius, i, r.count - 1 - i)
+            var sum = CGPoint.zero
+            for j in (i - h)...(i + h) { sum = sum + r[j] }
+            out.append(sum * (1 / CGFloat(2 * h + 1)))
+        }
+        out.append(r[r.count - 1])
+        return out
     }
 
     static func polylineError(_ r: [CGPoint], _ verts: [CGPoint], closed: Bool) -> CGFloat {
