@@ -157,7 +157,12 @@ final class WebBlockCard: UIView, WKNavigationDelegate, WKUIDelegate {
                 let html = try await api.webHTML(file)
                 let list: WKContentRuleList
                 if let existing = Self.rules { list = existing }
-                else { list = try await WKContentRuleListStore.default().compileContentRuleList(forIdentifier: "ClaudeBookBlocks-v1", encodedContentRuleList: Self.encodedRules); Self.rules = list }
+                else {
+                    guard let compiled = try await WKContentRuleListStore.default().compileContentRuleList(forIdentifier: "ClaudeBookBlocks-v1", encodedContentRuleList: Self.encodedRules) else {
+                        throw NSError(domain: "ClaudeBookBlocks", code: 1, userInfo: [NSLocalizedDescriptionKey: "Could not install block network sandbox"])
+                    }
+                    list = compiled; Self.rules = compiled
+                }
                 guard let self, !Task.isCancelled, token == self.generation else { return }
                 let config = WKWebViewConfiguration()
                 config.websiteDataStore = .nonPersistent(); config.allowsInlineMediaPlayback = true; config.mediaTypesRequiringUserActionForPlayback = []
