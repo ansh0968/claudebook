@@ -219,6 +219,12 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
         canvas.becomeFirstResponder()
+        updateHintButtons()
+    }
+
+    override func viewDidDisappear(_ animated: Bool) {
+        super.viewDidDisappear(animated)
+        webBlocks.suspend()
     }
 
     override func viewDidLayoutSubviews() {

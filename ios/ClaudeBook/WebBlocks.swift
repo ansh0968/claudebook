@@ -30,7 +30,16 @@ final class WebBlockOverlay: UIView {
     private weak var owner: UIViewController?
     private var cards: [String: WebBlockCard] = [:]
     private var fullKey: String?
-    init(owner: UIViewController) { self.owner = owner; super.init(frame: .zero); clipsToBounds = true }
+    private var replay: (() -> Void)?
+    init(owner: UIViewController) {
+        self.owner = owner; super.init(frame: .zero); clipsToBounds = true
+        NotificationCenter.default.addObserver(self, selector: #selector(background), name: UIApplication.willResignActiveNotification, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(foreground), name: UIApplication.didBecomeActiveNotification, object: nil)
+    }
+    deinit { NotificationCenter.default.removeObserver(self) }
+    @objc private func background() { for card in cards.values { card.pause() } }
+    @objc private func foreground() { replay?(); if let key = fullKey, let card = cards[key], !card.userPaused { card.play() } }
+    func suspend() { for card in cards.values where card.superview === self { card.pause() } }
     required init?(coder: NSCoder) { fatalError() }
     override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
         guard !isHidden, bounds.contains(point) else { return nil }
@@ -38,7 +47,11 @@ final class WebBlockOverlay: UIView {
         return nil
     }
     func update(pages: [Page], canvas: UIScrollView, content: UIView, enabled: Bool) {
+        replay = { [weak self, weak canvas, weak content] in
+            guard let canvas, let content else { return }; self?.update(pages: pages, canvas: canvas, content: content, enabled: enabled)
+        }
         isHidden = !enabled
+        let running = enabled && window != nil && UIApplication.shared.applicationState == .active
         guard canvas.zoomScale > 0 else { return }
         let middle = NotebookLayout.index(forY: (canvas.contentOffset.y + canvas.bounds.height/2)/canvas.zoomScale, count: pages.count)
         var visible: [(String, String, ClaudeItem, CGRect, Int)] = []
@@ -77,7 +90,7 @@ final class WebBlockOverlay: UIView {
             }
             card.frame = rect
             let automatic = index == middle && item.autoplay != false && !card.userPaused
-            if enabled && slots > 0 && (automatic || card.isLive) { if automatic { card.play() }; slots -= 1 }
+            if running && slots > 0 && (automatic || card.isLive) { if automatic { card.play() }; slots -= 1 }
             else { card.pause() }
         }
     }
