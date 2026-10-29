@@ -4,6 +4,7 @@ import UIKit
 /// this as one value swapped under a lock rather than several separately mutable properties.
 struct PaperStyle {
     var background: PageBackground = .blank
+    var paper: PaperColor? = nil
     var pdf: CGPDFPage?
     var dark = false
     var invertPDF = true
@@ -64,10 +65,15 @@ final class PaperView: TiledPageView {
     }
 
     static let lightPaper = UIColor(hex: "#FFFEFA")
-    static let darkPaper = UIColor(hex: "#1D2527")
+    static let darkPaper = UIColor(hex: "#252422")
 
-    /// Draws the page in page units. Snapshots for Claude always pass a light style.
+    /// Draws in page units. Explicit paper colours take precedence over the app appearance.
     static func drawPaper(_ style: PaperStyle, in ctx: CGContext) {
+        if style.paper != nil || ![PageBackground.blank, .lined, .grid, .dotted].contains(style.background) {
+            PaperTemplates.draw(style.background, paper: style.paper ?? (style.dark ? .slate : .default), in: ctx)
+            if let pdf = style.pdf { drawPDF(pdf, in: ctx, invert: (style.paper?.isDark ?? style.dark) && style.invertPDF) }
+            return
+        }
         let w = PageGeometry.width, h = PageGeometry.height
         ctx.setFillColor((style.dark ? darkPaper : lightPaper).cgColor)
         ctx.fill(PageGeometry.rect)
@@ -101,6 +107,7 @@ final class PaperView: TiledPageView {
                 while y < h { ctx.fillEllipse(in: CGRect(x: x - 1.4, y: y - 1.4, width: 2.8, height: 2.8)); y += 25 }
                 x += 25
             }
+        default: break // New templates were handled by the shared renderer above.
         }
     }
 
@@ -171,6 +178,11 @@ final class ClaudeLayerView: TiledPageView {
         _doubts = doubts
         lock.unlock()
         if !same { setNeedsDisplay() }
+        for file in Set(items.filter { $0.type == "image" }.compactMap(\.file)) where ImageCache.cached(file) == nil {
+            Task { @MainActor [weak self] in
+                if await ImageCache.load(file) != nil { self?.setNeedsDisplay() }
+            }
+        }
     }
 
     override func draw(_ rect: CGRect) {
@@ -310,6 +322,7 @@ enum ClaudeRenderer {
         }
 
         switch item.type {
+        case "image": ImageCache.draw(item, in: ctx)
         case "path":
             let pts = (item.points ?? []).compactMap { pt($0) }
             guard pts.count >= 2 else { return }
@@ -389,26 +402,8 @@ enum ClaudeRenderer {
             ctx.setFillColor(color.cgColor)
             ctx.fillPath()
         case "hint":
-            if item.revealed != true, let chip = rect(item) {
-                let path = CGPath(roundedRect: chip, cornerWidth: 8, cornerHeight: 8, transform: nil)
-                ctx.addPath(path)
-                ctx.setFillColor(color.withAlphaComponent(dark ? 0.16 : 0.10).cgColor)
-                ctx.fillPath()
-                ctx.addPath(path)
-                ctx.setLineWidth(1.5)
-                ctx.strokePath()
-            }
-            if let d = item.d {
-                ctx.addPath(outline(item, d))
-                ctx.setFillColor(color.cgColor)
-                ctx.fillPath()
-            } else if let x = item.x, let y = item.y {
-                let text = item.revealed == true ? (item.text ?? "") : (item.label ?? "Hint")
-                let font = UIFont(name: "Noteworthy-Light", size: (item.size ?? 28) * 0.8) ?? .systemFont(ofSize: (item.size ?? 28) * 0.8)
-                UIGraphicsPushContext(ctx)
-                (text as NSString).draw(at: CGPoint(x: x + (item.revealed == true ? 0 : 12), y: y + (item.revealed == true ? 0 : 3)), withAttributes: [.font: font, .foregroundColor: color])
-                UIGraphicsPopContext()
-            }
+            // Always a chip: the text opens in a pad (HintPad), even for hints opened on older builds.
+            HintChip.draw(item, color: color, dark: dark, in: ctx)
         default:
             break
         }

@@ -53,10 +53,13 @@ final class ControlOverlay: UIView {
         return nil
     }
 
+    /// Subviews with this tag are accessibility containers (the hint pad) rather than single elements.
+    static let containerTag = 7_341
+
     func refreshAccessibilityElements() {
         isAccessibilityElement = false
         accessibilityElements = isHidden ? [] : subviews.filter {
-            $0.isAccessibilityElement && !$0.isHidden && $0.alpha > 0.01 && $0.frame.intersects(bounds)
+            ($0.isAccessibilityElement || $0.tag == Self.containerTag) && !$0.isHidden && $0.alpha > 0.01 && $0.frame.intersects(bounds)
         }
     }
 }
@@ -104,9 +107,9 @@ final class RegionSelectionView: UIView {
         guard let start, let end, let ctx = UIGraphicsGetCurrentContext() else { return }
         let selected = CGRect(x: min(start.x, end.x), y: min(start.y, end.y),
                               width: abs(end.x - start.x), height: abs(end.y - start.y))
-        ctx.setFillColor(UIColor(hex: "#D97757").withAlphaComponent(0.12).cgColor)
+        ctx.setFillColor(Theme.claudeOrange.withAlphaComponent(0.12).cgColor)
         ctx.fill(selected)
-        ctx.setStrokeColor(UIColor(hex: "#D97757").cgColor)
+        ctx.setStrokeColor(Theme.claudeOrange.cgColor)
         ctx.setLineWidth(2)
         ctx.setLineDash(phase: 0, lengths: [7, 5])
         ctx.stroke(selected)
@@ -126,9 +129,18 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
     private let paperContainer = UIView()
     private let claudeContainer = UIView()
     private let hintOverlay = ControlOverlay()
+    private lazy var webBlocks = WebBlockOverlay(owner: self)
     private var hintButtons: [String: UIButton] = [:]
+    /// Each hint chip's tap target in overlay coordinates, by "pageId:itemId".
+    private var hintChips: [String: CGRect] = [:]
+    private var hintPad: (key: String, host: UIHostingController<HintPad>)?
+    private let padDismissTap = UITapGestureRecognizer()
+    /// When this iPad last changed Claude's layer itself, so the editor doesn't announce it as Claude writing.
+    var lastLocalLayerChange = Date.distantPast
     private var selectionOverlay: RegionSelectionView?
     private let footer = UILabel()
+    /// Hold-to-snap shapes and their edit handles.
+    private let shapes = ShapeSnapper()
 
     private(set) var notebookId: String?
     private(set) var pages: [Page] = []
@@ -160,7 +172,7 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        view.backgroundColor = UIColor { $0.userInterfaceStyle == .dark ? UIColor(hex: "#151A1D") : UIColor(hex: "#EDE8DF") }
+        view.backgroundColor = Theme.desk
 
         canvas.translatesAutoresizingMaskIntoConstraints = false
         canvas.backgroundColor = .clear
@@ -200,6 +212,18 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
             hintOverlay.leadingAnchor.constraint(equalTo: canvas.leadingAnchor),
             hintOverlay.trailingAnchor.constraint(equalTo: canvas.trailingAnchor),
         ])
+        shapes.attach(to: canvas, in: view)
+
+        webBlocks.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(webBlocks)
+        NSLayoutConstraint.activate([webBlocks.topAnchor.constraint(equalTo: canvas.topAnchor), webBlocks.bottomAnchor.constraint(equalTo: canvas.bottomAnchor), webBlocks.leadingAnchor.constraint(equalTo: canvas.leadingAnchor), webBlocks.trailingAnchor.constraint(equalTo: canvas.trailingAnchor)])
+
+        // A tap anywhere on the page puts an open hint pad away again. Off unless a pad is showing.
+        padDismissTap.addTarget(self, action: #selector(dismissHintPadFromTap))
+        padDismissTap.cancelsTouchesInView = false
+        padDismissTap.delegate = self
+        padDismissTap.isEnabled = false
+        canvas.addGestureRecognizer(padDismissTap)
 
         footer.text = "Pull up to add a page"
         footer.font = .preferredFont(forTextStyle: .footnote)
@@ -214,6 +238,12 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
         canvas.becomeFirstResponder()
+        updateHintButtons()
+    }
+
+    override func viewDidDisappear(_ animated: Bool) {
+        super.viewDidDisappear(animated)
+        webBlocks.suspend()
     }
 
     override func viewDidLayoutSubviews() {
@@ -249,6 +279,7 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
         paperContainer.frame = CGRect(origin: .zero, size: size)
         claudeContainer.frame = CGRect(origin: .zero, size: size)
         footer.frame = CGRect(x: 0, y: size.height + 36, width: size.width, height: 24)
+        shapes.layoutContent(size: size)
         updateVisiblePages()
     }
 
@@ -276,13 +307,14 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
             onScreen[id] = nil
         }
         updateHintButtons()
+        shapes.layoutOverlay()
     }
 
     private func makeViews(for page: Page) -> (paper: PaperView, claude: ClaudeLayerView) {
         let paper = PaperView(frame: PageGeometry.rect)
         paper.style = style(for: page)
         let claude = ClaudeLayerView(frame: PageGeometry.rect)
-        claude.update(items: page.claudeLayer, dark: dark, doubts: page.doubts ?? [])
+        claude.update(items: page.claudeLayer, dark: page.usesDarkInkPalette(appDark: dark), doubts: page.doubts ?? [])
         paperContainer.addSubview(paper)
         claudeContainer.addSubview(claude)
         let views = (paper: paper, claude: claude)
@@ -300,7 +332,7 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
     }
 
     private func style(for page: Page) -> PaperStyle {
-        PaperStyle(background: page.background, pdf: page.pdf.flatMap { PDFCache.cached($0) }, dark: dark, invertPDF: invertPDFs)
+        PaperStyle(background: page.background, paper: page.paper, pdf: page.pdf.flatMap { PDFCache.cached($0) }, dark: dark, invertPDF: invertPDFs)
     }
 
     private func clampedOffsetY(_ y: CGFloat) -> CGFloat {
@@ -378,6 +410,21 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
         footer.text = "Pull up to add a page"
     }
 
+    /// A page the user just added: fade it in and glide down to it. Whatever was on screen stays put
+    /// until the glide starts, because setNotebook anchors the view before this runs.
+    func reveal(pageId: String) {
+        guard let i = pages.firstIndex(where: { $0.id == pageId }) else { return }
+        if let views = onScreen[pageId] {
+            views.paper.alpha = 0
+            views.claude.alpha = 0
+            UIView.animate(withDuration: 0.35, delay: 0.05, options: [.curveEaseOut, .allowUserInteraction]) {
+                views.paper.alpha = 1
+                views.claude.alpha = 1
+            }
+        }
+        scrollTo(page: i, animated: true)
+    }
+
     /// How far the user has dragged past the end of the last page's footer.
     private var bottomOverscroll: CGFloat {
         let inset = canvas.adjustedContentInset
@@ -417,12 +464,21 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
         set { canvas.drawingPolicy = newValue ? .pencilOnly : .anyInput }
     }
 
+    var snapShapes: Bool {
+        get { shapes.enabled }
+        set {
+            shapes.enabled = newValue
+            if !newValue { shapes.endEditing() }
+        }
+    }
+
     var showClaude: Bool {
         get { !claudeContainer.isHidden }
         set {
             claudeContainer.isHidden = !newValue
             hintOverlay.isHidden = !newValue
             hintOverlay.refreshAccessibilityElements()
+            updateHintButtons()
         }
     }
 
@@ -437,7 +493,7 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
             style.dark = dark
             style.invertPDF = invertPDFs
             views.paper.style = style
-            views.claude.update(items: page.claudeLayer, dark: dark, doubts: page.doubts ?? [])
+            views.claude.update(items: page.claudeLayer, dark: page.usesDarkInkPalette(appDark: dark), doubts: page.doubts ?? [])
         }
         updateHintButtons()
     }
@@ -448,11 +504,15 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
     func setNotebook(_ notebook: Notebook) {
         let first = notebookId != notebook.id
         if !first && notebook.pages.map(\.id) == pages.map(\.id) {
+            let changedPaper = notebook.pages.filter { next in pages.contains { $0.id == next.id && ($0.background != next.background || $0.paper != next.paper) } }.map(\.id)
             pages = notebook.pages
+            PendingUploads.all.formUnion(pages.filter { changedPaper.contains($0.id) && canRefreshPaperSnapshot($0) }.map(\.id))
+            if !changedPaper.isEmpty { scheduleUpload(delay: 0.2) }
             for (id, views) in onScreen {
-                if let page = pages.first(where: { $0.id == id }) { views.claude.update(items: page.claudeLayer, dark: dark, doubts: page.doubts ?? []) }
+                if let page = pages.first(where: { $0.id == id }) { views.paper.style = style(for: page); views.claude.update(items: page.claudeLayer, dark: page.usesDarkInkPalette(appDark: dark), doubts: page.doubts ?? []) }
             }
             updateHintButtons()
+            restoreBackups()
             return
         }
 
@@ -471,13 +531,21 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
             fingerprints[page.id] = Self.fingerprint(drawing.strokes, dy: 0)
         }
         rebuildCanvasDrawing()
-        for views in onScreen.values {
+        // Pages still in the notebook keep their views (layout just moves them), so nothing on screen
+        // flickers while it's redrawn. Gone pages, and everything when switching notebooks, are dropped.
+        for (id, views) in onScreen {
+            if !first, let page = pages.first(where: { $0.id == id }) {
+                views.claude.update(items: page.claudeLayer, dark: dark, doubts: page.doubts ?? [])
+                continue
+            }
             views.paper.removeFromSuperview()
             views.claude.removeFromSuperview()
+            onScreen[id] = nil
         }
-        onScreen = [:]
-        for button in hintButtons.values { button.removeFromSuperview() }
-        hintButtons = [:]
+        if first {
+            for button in hintButtons.values { button.removeFromSuperview() }
+            hintButtons = [:]
+        }
         layoutContent()
 
         if first {
@@ -506,7 +574,7 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
             guard let items = try? await API.current?.claudeItems(pageId: pageId),
                   let i = self.pages.firstIndex(where: { $0.id == pageId }) else { return }
             self.pages[i].claudeLayer = items
-            self.onScreen[pageId]?.claude.update(items: items, dark: self.dark, doubts: self.pages[i].doubts ?? [])
+            self.onScreen[pageId]?.claude.update(items: items, dark: self.pages[i].usesDarkInkPalette(appDark: self.dark), doubts: self.pages[i].doubts ?? [])
             self.updateHintButtons()
         }
     }
@@ -517,7 +585,7 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
             guard let doubts = try? await API.current?.doubts(pageId: pageId),
                   let i = self.pages.firstIndex(where: { $0.id == pageId }) else { return }
             self.pages[i].doubts = doubts
-            self.onScreen[pageId]?.claude.update(items: self.pages[i].claudeLayer, dark: self.dark, doubts: doubts)
+            self.onScreen[pageId]?.claude.update(items: self.pages[i].claudeLayer, dark: self.pages[i].usesDarkInkPalette(appDark: self.dark), doubts: doubts)
         }
     }
 
@@ -527,13 +595,14 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
         doubts.removeAll { $0.id == doubt.id }
         doubts.append(doubt)
         pages[index].doubts = doubts
-        onScreen[doubt.pageId]?.claude.update(items: pages[index].claudeLayer, dark: dark, doubts: doubts)
+        onScreen[doubt.pageId]?.claude.update(items: pages[index].claudeLayer, dark: pages[index].usesDarkInkPalette(appDark: dark), doubts: doubts)
     }
 
     /// Selection points live in screen coordinates. Convert through the scroll view so zoom and offsets
     /// produce the same 1000 x 1414 page region that Claude sees.
     func beginDoubtSelection() {
         guard selectionOverlay == nil, !pages.isEmpty else { return }
+        shapes.endEditing()
         flush()
         canvas.setContentOffset(canvas.contentOffset, animated: false)
         toolPicker.setVisible(false, forFirstResponder: canvas)
@@ -589,8 +658,9 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
         let visible = pages.enumerated().filter { onScreen[$0.element.id] != nil }
         var wanted = Set<String>()
         for (index, page) in visible {
-            for item in page.claudeLayer where item.type == "hint" && item.revealed != true {
-                guard let x = item.x, let y = item.y else { continue }
+            // Opened hints keep their chip too: tapping again brings the pad back.
+            for item in page.claudeLayer where item.type == "hint" {
+                guard let pageChip = HintChip.frame(item) else { continue }
                 let key = "\(page.id):\(item.id)"
                 wanted.insert(key)
                 let button: UIButton
@@ -599,27 +669,19 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
                     button.isAccessibilityElement = true
                     button.accessibilityTraits = .button
                     button.accessibilityIdentifier = "hint.\(item.id)"
-                    button.accessibilityHint = "Reveal Claude's hidden hint"
-                    button.addAction(UIAction { [weak self, weak button] _ in
-                        guard let api = API.current else { return }
-                        button?.isEnabled = false
-                        Task {
-                            defer { button?.isEnabled = true }
-                            do {
-                                let revealed = try await api.revealHint(pageId: page.id, itemId: item.id)
-                                self?.applyHint(revealed, pageId: page.id)
-                            } catch { self?.onHintError?(error.localizedDescription) }
-                        }
-                    }, for: .touchUpInside)
+                    let pageId = page.id, itemId = item.id
+                    button.addAction(UIAction { [weak self] _ in self?.toggleHintPad(pageId: pageId, itemId: itemId) }, for: .touchUpInside)
                     hintOverlay.addSubview(button)
                     hintButtons[key] = button
                 }
                 button.accessibilityLabel = item.label ?? "Hint"
+                button.accessibilityHint = item.revealed == true ? "Shows Claude's hint again" : "Shows Claude's hidden hint"
                 let s = canvas.zoomScale
                 // The tiled layer draws the chip in page units. Its transparent target grows to 44pt.
-                let pageChip = CGRect(x: CGFloat(x) * s, y: (NotebookLayout.offset(index) + CGFloat(y)) * s,
-                                      width: CGFloat(item.w ?? 100) * s, height: CGFloat(item.h ?? 34) * s)
-                let chip = claudeContainer.convert(pageChip, to: hintOverlay)
+                let scaled = CGRect(x: pageChip.minX * s, y: (NotebookLayout.offset(index) + pageChip.minY) * s,
+                                    width: pageChip.width * s, height: pageChip.height * s)
+                let chip = claudeContainer.convert(scaled, to: hintOverlay)
+                hintChips[key] = chip
                 button.frame = chip.insetBy(dx: -max(0, (44 - chip.width) / 2), dy: -max(0, (44 - chip.height) / 2))
                 button.isHidden = !button.frame.intersects(hintOverlay.bounds)
             }
@@ -627,18 +689,122 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
         for key in hintButtons.keys.filter({ !wanted.contains($0) }) {
             hintButtons[key]?.removeFromSuperview()
             hintButtons[key] = nil
+            hintChips[key] = nil
         }
+        positionHintPad()
         hintOverlay.refreshAccessibilityElements()
+        webBlocks.update(pages: pages, canvas: canvas, content: claudeContainer, enabled: !hintOverlay.isHidden)
     }
 
     private func applyHint(_ item: ClaudeItem, pageId: String) {
         guard let pageIndex = pages.firstIndex(where: { $0.id == pageId }),
               let itemIndex = pages[pageIndex].claudeLayer.firstIndex(where: { $0.id == item.id }) else { return }
         pages[pageIndex].claudeLayer[itemIndex] = item
-        onScreen[pageId]?.claude.update(items: pages[pageIndex].claudeLayer, dark: dark, doubts: pages[pageIndex].doubts ?? [])
+        onScreen[pageId]?.claude.update(items: pages[pageIndex].claudeLayer, dark: pages[pageIndex].usesDarkInkPalette(appDark: dark), doubts: pages[pageIndex].doubts ?? [])
         updateHintButtons()
-        UIAccessibility.post(notification: .announcement, argument: item.text ?? "Hint revealed")
     }
+
+    // MARK: Hint pad
+
+    private func hintItem(pageId: String, itemId: String) -> ClaudeItem? {
+        pages.first { $0.id == pageId }?.claudeLayer.first { $0.id == itemId && $0.type == "hint" }
+    }
+
+    /// Tap a chip: its pad pops out of it. Tap the same chip again, the page, or the pad's X, and it tucks away.
+    private func toggleHintPad(pageId: String, itemId: String) {
+        let key = "\(pageId):\(itemId)"
+        if hintPad?.key == key { closeHintPad(); return }
+        closeHintPad(animated: false)
+        guard let item = hintItem(pageId: pageId, itemId: itemId) else { return }
+        let host = UIHostingController(rootView: padView(for: item, width: padWidth))
+        host.view.backgroundColor = .clear
+        host.view.tag = ControlOverlay.containerTag
+        addChild(host)
+        hintOverlay.addSubview(host.view)
+        host.didMove(toParent: self)
+        hintPad = (key, host)
+        padDismissTap.isEnabled = true
+        positionHintPad()
+        UIImpactFeedbackGenerator(style: .soft).impactOccurred()
+
+        let v = host.view!
+        if let chip = hintChips[key], !UIAccessibility.isReduceMotionEnabled {
+            v.transform = CGAffineTransform(translationX: (chip.midX - v.center.x) * 0.7, y: (chip.midY - v.center.y) * 0.7).scaledBy(x: 0.25, y: 0.25)
+        }
+        v.alpha = 0
+        UIView.animate(withDuration: 0.5, delay: 0, usingSpringWithDamping: 0.72, initialSpringVelocity: 0.3, options: [.allowUserInteraction]) {
+            v.transform = .identity
+            v.alpha = 1
+        }
+        hintOverlay.refreshAccessibilityElements()
+        UIAccessibility.post(notification: .layoutChanged, argument: v)
+
+        // Record the peek so Claude knows; the pad already shows the text the app has.
+        guard item.revealed != true, let api = API.current else { return }
+        lastLocalLayerChange = Date()
+        Task {
+            do {
+                let revealed = try await api.revealHint(pageId: pageId, itemId: itemId)
+                self.applyHint(revealed, pageId: pageId)
+                if let pad = self.hintPad, pad.key == key { pad.host.rootView = self.padView(for: revealed, width: self.padWidth) }
+            } catch { self.onHintError?(error.localizedDescription) }
+        }
+    }
+
+    /// For CI screenshots: open the first hint on screen.
+    func openFirstHintPad() {
+        guard let key = hintButtons.keys.sorted().first, let pageId = key.split(separator: ":").first, let itemId = key.split(separator: ":").last else { return }
+        toggleHintPad(pageId: String(pageId), itemId: String(itemId))
+    }
+
+    private var padWidth: CGFloat { min(380, max(220, hintOverlay.bounds.width - 32)) }
+
+    private func padView(for item: ClaudeItem, width: CGFloat) -> HintPad {
+        HintPad(label: item.label ?? "Hint", text: item.text, tint: Color(uiColor: ClaudeRenderer.adapt(UIColor(hex: item.color ?? ClaudeRenderer.defaultColor), dark: dark)),
+                textHeight: HintPad.measure(item.text, width: width - HintPad.padding * 2)) { [weak self] in self?.closeHintPad() }
+    }
+
+    /// Keeps the open pad beside its chip as the page scrolls, inside the screen, below the chip when it fits
+    /// and above it otherwise. A chip that scrolls away takes its pad with it.
+    private func positionHintPad() {
+        guard let pad = hintPad else { return }
+        guard let chip = hintChips[pad.key], chip.intersects(hintOverlay.bounds.insetBy(dx: 0, dy: 8)) else {
+            closeHintPad()
+            return
+        }
+        let bounds = hintOverlay.bounds
+        let width = padWidth
+        let height = min(pad.host.sizeThatFits(in: CGSize(width: width, height: .greatestFiniteMagnitude)).height, bounds.height - 24)
+        var y = chip.maxY + 10
+        if y + height > bounds.maxY - 12 { y = chip.minY - 10 - height }
+        y = min(max(12, y), bounds.maxY - 12 - height)
+        let x = min(max(16, chip.midX - width / 2), bounds.maxX - 16 - width)
+        pad.host.view.bounds = CGRect(x: 0, y: 0, width: width, height: height)
+        pad.host.view.center = CGPoint(x: x + width / 2, y: y + height / 2)
+    }
+
+    private func closeHintPad(animated: Bool = true) {
+        guard let pad = hintPad else { return }
+        hintPad = nil
+        padDismissTap.isEnabled = false
+        let v = pad.host.view!
+        let finish = {
+            pad.host.willMove(toParent: nil)
+            v.removeFromSuperview()
+            pad.host.removeFromParent()
+            self.hintOverlay.refreshAccessibilityElements()
+        }
+        guard animated, v.window != nil else { finish(); return }
+        let chip = hintChips[pad.key]
+        UIView.animate(withDuration: 0.22, delay: 0, options: [.curveEaseIn]) {
+            v.alpha = 0
+            if let chip, !UIAccessibility.isReduceMotionEnabled {
+                v.transform = CGAffineTransform(translationX: (chip.midX - v.center.x) * 0.7, y: (chip.midY - v.center.y) * 0.7).scaledBy(x: 0.3, y: 0.3)
+            }
+        } completion: { _ in finish() }
+    }
+
+    @objc private func dismissHintPadFromTap() { closeHintPad() }
 
     var currentPage: Page? { pages.indices.contains(currentIndex) ? pages[currentIndex] : nil }
 
@@ -648,13 +814,27 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
             guard let drawing = drawings[page.id], !drawing.strokes.isEmpty else { continue }
             combined.append(drawing.transformed(using: CGAffineTransform(translationX: 0, y: NotebookLayout.offset(i))))
         }
+        shapes.reset()
         loading = true
         canvas.drawing = combined
         loading = false
     }
 
     /// Fresh install or new device: pull each page's ink backup from the server.
+    /// Rebuild paper-baked snapshots only after the local ink is known, including after an offline change.
+    private func canRefreshPaperSnapshot(_ page: Page) -> Bool {
+        // An empty local file may be a placeholder for a legacy snapshot with no raw ink backup.
+        // Only replace that snapshot when we have actual strokes or the server confirms it is empty.
+        LocalDrawings.exists(page.id) && (drawings[page.id]?.strokes.isEmpty == false || page.strokeCount == 0 || page.snapshotVersion == 0)
+    }
+
+    private func refreshPaperSnapshots() {
+        let stale = pages.filter { $0.paperSnapshotStale == true && canRefreshPaperSnapshot($0) }.map(\.id)
+        if !stale.isEmpty { PendingUploads.all.formUnion(stale); scheduleUpload(delay: 0.5) }
+    }
+
     private func restoreBackups() {
+        refreshPaperSnapshots()
         let missing = pages.map(\.id).filter { !LocalDrawings.exists($0) }
         guard !missing.isEmpty, let api = API.current else { return }
         Task {
@@ -682,7 +862,7 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
                     LocalDrawings.save(PKDrawing(), pageId: id)
                 }
             }
-            guard !restored.isEmpty else { return }
+            guard !restored.isEmpty else { refreshPaperSnapshots(); return }
             commitNow()
             for (id, drawing) in restored where pages.contains(where: { $0.id == id }) && !LocalDrawings.isDeleted(id) && (drawings[id]?.strokes.isEmpty ?? true) {
                 drawings[id] = drawing
@@ -690,6 +870,7 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
                 LocalDrawings.save(drawing, pageId: id)
             }
             rebuildCanvasDrawing()
+            refreshPaperSnapshots()
         }
     }
 
@@ -717,10 +898,92 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
         canvas.drawing = PKDrawing(strokes: canvas.drawing.strokes + strokes)
     }
 
+    /// Used by the CI smoke test, which can't hold a pencil: wobbly shapes on the left of the page, and the same
+    /// strokes snapped on the right. The last one keeps its handles showing.
+    func addTestShapes() {
+        guard pages.indices.contains(currentIndex) else { return }
+        let top = NotebookLayout.offset(currentIndex)
+        func outline(_ v: [CGPoint], closed: Bool) -> [CGPoint] {
+            let path = closed ? v + [v[0]] : v
+            var out: [CGPoint] = []
+            for (a, b) in zip(path, path.dropFirst()) {
+                for j in 0..<24 { out.append(a + (b - a) * (CGFloat(j) / 24)) }
+            }
+            return out + [path[path.count - 1]]
+        }
+        func oval(_ c: CGPoint, _ rx: CGFloat, _ ry: CGFloat, _ turn: CGFloat) -> [CGPoint] {
+            (0...104).map { i -> CGPoint in
+                let t: CGFloat = 0.4 + 2 * CGFloat.pi * CGFloat(i) / 100
+                let v = CGPoint(x: rx * cos(t), y: ry * sin(t))
+                return c + Geo.rotate(v, by: turn)
+            }
+        }
+        func bow(_ a: CGPoint, _ b: CGPoint, _ lift: CGFloat) -> [CGPoint] {
+            (0...40).map { i -> CGPoint in
+                let t = CGFloat(i) / 40
+                let along: CGPoint = a + (b - a) * t
+                let rise: CGFloat = -lift * 4 * t * (1 - t)
+                return CGPoint(x: along.x, y: along.y + rise)
+            }
+        }
+        func headed(_ shaft: [CGPoint], _ length: CGFloat, half: Bool = false) -> [CGPoint] {
+            let tip = shaft[shaft.count - 1], dir = (tip - shaft[shaft.count - 4]).normalized
+            let b1 = tip + Geo.rotate(dir * -length, by: 0.5), b2 = tip + Geo.rotate(dir * -length, by: -0.5)
+            return shaft + outline(half ? [tip, b1] : [tip, b1, tip, b2], closed: false)
+        }
+        var hexagon: [CGPoint] = []
+        for k in 0..<6 {
+            let a = CGFloat(k) * .pi / 3 + 0.06
+            hexagon.append(CGPoint(x: 150 + 82 * cos(a), y: 640 + 82 * sin(a)))
+        }
+        var spring: [CGPoint] = [CGPoint(x: 280, y: 1250)]
+        for k in 1...6 { spring.append(CGPoint(x: 280 + CGFloat(k) * 28, y: k % 2 == 0 ? 1250 : 1210)) }
+        spring.append(CGPoint(x: 460, y: 1230))
+        var drawn: [[CGPoint]] = []
+        drawn.append(oval(CGPoint(x: 150, y: 180), 85, 85, 0))
+        drawn.append(oval(CGPoint(x: 360, y: 180), 95, 55, 0.15))
+        drawn.append(outline([CGPoint(x: 60, y: 320), CGPoint(x: 250, y: 326), CGPoint(x: 247, y: 462), CGPoint(x: 57, y: 455)], closed: true))
+        drawn.append(outline([CGPoint(x: 300, y: 470), CGPoint(x: 380, y: 322), CGPoint(x: 460, y: 468)], closed: true))
+        drawn.append(outline(hexagon, closed: true))
+        drawn.append(headed(outline([CGPoint(x: 290, y: 740), CGPoint(x: 455, y: 580)], closed: false), 28))
+        drawn.append(headed(bow(CGPoint(x: 280, y: 1080), CGPoint(x: 450, y: 1080), 70), 20, half: true))
+        drawn.append(outline([CGPoint(x: 60, y: 1050), CGPoint(x: 60, y: 1340), CGPoint(x: 240, y: 1338)], closed: false))
+        drawn.append(outline(spring, closed: false))
+        drawn.append(headed(bow(CGPoint(x: 60, y: 940), CGPoint(x: 450, y: 900), 110), 26))
+        var wobbly: [[CGPoint]] = []
+        for (n, points) in drawn.enumerated() {
+            let seed = CGFloat(n)
+            var shaken: [CGPoint] = []
+            for (i, p) in points.enumerated() {
+                let t = CGFloat(i)
+                let dx: CGFloat = 2.4 * sin(t * 0.37 + seed) + 1.2 * sin(t * 1.3 + 2 * seed)
+                let dy: CGFloat = 2.4 * cos(t * 0.29 + seed) + 1.2 * sin(t * 1.7 + seed)
+                shaken.append(CGPoint(x: p.x + dx, y: p.y + top + dy))
+            }
+            wobbly.append(shaken)
+        }
+        let raw = wobbly.map { points -> PKStroke in
+            let ink = points.enumerated().map { i, p in
+                PKStrokePoint(location: p, timeOffset: Double(i) * 0.01, size: CGSize(width: 4, height: 4),
+                              opacity: 1, force: 1, azimuth: 0, altitude: .pi / 2)
+            }
+            return PKStroke(ink: PKInk(.pen, color: .systemGray), path: PKStrokePath(controlPoints: ink, creationDate: Date()))
+        }
+        canvas.drawing = PKDrawing(strokes: canvas.drawing.strokes + raw)
+        for points in wobbly { shapes.snapForTesting(points.map { CGPoint(x: $0.x + 500, y: $0.y) }) }
+    }
+
     // MARK: Saving and syncing
+
+    func canvasViewDidBeginUsingTool(_ canvasView: PKCanvasView) {
+        closeHintPad()
+    }
 
     func canvasViewDrawingDidChange(_ canvasView: PKCanvasView) {
         guard !loading, !pages.isEmpty else { return }
+        shapes.drawingDidChange()
+        // A dragged shape is lifted out of the ink until it's dropped; that drop saves it.
+        guard !shapes.isDragging else { return }
         onSyncState?("unsynced")
         commitTask?.cancel()
         commitTask = Task {
@@ -736,7 +999,7 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
         commitTask = nil
         guard !pages.isEmpty else { return }
         var buckets = Array(repeating: [PKStroke](), count: pages.count)
-        for stroke in canvas.drawing.strokes {
+        for stroke in shapes.strokesForSaving(canvas.drawing.strokes) {
             buckets[NotebookLayout.page(forStrokeAt: stroke.renderBounds.midY, count: pages.count)].append(stroke)
         }
         var changed = false
@@ -855,7 +1118,7 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
                 let boxes = await PageSnapshot.recognizeText(drawing: drawing)
                 // Without the PDF the snapshot would hide it from Claude, so let the server's own render stand.
                 if page.pdf == nil || pdf != nil {
-                    let png = PageSnapshot.png(drawing: drawing, background: page.background, pdf: pdf)
+                    let png = PageSnapshot.png(drawing: drawing, background: page.background, paper: page.paper, pdf: pdf)
                     try await api.uploadSnapshot(pageId: id, png: png, textBoxes: boxes, strokeCount: drawing.strokes.count)
                 }
                 try await api.uploadDrawing(pageId: id, data: drawing.dataRepresentation(), strokeCount: drawing.strokes.count)
@@ -896,4 +1159,9 @@ struct NotebookCanvas: UIViewControllerRepresentable {
     func updateUIViewController(_ vc: NotebookCanvasController, context: Context) {
         vc.setAppearance(dark: dark, invertPDFs: invertPDFs)
     }
+}
+
+extension NotebookCanvasController: UIGestureRecognizerDelegate {
+    /// The hint pad's dismiss tap only watches; scrolling, zooming and drawing carry on as normal.
+    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool { true }
 }

@@ -1,3 +1,4 @@
+import { registerWebTools, describeBlock } from "./web-blocks.js";
 // The tools Claude sees once ClaudeBook is added as a connector in the Claude app.
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
@@ -9,10 +10,15 @@ import { clampRegion, renderPage, type Region } from "./render.js";
 import { PAGE_H, PAGE_W, type Notebook, type Page, type Store } from "./store.js";
 import { parsePageRegion } from "./regions.js";
 import { logMistake } from "./study.js";
+import { registerImageTools } from "./images.js";
 import { registerPageTools } from "./page-management.js";
+
+import { registerPaperTools, backgroundSchema, paperSchema } from "./paper-tools.js";
+import { paperRegions } from "./paper.js";
 
 const INSTRUCTIONS = `ClaudeBook is the user's handwritten notebook app on iPad. You can see their pages and draw on them.
 Pages use a fixed coordinate space: x 0..${PAGE_W} left to right, y 0..${PAGE_H} top to bottom.
+Interactive blocks: add_web_block runs HTML/JS in empty space, e.g. {x:100,y:200,w:800,h:500,title:"Wave",html:"<svg><circle r=20><animate attributeName=cx values=20;700;20 dur=3s repeatCount=indefinite /></circle></svg>"}. Sliders: <input type=range oninput="document.querySelector(\'output\').value=this.value"><output>50</output>. Libraries: <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.4/p5.min.js"></script>. Only HTTPS cdnjs.cloudflare.com, cdn.jsdelivr.net and unpkg.com subresources are allowed. update_web_block fixes a block by id. Check view_page after the iPad runs it: the server shows captured posters and descriptions report current-revision console warnings/errors. Uncaught errors only show as "Script error." (WebKit hides the text), so wrap risky code in try{...}catch(e){console.error(e.message, e.stack)} to see the real message and line. Neither Claude nor ChatGPT can forward images pasted in chat into a block; use self-contained graphics or ask the user to import the file.
 Workflow: call get_current_page first (it shows what the user has open, with a labelled blue coordinate grid and the positions of recognized handwriting).
 When checking work or reading small handwriting, zoom into each region (the zoom parameter) before judging it; the full-page image is too small to read every symbol.
 After reading maths from the image, save it with set_transcript so future page descriptions and search can use your reading, e.g. {region:{x:100,y:200,w:400,h:80},text:"2πrh + 4πr²",latex:"2\\\\pi r h + 4\\\\pi r^2"}. Vision is unreliable for maths; zoom in on low-confidence lines and compare alternatives. Recheck stale transcripts against the image and save the same rectangle again to replace them. Transcripts survive snapshots; any page stroke-count change marks them stale (changes elsewhere can flag them, and equal-count edits cannot be detected). Uploads without stroke counts also mark them stale.
@@ -24,10 +30,11 @@ Text supports Unicode symbols with font fallbacks, Unicode sub/superscripts and 
 For chemistry use mhchem inside math items: \\ce{H2O}, \\ce{OH-}, \\ce{SO4^2-}, \\ce{^{14}_{6}C}, \\ce{A + B -> C}, \\ce{A <=> B}, \\ce{A ->[above][below] B}.
 Your drawings live on a separate layer the user can hide or undo, so don't be shy, but keep the page readable and never cover the user's writing with text.
 Every draw returns each item's id and bbox, plus per-item warnings (unknown types, invalid fields, bad LaTeX, unknown keys, off-page): read them, they mean an item was skipped or misplaced. Invalid items are skipped individually, including in dry_run; e.g. a valid rect beside {type:"squiggle"} still draws. x,y on text and math is the top-left unless you set anchor. Use dry_run to measure before placing, and offset to shift a whole batch.
+Use place_image to paste a diagram from an HTTPS URL, base64 image or existing page/PDF crop: {x:100,y:200,w:400,source:{page_id:"source-page",region:{x:80,y:100,w:500,h:300}}}. Images support anchors, fit, rotation, opacity and group; move/copy/erase them by id. Neither Claude nor ChatGPT can forward images the user pasted in chat; use a URL/page crop or ask the user to import the file. draw_on_page skips image items.
 After drawing, call view_page to check the result and fix anything that landed in the wrong place.
 Page descriptions list item ids, labels and bounding boxes. Use erase_my_drawings with ids or group to remove selected items, move_items with ids, dx, dy to reposition them, and copy_items to duplicate them. Name related drawings with an item group.
 Use curved_arrow (alias curly) for reaction mechanisms: {type:"curly",from:[100,200],to:[250,200],bend:-60,head:"half"}. head:"full" draws an electron pair; half_head:true remains supported.
-Use molecule with SMILES for structures: {type:"molecule",smiles:"CC(=O)O",x:100,y:200,size:180,show_carbons:true,explicit_h:true}. Results include atoms (index to [x,y]) and elements maps; use these coordinates as arrow endpoints. Use path smooth:false for straight segments. Hints are hidden until the user taps their chip.
+Use molecule with SMILES for structures: {type:"molecule",smiles:"CC(=O)O",x:100,y:200,size:180,show_carbons:true,explicit_h:true}. Results include atoms (index to [x,y]) and elements maps; use these coordinates as arrow endpoints. Use path smooth:false for straight segments. Hints show only a small labelled chip; tapping it pops up a pad with the text (it wraps, so longer hints never run off the page).
 Graphs: define {type:"axes",origin:[300,650],xrange:[-2,5],yrange:[-1,4],unit:60,name:"g1",grid:true}; then reference its name (or an existing axes id) in later items of the same batch: {type:"plot",axes:"g1",fn:"x^2/2",from:-2,to:3,samples:200,dashed:true}, {type:"shade",axes:"g1",fn1:"x^2/2",fn2:"axis",from:0,to:2,opacity:0.25}, {type:"point",axes:"g1",at:[1,2],label:"P(1,2)",label_pos:"ne",filled:true}. Plot transforms are copied so moving or erasing axes leaves plots intact. Parametric example: {type:"plot",axes:"g1",x:"cos(t)",y:"sin(t)",t:[0,"2pi"]}. Expressions support arithmetic, implicit multiplication, pi/e and sin cos tan asin acos atan sinh cosh tanh log(base 10) ln exp sqrt abs floor ceil.
 Angles use page coordinates: {type:"angle",vertex:[300,650],from:[400,650],to:[360,570],radius:30,label:"θ"}; right_angle:true forces a square (automatic near 90°). Without axes, point.at also uses page coordinates.
 Physics: rect, ellipse, text, math, molecule and svg accept rotation in clockwise screen degrees about the positioned bbox centre; e.g. {type:"rect",x:200,y:400,w:100,h:60,rotation:30}. Text/math anchors apply before rotation: {type:"text",x:500,y:500,text:"block",anchor:"center",rotation:30}. Pattern fills on rect/ellipse/svg: {type:"rect",x:600,y:400,w:200,h:150,fill_pattern:"cross",pattern_spacing:25}; cross uses ⊗ (into page), dot uses ⊙ (out), hatch uses parallel lines with pattern_angle (default 45; e.g. pattern_angle:30). Patterns clip to the shape and work with normal fill and rotation; fill without color keeps the shape outline hidden.
@@ -37,6 +44,7 @@ PDF-backed pages include their own text with page-coordinate line boxes, filtere
 create_pdf ships these exact Typst imports offline (Typst 0.13.1):
 ${TYPST_IMPORTS}
 ${TYPST_COMPATIBILITY}
+Paper: choose per-page pattern and colour with set_page_background, e.g. {background:"cornell",paper:"black"}. create_notebook and add_pages also accept background and paper. On black/slate use light ink; use view_page to check. Structured regions are in page descriptions.
 Notebook/page management: use list_pages to get stable page ids, delete_pages to remove requested pages (including user ink), reorder_pages with a complete ordered id list, duplicate_pages for independent copies, and move_pages to move existing page ids to another notebook. after_page counts target pages before insertion (0=front, default=end), after removal for moves. For a notebook the user explicitly wants deleted, use delete_notebook with direct:true; otherwise omit direct to request iPad confirmation. Empty notebooks can be refilled with add_pages.
 Example drawing: #canvas({ draw.line((0,0),(2,1)); draw.circle((1,1),radius:0.4) }). Chemistry: #ch("H2O").
 The library is organised in folders (list_notebooks shows them). Put new notebooks and PDFs in the folder that fits with the folder parameter, and file notebooks with move_notebook. Scratch pads are temporary and delete themselves a week after their last edit unless the user keeps them.`;
@@ -54,6 +62,9 @@ const describeItem = (item: Item) => ({ id: item.id, type: item.type, label: ite
 export function buildMcpServer(store: Store) {
   const server = new McpServer({ name: "claudebook", version: "0.1.0" }, { instructions: INSTRUCTIONS });
   registerPageTools(server, store);
+  registerPaperTools(server, store);
+  registerImageTools(server, store);
+  registerWebTools(server, store);
 
   /** Resolve a page from optional ids, falling back to whatever the user has open. */
   function resolvePage(pageId?: string, notebookId?: string, pageNumber?: number) {
@@ -72,8 +83,10 @@ export function buildMcpServer(store: Store) {
     const { notebook, page, index } = found;
     const lines = [
       `Notebook "${notebook.title}" (id ${notebook.id}), page ${index + 1} of ${notebook.pages.length} (page id ${page.id}).`,
-      `Background: ${page.background}${page.pdf ? `, PDF page ${page.pdf.page}` : ""}. Your layer has ${page.claudeLayer.length} item(s).`,
+      `Background: ${page.background} on ${page.paper ?? "default"} paper. Paper: ${page.paper ?? "default"}${page.pdf ? `, PDF page ${page.pdf.page}` : ""}. Your layer has ${page.claudeLayer.length} item(s).`,
     ];
+    lines.push(...paperRegions(page.background));
+    if (page.paperSnapshotStale) lines.push("Paper changed: the last ink snapshot still contains the previous paper until the iPad syncs. User ink is preserved.");
     const doubts = page.doubts.filter((d) => !d.resolvedAt);
     if (doubts.length) {
       lines.push("Open doubts: zoom into each marked region with view_page before explaining or resolving it (x, y, w, h):");
@@ -108,6 +121,7 @@ export function buildMcpServer(store: Store) {
       lines.push("Your existing items (bbox is {x,y,w,h} in page units):");
       for (const item of page.claudeLayer) lines.push(JSON.stringify(describeItem(item)));
     }
+    for (const item of page.claudeLayer) if (item.type === "web") lines.push(describeBlock(item));
     return lines.join("\n");
   }
 
@@ -351,7 +365,8 @@ export function buildMcpServer(store: Store) {
     },
   );
 
-  const background = z.enum(["blank", "lined", "grid", "dotted"]).optional();
+  const background = backgroundSchema.optional();
+  const paper = paperSchema.optional();
 
   server.registerTool(
     "resolve_doubt",
@@ -430,11 +445,11 @@ export function buildMcpServer(store: Store) {
     {
       title: "Create a notebook",
       description: "Make a new notebook for the user, optionally inside a folder.",
-      inputSchema: { title: z.string(), pages: z.number().int().min(1).max(200).optional(), background, folder: folderParam },
+      inputSchema: { title: z.string(), pages: z.number().int().min(1).max(200).optional(), background, paper, folder: folderParam },
     },
-    async ({ title, pages, background, folder }) => {
+    async ({ title, pages, background, paper, folder }) => {
       const folderId = folder ? resolveFolder(folder, true) : undefined;
-      const nb = store.createNotebook(title, pages ?? 1, background ?? "blank", { folderId });
+      const nb = store.createNotebook(title, pages ?? 1, background ?? "blank", { folderId, paper });
       const where = folderId ? ` in folder "${store.folderPath(folderId).join("/")}"` : "";
       return text(`Created "${nb.title}" (id ${nb.id}) with ${nb.pages.length} page(s)${where}.`);
     },
@@ -468,13 +483,13 @@ export function buildMcpServer(store: Store) {
         notebook_id: z.string().optional(),
         count: z.number().int().min(1).max(100).optional(),
         after_page: z.number().int().min(0).optional().describe("0 inserts at the start"),
-        background,
+        background, paper,
       },
     },
-    async ({ notebook_id, count, after_page, background }) => {
+    async ({ notebook_id, count, after_page, background, paper }) => {
       const nbId = notebook_id ?? store.view().notebookId;
       if (!nbId || !store.getNotebook(nbId)) return fail("Notebook not found.");
-      const pages = Array.from({ length: count ?? 1 }, () => store.newPage(background ?? "blank"));
+      const pages = Array.from({ length: count ?? 1 }, () => store.newPage(background ?? "blank", paper));
       const at = store.insertPages(nbId, pages, after_page === undefined ? undefined : after_page - 1);
       return text(`Added ${pages.length} page(s) starting at page ${at + 1}. Page ids: ${pages.map((p) => p.id).join(", ")}`);
     },

@@ -9,8 +9,13 @@ enum PageGeometry {
     static let rect = CGRect(origin: .zero, size: size)
 }
 
-enum PageBackground: String, Codable {
-    case blank, lined, grid, dotted
+enum PageBackground: String, Codable, CaseIterable {
+    case blank, lined, grid, dotted, lines_full, lined_narrow, lined_wide, lined_margin, grid_small, grid_large, graph, dotted_large, isometric, hex, cornell, music, handwriting, two_column
+}
+
+enum PaperColor: String, Codable, CaseIterable {
+    case `default`, white, black, cream, yellow, slate
+    var isDark: Bool { self == .black || self == .slate }
 }
 
 struct TextBox: Codable, Hashable {
@@ -60,6 +65,12 @@ struct ClaudeGraph: Codable, Hashable {
 struct ClaudeItem: Codable, Identifiable, Hashable {
     var id: String
     var type: String
+    var title: String?
+    var rev: Int?
+    var autoplay: Bool?
+    var poster: String?
+    var posterAt: String?
+    var logs: [String]?
     var points: [[Double]]?
     var from: [Double]?
     var to: [Double]?
@@ -114,9 +125,15 @@ struct ClaudeItem: Codable, Identifiable, Hashable {
     var side: String?
     var hatchLength: Double?
     var spacing: Double?
+    var fit: String?
+    var opacity: Double?
+    var alt: String?
+    var file: String?
 
     enum CodingKeys: String, CodingKey {
         case id, type, points, from, to, center, rx, ry, x, y, w, h, text, size, color, width, fill, d, closed, dashed, latex, smooth, bend, group, label, revealed, smiles, parts, graph, origin, vertex, at, axes, name, radius, filled
+        case fit, opacity, alt
+        case file, title, rev, autoplay, poster, posterAt, logs
         case head
         case headFilled = "head_filled"
         case headD = "head_d"
@@ -138,6 +155,12 @@ struct ClaudeItem: Codable, Identifiable, Hashable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = try c.decode(String.self, forKey: .id)
         type = try c.decode(String.self, forKey: .type)
+        title = try c.decodeIfPresent(String.self, forKey: .title)
+        rev = try c.decodeIfPresent(Int.self, forKey: .rev)
+        autoplay = try c.decodeIfPresent(Bool.self, forKey: .autoplay)
+        poster = try c.decodeIfPresent(String.self, forKey: .poster)
+        posterAt = try c.decodeIfPresent(String.self, forKey: .posterAt)
+        logs = try c.decodeIfPresent([String].self, forKey: .logs)
         // Plot x/y are expressions and plot/shade from/to are scalar intervals.
         // Their prepared parts carry all client geometry; don't decode them as
         // the point coordinates used by older drawing types.
@@ -197,6 +220,10 @@ struct ClaudeItem: Codable, Identifiable, Hashable {
         side = try c.decodeIfPresent(String.self, forKey: .side)
         hatchLength = try c.decodeIfPresent(Double.self, forKey: .hatchLength)
         spacing = try c.decodeIfPresent(Double.self, forKey: .spacing)
+        fit = try c.decodeIfPresent(String.self, forKey: .fit)
+        opacity = try c.decodeIfPresent(Double.self, forKey: .opacity)
+        alt = try c.decodeIfPresent(String.self, forKey: .alt)
+        file = try c.decodeIfPresent(String.self, forKey: .file)
     }
 }
 
@@ -209,12 +236,25 @@ struct PDFRef: Codable, Hashable {
 struct Page: Codable, Identifiable, Hashable {
     var id: String
     var background: PageBackground
+    var paper: PaperColor? = nil
+    var paperSnapshotStale: Bool? = nil
+    var strokeCount: Int? = nil
     var pdf: PDFRef?
     var snapshotVersion: Int
     var textBoxes: [TextBox]
     var claudeLayer: [ClaudeItem]
     var doubts: [Doubt]?
     var updatedAt: String
+}
+
+extension Page {
+    /// A blank page made on the iPad, so it can be shown before the server has it.
+    static func blank(background: PageBackground, paper: PaperColor? = nil) -> Page {
+        let letters = Array("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789")
+        let id = "p" + String((0..<15).map { _ in letters.randomElement()! })
+        return Page(id: id, background: background, paper: paper, pdf: nil, snapshotVersion: 0, textBoxes: [], claudeLayer: [], doubts: [],
+                    updatedAt: ISO8601DateFormatter().string(from: Date()))
+    }
 }
 
 enum ISODate {

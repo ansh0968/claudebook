@@ -55,7 +55,7 @@ struct API {
         return API(base: url, secret: Credentials.secret)
     }
 
-    private func request(_ path: String, method: String = "GET", json: Encodable? = nil, body: Data? = nil, contentType: String = "application/octet-stream", query: [URLQueryItem] = []) async throws -> Data {
+    func request(_ path: String, method: String = "GET", json: Encodable? = nil, body: Data? = nil, contentType: String = "application/octet-stream", query: [URLQueryItem] = []) async throws -> Data {
         var url = base.appending(path: "api").appending(path: path)
         if !query.isEmpty { url.append(queryItems: query) }
         var req = URLRequest(url: url)
@@ -141,9 +141,10 @@ struct API {
         _ = try await request("notebooks/\(id)/delete-request", method: "DELETE")
     }
 
-    func addPage(notebookId: String, afterIndex: Int, background: PageBackground) async throws {
-        struct Body: Encodable { var count: Int; var afterIndex: Int; var background: PageBackground }
-        _ = try await request("notebooks/\(notebookId)/pages", method: "POST", json: Body(count: 1, afterIndex: afterIndex, background: background))
+    /// Add a page the editor is already showing, under the id it picked. Safe to retry.
+    func addPage(_ page: Page, notebookId: String, afterIndex: Int) async throws {
+        struct Body: Encodable { var pageIds: [String]; var afterIndex: Int; var background: PageBackground; var paper: PaperColor? }
+        _ = try await request("notebooks/\(notebookId)/pages", method: "POST", json: Body(pageIds: [page.id], afterIndex: afterIndex, background: page.background, paper: page.paper))
     }
 
     func deletePages(notebookId: String, pageIds: [String]) async throws -> Notebook {
@@ -192,6 +193,10 @@ struct API {
         var query = [URLQueryItem(name: "title", value: title)]
         if let folderId { query.append(URLQueryItem(name: "folderId", value: folderId)) }
         return try decode(Notebook.self, await request("notebooks/import-pdf", method: "POST", body: data, contentType: "application/pdf", query: query))
+    }
+
+    func image(file: String) async throws -> Data {
+        try await request("images/\(file)")
     }
 
     func pdf(file: String) async throws -> Data {

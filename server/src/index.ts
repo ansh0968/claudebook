@@ -1,3 +1,6 @@
+import { isBackground, isPaper, type Paper } from "./paper.js";
+import { registerImageRoutes } from "./images.js";
+import { webBlockRoutes } from "./web-blocks.js";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import http from "node:http";
@@ -94,10 +97,19 @@ app.all("/mcp/:secret", (_req, res) => res.status(405).set("Allow", "POST").end(
 const api = express.Router();
 api.use(requireToken, express.json({ limit: "25mb" }));
 registerPageRoutes(api, store);
+registerImageRoutes(api, store);
 
 /** Notebooks as the app sees them: scratch pads carry the time they'll delete themselves. */
 const withExpiry = (nb: Notebook) => (nb.scratch ? { ...nb, expiresAt: store.scratchExpiry(nb) } : nb);
 const FOLDER_NAME = /^.{1,100}$/su;
+
+api.post("/pages/background", (req, res) => {
+  try {
+    const { pageIds, background, paper } = req.body ?? {};
+    if (!Array.isArray(pageIds) || !pageIds.length || pageIds.length > 1000 || !pageIds.every(id => typeof id === "string")) return res.status(400).json({ error: "pageIds must be a nonempty array of page ids" });
+    res.json({ pages: store.setBackground(pageIds, background, paper) });
+  } catch (error) { res.status(400).json({ error: (error as Error).message }); }
+});
 
 api.get("/notebooks", (_req, res) => res.json({ notebooks: store.listNotebooks().map(withExpiry), folders: store.listFolders(), view: store.view() }));
 
@@ -107,10 +119,12 @@ api.get("/search", (req, res) => {
 });
 
 api.post("/notebooks", (req, res) => {
-  const { title, pages, background, folderId, scratch } = req.body as { title?: string; pages?: number; background?: Background; folderId?: string; scratch?: boolean };
+  const { title, pages, background, paper, folderId, scratch } = req.body as { title?: string; pages?: number; background?: Background; paper?: Paper; folderId?: string; scratch?: boolean };
   if (folderId !== undefined && (typeof folderId !== "string" || (folderId && !store.getFolder(folderId)))) return res.status(400).json({ error: "folderId must name an existing folder" });
   if (scratch && folderId) return res.status(400).json({ error: "scratch pads live outside folders" });
-  const nb = store.createNotebook(title || (scratch ? "Scratch pad" : "Untitled"), pages ?? 1, background ?? (scratch ? "grid" : "blank"), { folderId: folderId || undefined, scratch: scratch === true });
+  if (background !== undefined && !isBackground(background)) return res.status(400).json({ error: "invalid background" });
+  if (paper !== undefined && !isPaper(paper)) return res.status(400).json({ error: "invalid paper" });
+  const nb = store.createNotebook(title || (scratch ? "Scratch pad" : "Untitled"), pages ?? 1, background ?? (scratch ? "grid" : "blank"), { folderId: folderId || undefined, scratch: scratch === true, paper });
   res.json(withExpiry(nb));
 });
 
@@ -211,11 +225,16 @@ api.delete("/notebooks/:id", (req, res) => {
 });
 
 api.post("/notebooks/:id/pages", (req, res) => {
-  const { count, afterIndex, background } = req.body as { count?: number; afterIndex?: number; background?: Background };
+  const { count, afterIndex, background, paper, pageIds } = req.body as { count?: number; afterIndex?: number; background?: Background; paper?: Paper; pageIds?: string[] };
   try {
     if (count !== undefined && (!Number.isInteger(count) || count < 1 || count > 100)) return res.status(400).json({ error: "count must be an integer from 1 to 100" });
-    if (background !== undefined && !["blank", "lined", "grid", "dotted"].includes(background)) return res.status(400).json({ error: "invalid background" });
-    const pages = Array.from({ length: count ?? 1 }, () => store.newPage(background ?? "blank"));
+    if (background !== undefined && !isBackground(background)) return res.status(400).json({ error: "invalid background" });
+    if (paper !== undefined && !isPaper(paper)) return res.status(400).json({ error: "invalid paper" });
+    if (pageIds !== undefined) {
+      if (!Array.isArray(pageIds) || (count !== undefined && count !== pageIds.length)) return res.status(400).json({ error: "pageIds must be an array with one id per page" });
+      return res.json({ pages: store.insertClientPages(req.params.id, pageIds, background ?? "blank", afterIndex, paper) });
+    }
+    const pages = Array.from({ length: count ?? 1 }, () => store.newPage(background ?? "blank", paper));
     store.insertPages(req.params.id, pages, afterIndex);
     res.json({ pages });
   } catch (e) {
@@ -269,7 +288,7 @@ api.get("/pages/:id/render.png", async (req, res) => {
 api.get("/pages/:id/claude.svg", (req, res) => {
   const found = store.findPage(req.params.id);
   if (!found) return res.status(404).end();
-  res.type("svg").set("Cache-Control", "no-store").send(claudeLayerSvg(found.page));
+  res.type("svg").set("Cache-Control", "no-store").send(claudeLayerSvg(found.page, store));
 });
 
 api.get("/pages/:id/claude", (req, res) => {
@@ -307,6 +326,7 @@ api.delete("/pages/:id/claude", (req, res) => {
   }
 });
 
+webBlockRoutes(api, store);
 app.use("/api", api);
 
 // --- Web viewer, handy for testing from any browser before the iPad app exists ---

@@ -10,6 +10,31 @@ final class StudyFlowTests: XCTestCase {
     }
 
     @MainActor
+    func testAddingAPageShowsItRightAwayAndSavesItInPlace() async throws {
+        let notebook: SmokeNotebook = try await api.request("notebooks", method: "POST", body: ["title": "Add page flow", "pages": 2])
+        try await api.setView(notebook: notebook.id, page: notebook.pages[0].id)
+        let app = launch()
+        defer { app.terminate() }
+        XCTAssertTrue(app.navigationBars["Add page flow · 1/2"].waitForExistence(timeout: 10))
+        let add = app.buttons["editor.addPage"]
+        try requireReady(add)
+        add.tap()
+        // The page is made on the iPad, so the editor lands on it without waiting for the server.
+        XCTAssertTrue(app.navigationBars["Add page flow · 2/3"].waitForExistence(timeout: 2), "The new page did not show up straight away")
+        let added: SmokeNotebook = try await eventually {
+            let current: SmokeNotebook = try await self.api.request("notebooks/\(notebook.id)")
+            return current.pages.count == 3 ? current : nil
+        }
+        XCTAssertEqual(added.pages[0].id, notebook.pages[0].id)
+        XCTAssertEqual(added.pages[2].id, notebook.pages[1].id)
+        // The reload after the add must agree with what is on screen, not add or drop a page.
+        try await Task.sleep(for: .seconds(1.5))
+        XCTAssertTrue(app.navigationBars["Add page flow · 2/3"].exists)
+        let settled: SmokeNotebook = try await api.request("notebooks/\(notebook.id)")
+        XCTAssertEqual(settled.pages.map(\.id), added.pages.map(\.id))
+    }
+
+    @MainActor
     func testAskClaudeDragPersistsAPageRegion() async throws {
         let notebook = try await fixture()
         let page = try XCTUnwrap(notebook.pages.first)
@@ -43,7 +68,47 @@ final class StudyFlowTests: XCTestCase {
     }
 
     @MainActor
-    func testHiddenHintTapPersistsRevealAndRemovesChip() async throws {
+    func testHoldingAtTheEndOfAStrokeSnapsItAndHandlesAdjustIt() async throws {
+        let notebook: SmokeNotebook = try await api.request("notebooks", method: "POST", body: ["title": "Shapes", "pages": 1])
+        let page = try XCTUnwrap(notebook.pages.first)
+        try await api.setView(notebook: notebook.id, page: page.id)
+        let app = launch(extra: ["CLAUDEBOOK_TEST_FINGER_INK": "1"])
+        defer { app.terminate() }
+        try requireReady(app.buttons["editor.askClaude"])
+        try await Task.sleep(for: .seconds(1))
+        let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.25, dy: 0.45))
+        let end = app.coordinate(withNormalizedOffset: CGVector(dx: 0.7, dy: 0.47))
+        start.press(forDuration: 0.05, thenDragTo: end, withVelocity: .slow, thenHoldForDuration: 1.2)
+        let done = app.buttons["shape.done"]
+        guard done.waitForExistence(timeout: 5) else {
+            print(app.debugDescription)
+            XCTFail("Holding still at the end of a stroke did not snap it")
+            return
+        }
+        let name = app.staticTexts["shape.name"]
+        XCTAssertEqual(name.label, "Line")
+        saveScreenshot("20-hold-snapped-line")
+
+        // Pull the middle handle up: the line bends into an arc and stays editable.
+        let bend = app.buttons["shape.handle.1"]
+        try requireReady(bend, timeout: 3)
+        let from = bend.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+        from.press(forDuration: 0.1, thenDragTo: from.withOffset(CGVector(dx: 0, dy: -140)))
+        let bent = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label == %@", "Arc"), object: name)
+        await fulfillment(of: [bent], timeout: 5)
+        saveScreenshot("21-shape-bent")
+
+        done.tap()
+        let gone = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: done)
+        await fulfillment(of: [gone], timeout: 5)
+        // The snapped shape is saved and uploaded like any handwriting, so Claude sees it.
+        let uploaded: Bool = try await eventually { try await self.api.exists("pages/\(page.id)/drawing") ? true : nil }
+        XCTAssertTrue(uploaded)
+        let _: SmokeOK = try await api.request("notebooks/\(notebook.id)", method: "DELETE")
+    }
+
+    @MainActor
+    func testHintChipOpensAPadThatHidesAgain() async throws {
         let notebook = try await fixture()
         let page = try XCTUnwrap(notebook.pages.first)
         let hint = try XCTUnwrap(page.claudeLayer.first { $0.type == "hint" && $0.revealed != true }, "Seed an unrevealed hint before this test")
@@ -63,13 +128,24 @@ final class StudyFlowTests: XCTestCase {
         }
         XCTAssertTrue(chip.isHittable)
         chip.tap()
+        // The text shows in a pad, not inline on the page, and the peek is recorded for Claude.
+        let text = app.staticTexts["hint.text"]
+        XCTAssertTrue(text.waitForExistence(timeout: 5), "Tapping the chip should open the hint pad")
+        XCTAssertEqual(text.label, hint.text)
         let revealed: SmokeItem = try await eventually {
             let current: SmokeNotebook = try await self.api.request("notebooks/\(notebook.id)")
             return current.pages.first?.claudeLayer.first { $0.id == hint.id && $0.revealed == true }
         }
         XCTAssertEqual(revealed.text, hint.text)
-        let removed = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: chip)
-        await fulfillment(of: [removed], timeout: 5)
+        let close = app.buttons["hint.close"]
+        try requireReady(close, timeout: 5)
+        close.tap()
+        let gone = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: text)
+        await fulfillment(of: [gone], timeout: 5)
+        // The chip stays so the hint can be opened again.
+        XCTAssertTrue(chip.waitForExistence(timeout: 3))
+        chip.tap()
+        XCTAssertTrue(app.staticTexts["hint.text"].waitForExistence(timeout: 5), "An opened hint should reopen")
     }
 
     @MainActor
@@ -233,6 +309,35 @@ final class StudyFlowTests: XCTestCase {
     }
 
     @MainActor
+    func testSelectingSeveralPagesDeletesThemTogether() async throws {
+        executionTimeAllowance = 120
+        let notebook: SmokeNotebook = try await api.request("notebooks", method: "POST", body: ["title": "Bulk delete", "pages": 4])
+        let ids = notebook.pages.map(\.id)
+        try await api.setView(notebook: notebook.id, page: ids[0])
+        let app = launch()
+        defer { app.terminate() }
+        try requireCRUDReady(app.buttons["editor.pages"])
+        app.buttons["editor.pages"].tap()
+        try requireCRUDReady(app.buttons["pages.edit"])
+        app.buttons["pages.edit"].tap()
+        // Pick pages 2 and 4, then one delete removes both.
+        for id in [ids[1], ids[3]] {
+            let row = app.descendants(matching: .any)["pages.select.\(id)"].firstMatch
+            XCTAssertTrue(row.waitForExistence(timeout: 5), "Row for \(id) should be selectable")
+            row.tap()
+        }
+        try requireCRUDReady(app.buttons["pages.deleteSelected"])
+        app.buttons["pages.deleteSelected"].tap()
+        try requireCRUDReady(app.buttons["pages.confirmDelete"])
+        app.buttons["pages.confirmDelete"].tap()
+        let remaining: SmokeNotebook = try await eventually {
+            let current: SmokeNotebook = try await self.api.request("notebooks/\(notebook.id)")
+            return current.pages.count == 2 ? current : nil
+        }
+        XCTAssertEqual(remaining.pages.map(\.id), [ids[0], ids[2]])
+    }
+
+    @MainActor
     func testDeletingOnlyPageShowsAnAddPageAction() async throws {
         let notebook: SmokeNotebook = try await api.request("notebooks", method: "POST", body: ["title": "Empty pages", "pages": 1])
         let pageId = notebook.pages[0].id
@@ -311,13 +416,142 @@ final class StudyFlowTests: XCTestCase {
         }
     }
 
+    @MainActor
+    func testSnapshotOnlyInkSurvivesPaperChange() async throws {
+        let notebook: SmokeNotebook = try await api.request("notebooks", method: "POST", body: ["title": "Legacy snapshot preservation", "pages": 1])
+        let page = try XCTUnwrap(notebook.pages.first)
+        let png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/l9sAAAAASUVORK5CYII="
+        let _: SmokeOK = try await api.request("pages/\(page.id)/snapshot", method: "PUT", body: ["png": png, "textBoxes": [], "strokeCount": 2])
+        let _: SmokePaperUpdate = try await api.request("pages/background", method: "POST", body: ["pageIds": [page.id], "background": "cornell", "paper": "black"])
+        try await api.setView(notebook: notebook.id, page: page.id)
+        let app = launch()
+        defer { app.terminate() }
+        try openFirstPage(app, pageId: page.id)
+        // Allow the raw-backup 404 and scheduled snapshot refresh to finish. No raw ink exists.
+        try await Task.sleep(for: .seconds(3))
+        let current: SmokeNotebook = try await api.request("notebooks/\(notebook.id)")
+        XCTAssertEqual(current.pages.first?.snapshotVersion, 1, "An empty local placeholder must not overwrite snapshot-only ink")
+        XCTAssertEqual(current.pages.first?.paperSnapshotStale, true)
+    }
+
+    @MainActor
+    func testPageTypesCornellBlackAndHex() async throws {
+        let notebook: SmokeNotebook = try await api.request("notebooks", method: "POST", body: ["title": "Paper picker test", "pages": 1])
+        let page = try XCTUnwrap(notebook.pages.first)
+        try await api.setView(notebook: notebook.id, page: page.id)
+        let app = launch()
+        defer { app.terminate() }
+        try openFirstPage(app, pageId: page.id)
+        func openPicker() throws {
+            try openMenu(app.buttons["Notebook options"])
+            try requireReady(app.buttons["editor.pageType"])
+            app.buttons["editor.pageType"].tap()
+            try requireReady(app.buttons["paper.color"])
+        }
+        func selectPattern(_ id: String) throws {
+            let row = app.buttons["paper.pattern.\(id)"]
+            for _ in 0..<8 { if row.isHittable { break }; app.swipeUp() }
+            try requireReady(row); row.tap()
+            app.buttons["paper.apply"].tap()
+            try requireReady(app.buttons["editor.askClaude"])
+        }
+        try openPicker()
+        app.buttons["paper.color"].tap()
+        // PencilKit's palette also has a "Black" swatch, in its own window.
+        app.windows.element(boundBy: 0).buttons["Black"].tap()
+        try selectPattern("cornell")
+        let cornell: SmokeNotebook = try await eventually {
+            let current: SmokeNotebook = try await self.api.request("notebooks/\(notebook.id)")
+            return current.pages.first?.background == "cornell" && current.pages.first?.paper == "black" ? current : nil
+        }
+        XCTAssertEqual(cornell.pages.first?.paper, "black")
+        let blackShot = XCTAttachment(screenshot: app.screenshot()); blackShot.name = "cornell-black"; blackShot.lifetime = .keepAlways; add(blackShot)
+        try openPicker()
+        try selectPattern("hex")
+        let hex: SmokeNotebook = try await eventually {
+            let current: SmokeNotebook = try await self.api.request("notebooks/\(notebook.id)")
+            return current.pages.first?.background == "hex" ? current : nil
+        }
+        XCTAssertEqual(hex.pages.first?.paper, "black")
+        let hexShot = XCTAttachment(screenshot: app.screenshot()); hexShot.name = "hex-paper"; hexShot.lifetime = .keepAlways; add(hexShot)
+    }
+
+    @MainActor
+    func testWebAnimationTapFullscreenAndOffscreenPoster() async throws {
+        let list: SmokeList = try await api.request("notebooks")
+        let notebook = try XCTUnwrap(list.notebooks.first { $0.title == "Interactive blocks" })
+        let page = try XCTUnwrap(notebook.pages.first)
+        let block = try XCTUnwrap(page.claudeLayer.first { $0.type == "web" })
+        try await api.setView(notebook: notebook.id, page: page.id)
+        let app = launch()
+        defer { app.terminate() }
+        // setView + autoopen already lands on this page; the page grid can lose hittability while
+        // the live web content processes register, so don't route through it.
+        try requireReady(app.buttons["editor.askClaude"], timeout: 15)
+        // CI simulators often can't read WebKit's remote accessibility tree, so wait for the live
+        // view and the block's own console line, then tap where the button is laid out.
+        let live = app.webViews["web.live.\(block.id)"]
+        try requireReady(live, timeout: 15)
+        let _: SmokeItem = try await eventually {
+            let current: SmokeNotebook = try await self.api.request("notebooks/\(notebook.id)")
+            return current.pages[0].claudeLayer.first { $0.id == block.id && $0.logs?.contains(where: { $0.contains("initial viewport") }) == true }
+        }
+        // The button sits at about (24...250, 24...70) in the block's 800x400 CSS viewport.
+        live.coordinate(withNormalizedOffset: CGVector(dx: 0.15, dy: 0.12)).tap()
+        let _: SmokeItem = try await eventually {
+            let current: SmokeNotebook = try await self.api.request("notebooks/\(notebook.id)")
+            return current.pages[0].claudeLayer.first { $0.id == block.id && $0.logs?.contains(where: { $0.contains("button changed") }) == true && $0.poster != nil && $0.logs?.contains(where: { $0.contains("initial viewport 800x400") }) == true }
+        }
+        let rendered = XCTAttachment(screenshot: app.screenshot()); rendered.name = "web-live-button"; rendered.lifetime = .keepAlways; add(rendered)
+        let controls = app.buttons["web.menu.\(block.id)"]
+        try requireReady(controls)
+        let originalCorner = controls.frame
+        controls.tap(); app.buttons["Fullscreen"].tap()
+        let close = app.buttons["web.fullscreen.close"]
+        try requireReady(close)
+        let full = XCTAttachment(screenshot: app.screenshot()); full.name = "web-fullscreen"; full.lifetime = .keepAlways; add(full)
+        close.tap()
+        let play = app.buttons["web.play.\(block.id)"]
+        try requireReady(play)
+        XCTAssertEqual(controls.frame.minX, originalCorner.minX, accuracy: 2)
+        XCTAssertEqual(controls.frame.minY, originalCorner.minY, accuracy: 2)
+        XCTAssertEqual(controls.frame.width, originalCorner.width, accuracy: 2)
+        play.tap()
+        let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.96, dy: 0.85))
+        let end = app.coordinate(withNormalizedOffset: CGVector(dx: 0.96, dy: 0.15))
+        start.press(forDuration: 0.1, thenDragTo: end)
+        start.press(forDuration: 0.1, thenDragTo: end)
+        let offscreen = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: app.webViews["web.live.\(block.id)"])
+        await fulfillment(of: [offscreen], timeout: 8)
+        do {
+            let _: SmokeItem = try await eventually {
+                // Blocks load with an opaque origin, so WebKit masks uncaught errors as "Script error."
+                // (known limitation; console.error/warn text still comes through in full).
+                let current: SmokeNotebook = try await self.api.request("notebooks/\(notebook.id)")
+                return current.pages[0].claudeLayer.first { $0.logs?.contains(where: { $0.contains("smoke load error") || $0.contains("Script error") }) == true }
+            }
+        } catch {
+            let current: SmokeNotebook = try await api.request("notebooks/\(notebook.id)")
+            for item in current.pages[0].claudeLayer where item.type == "web" { print("Web block \(item.id) poster \(item.poster ?? "none") logs: \(item.logs ?? [])") }
+            throw error
+        }
+    }
+
     private func fixture() async throws -> SmokeNotebook {
         let list: SmokeList = try await api.request("notebooks")
         return try XCTUnwrap(list.notebooks.first { $0.title == "Organic chemistry" }, "Run scripts/smoke-fixture.mjs first")
     }
 
+    /// CI publishes anything saved here alongside the simulator screenshots.
     @MainActor
-    private func launch(autoopen: Bool = true) -> XCUIApplication {
+    private func saveScreenshot(_ name: String) {
+        guard let dir = ProcessInfo.processInfo.environment["CLAUDEBOOK_SHOTS"], !dir.isEmpty else { return }
+        let url = URL(fileURLWithPath: dir).appending(path: "\(name).png")
+        try? XCUIScreen.main.screenshot().pngRepresentation.write(to: url)
+    }
+
+    @MainActor
+    private func launch(autoopen: Bool = true, extra: [String: String] = [:]) -> XCUIApplication {
         XCUIDevice.shared.orientation = .portrait
         let app = XCUIApplication()
         app.launchEnvironment = [
@@ -326,7 +560,7 @@ final class StudyFlowTests: XCTestCase {
             "CLAUDEBOOK_AUTOOPEN": autoopen ? "1" : "0",
             "CLAUDEBOOK_TEST_STROKE": "0",
             "CLAUDEBOOK_TEST_SCROLL": "",
-        ]
+        ].merging(extra) { $1 }
         app.launch()
         return app
     }
@@ -370,11 +604,12 @@ private struct SmokeList: Decodable { var notebooks: [SmokeNotebook]; var view: 
 private struct SmokeView: Decodable { var notebookId: String?; var pageId: String? }
 private struct SmokeNotebook: Decodable { var id: String; var title: String; var pages: [SmokePage]; var folderId: String?; var scratch: Bool?; var expiresAt: String? }
 private struct SmokeFolder: Decodable { var id: String; var name: String }
-private struct SmokePage: Decodable { var id: String; var claudeLayer: [SmokeItem]; var doubts: [SmokeDoubt]? }
-private struct SmokeItem: Decodable { var id: String; var type: String; var text: String?; var revealed: Bool? }
+private struct SmokePage: Decodable { var id: String; var background: String?; var paper: String?; var snapshotVersion: Int?; var paperSnapshotStale: Bool?; var claudeLayer: [SmokeItem]; var doubts: [SmokeDoubt]? }
+private struct SmokeItem: Decodable { var id: String; var type: String; var text: String?; var revealed: Bool?; var poster: String?; var logs: [String]? }
 private struct SmokeDoubt: Decodable { var id: String; var pageId: String; var region: SmokeRegion }
 private struct SmokeRegion: Decodable { var x: Double; var y: Double; var w: Double; var h: Double }
 private struct SmokeOK: Decodable { var ok: Bool }
+private struct SmokePaperUpdate: Decodable { var pages: [SmokePage] }
 
 private struct SmokeAPI {
     private static let env = ProcessInfo.processInfo.environment
@@ -395,6 +630,16 @@ private struct SmokeAPI {
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
         guard (200..<300).contains(status) else { throw SmokeError.response(status) }
         return try JSONDecoder().decode(T.self, from: data)
+    }
+
+    /// Whether a GET succeeds, for endpoints that return binary data.
+    func exists(_ path: String) async throws -> Bool {
+        guard base.host == "127.0.0.1" else { throw SmokeError.unsafeHost }
+        var request = URLRequest(url: base.appending(path: "api").appending(path: path))
+        request.timeoutInterval = 3
+        request.setValue("Bearer \(secret)", forHTTPHeaderField: "Authorization")
+        let (_, response) = try await URLSession.shared.data(for: request)
+        return (response as? HTTPURLResponse)?.statusCode == 200
     }
 
     func setView(notebook: String, page: String) async throws {

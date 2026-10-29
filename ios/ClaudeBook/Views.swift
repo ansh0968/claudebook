@@ -2,12 +2,6 @@ import PencilKit
 import SwiftUI
 import UniformTypeIdentifiers
 
-enum StudyPalette {
-    static let teal = Color(uiColor: UIColor { $0.userInterfaceStyle == .dark ? UIColor(hex: "#91CDC6") : UIColor(hex: "#246E6B") })
-    static let coral = Color(uiColor: UIColor { $0.userInterfaceStyle == .dark ? UIColor(hex: "#EBA58D") : UIColor(hex: "#AD5038") })
-    static let background = Color(uiColor: UIColor { $0.userInterfaceStyle == .dark ? UIColor(hex: "#151D1F") : UIColor(hex: "#F5F1E9") })
-}
-
 extension Notification.Name {
     /// Claude asked to flip to a page in the notebook that's already open. userInfo: notebookId, pageId.
     static let claudeOpenPage = Notification.Name("claudeOpenPage")
@@ -27,11 +21,13 @@ struct ClaudeBookApp: App {
     @Environment(\.scenePhase) private var scenePhase
     @AppStorage("appearance") private var appearance = Appearance.system.rawValue
 
+    init() { Theme.applyUIKitAppearance() }
+
     var body: some Scene {
         WindowGroup {
             RootView()
                 .environmentObject(live)
-                .tint(StudyPalette.teal)
+                .tint(Theme.accent)
                 .onAppear { live.start(); Appearance.apply(appearance) }
                 .onChange(of: scenePhase) { _, phase in
                     if phase == .active { live.start(); Appearance.apply(appearance) } else { live.stop() }
@@ -61,6 +57,7 @@ struct SetupView: View {
     @State private var secret = ""
     @State private var error: String?
     @State private var checking = false
+    @State private var floating = false
 
     var body: some View {
         ScrollView {
@@ -70,9 +67,13 @@ struct SetupView: View {
                         .resizable()
                         .frame(width: 112, height: 112)
                         .clipShape(RoundedRectangle(cornerRadius: 26, style: .continuous))
-                        .shadow(color: .black.opacity(0.12), radius: 12, y: 6)
+                        .shadow(color: Theme.orange.opacity(0.35), radius: 18, y: 8)
+                        .offset(y: floating ? -6 : 4)
+                        .animation(.easeInOut(duration: 2.2).repeatForever(autoreverses: true), value: floating)
+                        .onAppear { floating = true }
                     Text("ClaudeBook")
-                        .font(.system(size: 34, weight: .semibold, design: .serif))
+                        .font(.system(size: 36, weight: .semibold, design: .serif))
+                        .foregroundStyle(Theme.ink)
                     Text("Write on paper, and Claude can see it and write back.")
                         .font(.callout)
                         .foregroundStyle(.secondary)
@@ -85,25 +86,29 @@ struct SetupView: View {
                         .keyboardType(.URL)
                         .autocorrectionDisabled()
                         .padding(12)
-                        .background(.background, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        .themedCard(radius: Theme.Radius.field)
                     SecureField("Secret", text: $secret)
                         .padding(12)
-                        .background(.background, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        .themedCard(radius: Theme.Radius.field)
                         .onSubmit { Task { await connect() } }
                     if let error {
                         Label(error, systemImage: "exclamationmark.triangle.fill")
                             .font(.footnote)
-                            .foregroundStyle(StudyPalette.coral)
+                            .foregroundStyle(Theme.danger)
                     }
                 }
                 Button { Task { await connect() } } label: {
-                    Text(checking ? "Checking…" : "Connect")
-                        .font(.headline)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 6)
+                    HStack(spacing: 10) {
+                        if checking { ClaudeSpinner(size: 18) }
+                        Text(checking ? "Checking…" : "Connect")
+                    }
+                    .font(.headline)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 6)
                 }
                 .buttonStyle(.borderedProminent)
-                .tint(StudyPalette.teal)
+                .buttonBorderShape(.capsule)
+                .tint(Theme.orange)
                 .disabled(checking || secret.isEmpty)
             }
             .frame(maxWidth: 420)
@@ -111,7 +116,7 @@ struct SetupView: View {
             .padding(.vertical, 80)
             .frame(maxWidth: .infinity)
         }
-        .background(StudyPalette.background.ignoresSafeArea())
+        .background(Theme.background.ignoresSafeArea())
     }
 
     private func connect() async {
@@ -145,29 +150,34 @@ struct NotebookEditor: View {
     @State private var sync = "synced"
     @State private var showClaude = true
     @State private var pencilOnly = true
+    @AppStorage("snapShapes") private var snapShapes = true
     @State private var showPages = false
+    @State private var showPaperPicker = false
     @State private var addingPage = false
+    /// Bumped whenever the editor adds a page locally, so a notebook fetched before that can't remove it again.
+    @State private var localPageEdits = 0
     @State private var testHooksDone = false
     @State private var askingClaude = false
     @State private var notice: String?
     @State private var initialJumpDone = false
     @State private var loadError: String?
     @State private var markingDoubt = false
+    /// The page number Claude just wrote on, while the little "Claude is writing" toast shows.
+    @State private var claudeWriting: Int?
+    @State private var claudeToastTask: Task<Void, Never>?
 
     var body: some View {
         NotebookCanvas(controller: controller, dark: colorScheme == .dark, invertPDFs: invertPDFs)
             .ignoresSafeArea(edges: .bottom)
             .overlay {
                 if let notebook, notebook.pages.isEmpty {
-                    ContentUnavailableView {
-                        Label("No pages", systemImage: "doc")
-                    } description: { Text("Add a page to start writing in this notebook.") } actions: {
+                    CrabEmptyState(title: "No pages", message: "Add a page to start writing in this notebook.") {
                         Button("Add a page") { Task { await addPage(after: -1) } }
                             .buttonStyle(.borderedProminent).disabled(addingPage)
                             .accessibilityIdentifier("editor.emptyAdd")
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .background(StudyPalette.background)
+                    .background(Theme.background)
                 } else if notebook == nil {
                     if let loadError {
                         ContentUnavailableView {
@@ -175,16 +185,23 @@ struct NotebookEditor: View {
                         } description: { Text(loadError) } actions: {
                             Button("Try again") { Task { await load() } }.buttonStyle(.borderedProminent)
                         }
-                    } else { ProgressView("Opening notebook…").padding(24).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16)) }
+                    } else {
+                        HStack(spacing: 12) {
+                            ClaudeSpinner(size: 22)
+                            Text("Opening notebook…").font(.subheadline.weight(.medium)).foregroundStyle(Theme.ink)
+                        }
+                        .padding(.horizontal, 20).padding(.vertical, 16)
+                        .themedCard(radius: 16)
+                    }
                 }
             }
             .overlay(alignment: .top) {
                 if askingClaude || notice != nil {
                     HStack(spacing: 12) {
-                        Image(systemName: askingClaude ? "rectangle.dashed" : "bubble.left.and.bubble.right")
-                            .foregroundStyle(StudyPalette.coral)
+                        ClawdView(mood: askingClaude ? .thinking : .idle, size: 30)
                         Text(askingClaude ? (notice ?? "Drag around a question on one page") : (notice ?? ""))
                             .font(.subheadline.weight(.medium))
+                            .foregroundStyle(Theme.ink)
                         Spacer(minLength: 6)
                         Button("Dismiss") {
                             askingClaude = false; notice = nil; controller.cancelDoubtSelection()
@@ -192,10 +209,32 @@ struct NotebookEditor: View {
                         .font(.subheadline.weight(.semibold))
                     }
                     .padding(.horizontal, 16).padding(.vertical, 12)
-                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
+                    .themedCard(radius: 16)
                     .padding(.horizontal, 22).padding(.top, 10)
+                    .transition(.move(edge: .top).combined(with: .opacity))
                 }
             }
+            .overlay(alignment: .topTrailing) {
+                if let page = claudeWriting, !askingClaude, notice == nil {
+                    HStack(spacing: 10) {
+                        ClawdView(mood: .walking, size: 30)
+                        Text("Claude is writing on page \(page)")
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(Theme.ink)
+                    }
+                    .padding(.leading, 12).padding(.trailing, 16).padding(.vertical, 9)
+                    .background(Theme.surface, in: Capsule())
+                    .overlay(Capsule().strokeBorder(Theme.orange.opacity(0.35), lineWidth: 1))
+                    .shadow(color: Theme.orange.opacity(0.18), radius: 12, y: 4)
+                    .padding(.trailing, 22).padding(.top, 10)
+                    .transition(.scale(scale: 0.6, anchor: .topTrailing).combined(with: .opacity))
+                    .accessibilityElement(children: .combine)
+                    .accessibilityIdentifier("editor.claudeWriting")
+                }
+            }
+            .animation(Theme.Motion.pop, value: askingClaude)
+            .animation(Theme.Motion.pop, value: notice)
+            .animation(Theme.Motion.pop, value: claudeWriting)
             .navigationTitle(notebook.map { $0.pages.isEmpty ? $0.title : "\($0.title) · \(index + 1)/\($0.pages.count)" } ?? "")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -207,6 +246,7 @@ struct NotebookEditor: View {
                     Button { Task { await addPage(after: index) } } label: { Image(systemName: "doc.badge.plus") }
                         .disabled(addingPage || notebook == nil)
                         .accessibilityLabel("Add a page")
+                        .accessibilityIdentifier("editor.addPage")
                 }
                 ToolbarItemGroup(placement: .topBarTrailing) {
                     if let notebook, notebook.isScratch {
@@ -220,7 +260,7 @@ struct NotebookEditor: View {
                             .font(.subheadline.weight(.semibold))
                         }
                         .buttonStyle(.bordered)
-                        .tint(StudyPalette.teal)
+                        .tint(Theme.accent)
                         .accessibilityLabel("Keep this scratch pad, \(ExpiryBadge.text(notebook.expiryDate)) before it deletes itself")
                         .accessibilityIdentifier("editor.keep")
                     }
@@ -231,9 +271,16 @@ struct NotebookEditor: View {
                         notice = nil
                         if askingClaude { controller.beginDoubtSelection() } else { controller.cancelDoubtSelection() }
                     } label: {
-                        Label("Ask Claude", systemImage: askingClaude ? "xmark.circle" : "questionmark.bubble")
+                        // Toolbars drop a Label's title; spell it out so the main Claude action reads as one.
+                        HStack(spacing: 6) {
+                            Image(systemName: askingClaude ? "xmark" : "sparkle")
+                            Text(askingClaude ? "Cancel" : "Ask Claude")
+                        }
+                        .font(.subheadline.weight(.semibold))
                     }
-                    .tint(StudyPalette.coral)
+                    .buttonStyle(.borderedProminent)
+                    .buttonBorderShape(.capsule)
+                    .tint(askingClaude ? Theme.secondaryInk : Theme.orange)
                     .disabled(notebook?.pages.isEmpty != false || markingDoubt)
                     .accessibilityLabel(askingClaude ? "Cancel question selection" : "Ask Claude about part of this page")
                     .accessibilityIdentifier("editor.askClaude")
@@ -248,18 +295,24 @@ struct NotebookEditor: View {
                         }
                         Section {
                             Toggle(isOn: $pencilOnly) { Label("Draw with Apple Pencil only", systemImage: "applepencil") }
+                            Toggle(isOn: $snapShapes) { Label("Hold to snap shapes", systemImage: "circle.square") }
+                                .accessibilityIdentifier("editor.snapShapes")
                         }
                         Section("Claude's ink") {
                             Toggle(isOn: $showClaude) { Label("Show Claude's ink", systemImage: "eye") }
                             Button { undoClaude(count: 1) } label: { Label("Undo Claude's last mark", systemImage: "arrow.uturn.backward") }
                             Button(role: .destructive) { undoClaude(count: nil) } label: { Label("Clear Claude's ink on this page", systemImage: "trash") }
                         }
+                        Button("Page type") { controller.flush(); showPaperPicker = true }.disabled(controller.currentPage == nil).accessibilityIdentifier("editor.pageType")
                         AppearanceMenu.Options()
                     } label: {
                         Image(systemName: "ellipsis.circle")
                     }
                     .accessibilityLabel("Notebook options")
                 }
+            }
+            .sheet(isPresented: $showPaperPicker) {
+                if let notebook, let page = controller.currentPage { PaperPicker(notebook: notebook, page: page) { await load() } }
             }
             .sheet(isPresented: $showPages) {
                 if let notebook {
@@ -280,11 +333,13 @@ struct NotebookEditor: View {
             }
             .onChange(of: showClaude) { _, v in controller.showClaude = v }
             .onChange(of: pencilOnly) { _, v in controller.pencilOnly = v }
+            .onChange(of: snapShapes) { _, v in controller.snapShapes = v }
             .onChange(of: scenePhase) { _, p in if p != .active { controller.flush() } }
             .task { await load() }
             .onAppear {
                 library.prepareNotebookDeletion = { id in if id == notebookId { await controller.pauseUploads() } }
                 library.resumeNotebookUploads = { id in if id == notebookId { controller.flush() } }
+                controller.snapShapes = snapShapes
                 controller.onSyncState = { s in sync = s }
                 controller.onPageChange = { i in index = i }
                 controller.onPullToAdd = { Task { await addPage(after: controller.pages.count - 1) } }
@@ -311,7 +366,12 @@ struct NotebookEditor: View {
                     // (Re)connected: catch up on anything Claude did while we weren't listening.
                     if e.type == "hello" { Task { await load() }; return }
                     if let pageId = e.pageId, controller.pages.contains(where: { $0.id == pageId }) {
-                        if e.type == "claudeLayer" { controller.reloadClaudeLayer(pageId: pageId) }
+                        if e.type == "claudeLayer" {
+                            controller.reloadClaudeLayer(pageId: pageId)
+                            // Skip the toast for changes made from this iPad (opening a hint, undoing a mark).
+                            if Date().timeIntervalSince(controller.lastLocalLayerChange) > 3,
+                               let i = controller.pages.firstIndex(where: { $0.id == pageId }) { showClaudeWriting(page: i + 1) }
+                        }
                         if e.type == "doubts" { controller.reloadDoubts(pageId: pageId) }
                     }
                     guard e.notebookId == notebookId else { return }
@@ -362,9 +422,12 @@ struct NotebookEditor: View {
 
     private func load() async {
         let nb: Notebook
+        let edits = localPageEdits
         do {
             guard let api = API.current else { return }
             nb = try await api.notebook(notebookId)
+            // A page was added while this was in flight; the reload after that add brings the fresh copy.
+            guard edits == localPageEdits, !addingPage else { return }
             loadError = nil
         } catch {
             if let apiError = error as? APIError, apiError.status == 404 {
@@ -389,14 +452,14 @@ struct NotebookEditor: View {
     }
 
     private func applyNotebook(_ updated: Notebook) {
-        let selected = controller.currentPage?.id
+        let opening = controller.notebookId != updated.id
         let oldIndex = index
         notebook = updated
         controller.setNotebook(updated)
         index = controller.currentIndex
-        if let selected, let i = updated.pages.firstIndex(where: { $0.id == selected }) {
-            controller.scrollTo(page: i, animated: false)
-        } else if !updated.pages.isEmpty {
+        // Once open, the controller keeps whatever is on screen in place when pages come or go.
+        // Snapping to the top of the current page here is what made the view jump after adding a page.
+        if opening, !updated.pages.isEmpty {
             controller.scrollTo(page: min(oldIndex, updated.pages.count - 1), animated: false)
         }
     }
@@ -407,6 +470,32 @@ struct NotebookEditor: View {
         testHooksDone = true
         let env = ProcessInfo.processInfo.environment
         if env["CLAUDEBOOK_TEST_STROKE"] == "1" { controller.addTestStroke() }
+        if env["CLAUDEBOOK_TEST_HINT"] == "1" {
+            // Open the first hint's pad so CI can screenshot it.
+            Task {
+                try? await Task.sleep(for: .seconds(2))
+                controller.openFirstHintPad()
+            }
+        }
+        if env["CLAUDEBOOK_TEST_SELECT_PAGES"] == "1" {
+            Task {
+                try? await Task.sleep(for: .seconds(1))
+                showPages = true
+            }
+        }
+        if env["CLAUDEBOOK_TEST_CLAUDE_TOAST"] == "1" {
+            // Keep it up for the screenshot instead of hiding after a few seconds.
+            showClaudeWriting(page: index + 1)
+            claudeToastTask?.cancel()
+        }
+        // UI tests draw with a simulated finger, which PencilKit ignores in pencil-only mode.
+        if env["CLAUDEBOOK_TEST_FINGER_INK"] == "1" { pencilOnly = false }
+        if env["CLAUDEBOOK_TEST_SHAPES"] == "1" {
+            Task {
+                try? await Task.sleep(for: .seconds(1.5))
+                controller.addTestShapes()
+            }
+        }
         if let y = env["CLAUDEBOOK_TEST_SCROLL"].flatMap({ Double($0) }) {
             // Scroll to a notebook y (page units), e.g. between pages 1 and 2.
             Task {
@@ -416,24 +505,48 @@ struct NotebookEditor: View {
         }
     }
 
-    /// Insert a blank page after page `i` and scroll to it.
+    /// Insert a blank page after page `i` and glide to it. The page shows up straight away and the server
+    /// is told in the background; if it says no, the page is taken back out.
     private func addPage(after i: Int) async {
-        guard !addingPage, let nb = notebook else { return }
+        guard !addingPage, var nb = notebook else { return }
         let after = nb.pages.isEmpty ? -1 : min(max(-1, i), nb.pages.count - 1)
+        let page = Page.blank(background: nb.pages.isEmpty ? .lined : nb.pages[max(0, after)].background,
+                              paper: nb.pages.isEmpty ? nil : nb.pages[max(0, after)].paper)
         addingPage = true
-        defer { addingPage = false; controller.endPullToAdd() }
+        localPageEdits += 1
+        nb.pages.insert(page, at: after + 1)
+        applyNotebook(nb)
+        controller.endPullToAdd()
+        controller.reveal(pageId: page.id)
         do {
-            try await API.current?.addPage(notebookId: nb.id, afterIndex: after, background: nb.pages.isEmpty ? .lined : nb.pages[max(0, after)].background)
+            guard let api = API.current else { throw URLError(.notConnectedToInternet) }
+            try await api.addPage(page, notebookId: nb.id, afterIndex: after)
         } catch {
             notice = "Couldn’t add a page: \(error.localizedDescription)"
-            return
+            if var current = notebook {
+                current.pages.removeAll { $0.id == page.id }
+                applyNotebook(current)
+            }
+            // If the server did get it after all, the reload below brings it (and any ink) back.
+            PendingUploads.all.remove(page.id)
         }
+        addingPage = false
         await load()
-        controller.scrollTo(page: after + 1, animated: true)
+    }
+
+    private func showClaudeWriting(page: Int) {
+        claudeWriting = page
+        claudeToastTask?.cancel()
+        claudeToastTask = Task {
+            try? await Task.sleep(for: .seconds(3))
+            guard !Task.isCancelled else { return }
+            claudeWriting = nil
+        }
     }
 
     private func undoClaude(count: Int?) {
         guard let id = controller.currentPage?.id else { return }
+        controller.lastLocalLayerChange = Date()
         Task {
             try? await API.current?.undoClaude(pageId: id, count: count)
             controller.reloadClaudeLayer(pageId: id)
@@ -517,28 +630,31 @@ struct PageThumbnail: View {
         .aspectRatio(PageGeometry.width / PageGeometry.height, contentMode: .fit)
         .clipShape(RoundedRectangle(cornerRadius: 4))
         .shadow(color: .black.opacity(0.12), radius: 4, y: 1)
-        .task(id: "\(page.id)-\(page.snapshotVersion)-\(dark)-\(invertPDFs)") { image = await render() }
+        .task(id: "\(page.id)-\(page.snapshotVersion)-\(page.background.rawValue)-\(page.paper?.rawValue ?? "legacy")-\(dark)-\(invertPDFs)") { image = await render() }
         .onReceive(NotificationCenter.default.publisher(for: .localDrawingChanged)) { note in
             if note.userInfo?["pageId"] as? String == page.id { Task { image = await render() } }
         }
     }
 
     private func render() async -> UIImage {
+        for file in Set(page.claudeLayer.filter { $0.type == "image" }.compactMap(\.file)) {
+            _ = await ImageCache.load(file)
+        }
         var pdf: CGPDFPage?
         if let ref = page.pdf { pdf = await PDFCache.page(ref) }
         let drawing = LocalDrawings.load(page.id) ?? PKDrawing()
         let size = CGSize(width: 200, height: 200 * PageGeometry.height / PageGeometry.width)
         let s = size.width / PageGeometry.width
-        let style = PaperStyle(background: page.background, pdf: pdf, dark: dark, invertPDF: invertPDFs)
+        let style = PaperStyle(background: page.background, paper: page.paper, pdf: pdf, dark: dark, invertPDF: invertPDFs)
         var image = UIImage()
         // PencilKit picks ink colors for the current appearance, so render in the one on screen.
-        UITraitCollection(userInterfaceStyle: style.dark ? .dark : .light).performAsCurrent {
+        UITraitCollection(userInterfaceStyle: page.usesDarkInkPalette(appDark: dark) ? .dark : .light).performAsCurrent {
             image = UIGraphicsImageRenderer(size: size).image { ctx in
                 let cg = ctx.cgContext
                 cg.scaleBy(x: s, y: s)
                 PaperView.drawPaper(style, in: cg)
                 drawing.image(from: PageGeometry.rect, scale: s * 2).draw(in: PageGeometry.rect)
-                for item in page.claudeLayer { ClaudeRenderer.draw(item, dark: style.dark, in: cg) }
+                for item in page.claudeLayer { ClaudeRenderer.draw(item, dark: page.usesDarkInkPalette(appDark: dark), in: cg) }
             }
         }
         return image

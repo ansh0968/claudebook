@@ -29,6 +29,9 @@ const chemistryArrow = { from: pt, to: pt, bend: z.number().optional().describe(
 
 // z.union, not discriminatedUnion: the latter becomes `oneOf`, and OpenAI's tool schemas only take `anyOf`.
 export const ItemSchema = z.union([
+  z.object({ type: z.literal("image"), x: z.number(), y: z.number(), w: z.number().positive(), h: z.number().positive(), file: z.string(), fit: z.enum(["contain", "cover", "stretch"]).optional(), opacity: z.number().min(0).max(1).optional(), alt: z.string().optional(), rotation, group })
+    .describe('Stored raster image; use place_image to download/crop/store it. draw_on_page skips image items'),
+  z.object({ type: z.literal("web"), x: z.number(), y: z.number(), w: z.number().positive(), h: z.number().positive(), title: z.string(), file: z.string(), rev: z.number().int().positive(), autoplay: z.boolean().optional(), group }).describe("Interactive HTML block. Use add_web_block, never draw_on_page"),
   ...GraphSchemas,
   ...PhysicsSchemas,
   z.object({ type: z.literal("path"), points: z.array(pt).min(2), color, width, closed: z.boolean().optional(), smooth: z.boolean().optional(), dashed, head: head("none"), head_filled: headFilled, group })
@@ -54,12 +57,12 @@ export const ItemSchema = z.union([
   z.object({ type: z.literal("molecule"), smiles: z.string(), x: z.number(), y: z.number(), size: z.number().positive().optional(), show_carbons: z.boolean().optional().describe('Label every carbon. Example: show_carbons:true'), explicit_h: z.boolean().optional().describe('Draw every hydrogen atom and bond. Example: explicit_h:true'), color, rotation, group })
     .describe('Chemical structure from SMILES. Returns atoms (index to [x,y]) and elements maps in page units. x,y is top-left; size is longest side, default 180. Example: {type:"molecule",smiles:"CC(=O)O",x:100,y:200,show_carbons:true}'),
   z.object({ type: z.literal("hint"), x: z.number(), y: z.number(), text: z.string(), label: z.string().optional(), size: z.number().positive().optional(), revealed: z.boolean().optional(), color, group })
-    .describe("Hidden hint chip. The user can tap it to reveal text; label defaults to Hint"),
+    .describe("Hint chip: only the short label (default Hint) shows on the page; tapping it opens a small pop-up pad with text, which wraps and never runs off the page, then hides again. Keep text to a few sentences"),
 ]);
 
 export type ItemInput = z.infer<typeof ItemSchema>;
 /** Stored items carry generated outline d, arrowhead outline head_d and dimensions where appropriate. */
-export type Item = ItemInput & { id: string; createdAt: string; d?: string; w?: number; h?: number; head_d?: string; parts?: Part[]; graph?: GraphTransform; rotation_center?: Point; head_filled?: boolean; atoms?: Record<string, Point>; elements?: Record<string, string> };
+export type Item = ItemInput & { id: string; createdAt: string; d?: string; w?: number; h?: number; head_d?: string; parts?: Part[]; graph?: GraphTransform; rotation_center?: Point; head_filled?: boolean; atoms?: Record<string, Point>; elements?: Record<string, string>; poster?: string; posterAt?: string; logs?: string[] };
 /** Expose atom targets where the rendered molecule is, while keeping stored coordinates unrotated.
  * Rotation metadata is optional so this composes with the separate physics drawing feature.
  */
@@ -141,11 +144,7 @@ function prepareItem(input: ItemInput, available: Item[]): Item {
     }
     if (i.type === "text") return anchored(base as typeof i & { id: string; createdAt: string }, renderHandwriting(i.text, i.x, i.y, i.size ?? 32)) as Item;
     if (i.type === "molecule") return { ...base, ...renderMolecule(i.smiles, i.x, i.y, i.size ?? 180, i) };
-    if (i.type === "hint") {
-      if (i.revealed) return { ...base, ...renderHandwriting(i.text, i.x, i.y, i.size ?? 32) };
-      const shape = renderHandwriting(i.label ?? "Hint", i.x + 12, i.y + 3, i.size ?? 32);
-      return { ...base, d: shape.d, w: shape.w + 24, h: (i.size ?? 32) + 6 };
-    }
+    if (i.type === "hint") return { ...base, ...hintChip(i) };
     if (i.type !== "math") {
       if (i.type === "svg") pathBounds(i.d);
       return base;
@@ -158,6 +157,13 @@ function prepareItem(input: ItemInput, available: Item[]): Item {
 }
 
 const DEFAULT_COLOR = "#D97757";
+
+/** A hint is always a small chip with its label, revealed or not: the text lives in the pad the app pops up, never inline on the page. */
+export function hintChip(item: { x: number; y: number; label?: string; size?: number }) {
+  const size = item.size ?? 32;
+  const shape = renderHandwriting(item.label ?? "Hint", item.x + 12, item.y + 3, size);
+  return { d: shape.d, w: shape.w + 24, h: size + 6 };
+}
 
 function normalizeSvg(d: string) {
   const path = svgpath(d);
@@ -187,6 +193,11 @@ export function prepareBatch(raw: Record<string, unknown>[], existing: Item[] = 
   const items: Item[] = [], indexes: number[] = [], warnings: ItemWarning[] = [];
   raw.forEach((input, index) => {
     const type = String(input.type);
+    if (type === "image") {
+      warnings.push({ item: index, type, warning: "Skipped: use place_image for images (URL, base64 or page crop)" });
+      return;
+    }
+    if (type === "web") { warnings.push({ item: index, type, warning: "Skipped: use add_web_block for interactive HTML, e.g. {x:100,y:200,w:800,h:500,title:\"Simulation\",html:\"<canvas></canvas>\"}" }); return; }
     const allowed = itemKeys.get(type);
     if (!allowed) {
       warnings.push({ item: index, type, warning: `Skipped: unknown type "${type}". Types: ${[...itemKeys.keys()].join(", ")}` });
@@ -268,12 +279,17 @@ function unrotatedBBox(item: Item): BBox {
       return pathBounds((shape.d ?? "") + (shape.head_d ?? ""), padding);
     }
     case "ellipse": return pointBounds([[item.center[0] - item.rx, item.center[1] - (item.ry ?? item.rx)], [item.center[0] + item.rx, item.center[1] + (item.ry ?? item.rx)]], padding);
-    case "rect": case "highlight": return pointBounds([[item.x, item.y], [item.x + item.w, item.y + item.h]], padding);
+    case "web": case "image": case "rect": case "highlight": return pointBounds([[item.x, item.y], [item.x + item.w, item.y + item.h]], padding);
     case "svg": return pathBounds(item.d + (item.head_d ?? ""), item.head_d ? Math.max(padding, (item.width ?? 3) / 2) : padding);
+    case "hint": {
+      // Recomputed rather than read from the item: hints revealed by older servers stored their text outline.
+      const chip = hintChip(item);
+      return pointBounds([[item.x, item.y], [item.x + chip.w, item.y + chip.h]], 0.75);
+    }
     default: {
       const shape = item.d === undefined ? prepareItems([item])[0] : item;
       const box = shape.d ? pathBounds(shape.d) : { x: item.x, y: item.y, w: 0, h: 0 };
-      return pointBounds([[item.x, item.y], [item.x + (shape.w ?? 0), item.y + (shape.h ?? 0)], [box.x, box.y], [box.x + box.w, box.y + box.h]], item.type === "hint" && !item.revealed ? 0.75 : 0);
+      return pointBounds([[item.x, item.y], [item.x + (shape.w ?? 0), item.y + (shape.h ?? 0)], [box.x, box.y], [box.x + box.w, box.y + box.h]]);
     }
   }
 }
@@ -282,7 +298,7 @@ function unrotatedBBox(item: Item): BBox {
 export function itemLabel(item: Item): string {
   const value = item.type === "hint" ? (item.revealed ? item.text : item.label ?? "Hint")
     : item.type === "text" ? item.text : item.type === "math" ? item.latex
-    : item.type === "molecule" ? item.smiles : item.group ?? item.type;
+    : item.type === "web" ? item.title : item.type === "molecule" ? item.smiles : item.type === "image" ? item.alt ?? "image" : item.group ?? item.type;
   return value.replace(/\s+/g, " ").slice(0, 80);
 }
 
@@ -314,7 +330,7 @@ export function translateItem(item: Item, dx: number, dy: number): Item {
   return moved;
 }
 
-type RenderItem = ItemInput & { d?: string; head_d?: string; head_filled?: boolean; parts?: Part[]; rotation_center?: Point };
+type RenderItem = ItemInput & { d?: string; head_d?: string; head_filled?: boolean; parts?: Part[]; rotation_center?: Point; image_href?: string };
 export function itemToSvg(item: RenderItem): string {
   if ("rotation" in item && item.rotation) {
     const prepared = item.rotation_center ? item : prepareItems([item])[0];
@@ -326,7 +342,7 @@ export function itemToSvg(item: RenderItem): string {
 function unrotatedSvg(item: RenderItem): string {
   if (item.parts) return partsToSvg(item.parts);
   if ("fill_pattern" in item && item.fill_pattern) return partsToSvg(prepareItems([item])[0].parts!);
-  const c = esc(item.color ?? DEFAULT_COLOR);
+  const c = esc(("color" in item ? item.color : undefined) ?? DEFAULT_COLOR);
   const w = "width" in item && item.width ? item.width : 3;
   const strokeOf = (color: string) => `stroke="${color}" stroke-width="${w}" stroke-linecap="round" stroke-linejoin="round"`;
   const stroke = strokeOf(c);
@@ -334,6 +350,10 @@ function unrotatedSvg(item: RenderItem): string {
   // Heads are never dashed; filled heads are also stroked so their tips match the line's round cap.
   const heads = item.head_d ? `<path d="${item.head_d}" fill="${"head_filled" in item && item.head_filled ? c : "none"}" ${stroke}/>` : "";
   switch (item.type) {
+    case "image": {
+      const href = item.image_href ?? `/api/images/${encodeURIComponent(item.file)}`;
+      return `<svg x="${item.x}" y="${item.y}" width="${item.w}" height="${item.h}" overflow="hidden"><image href="${esc(href)}" width="${item.w}" height="${item.h}" opacity="${item.opacity ?? 1}" preserveAspectRatio="${item.fit === "stretch" ? "none" : item.fit === "cover" ? "xMidYMid slice" : "xMidYMid meet"}"/></svg>`;
+    }
     case "spring": case "ground": case "axes": case "plot": case "shade": case "angle": case "point": return partsToSvg(prepareItems([item])[0].parts!);
     case "path":
       return `<path d="${pathData(item)}" fill="none" ${stroke}${dash}/>${heads}`;
@@ -349,6 +369,7 @@ function unrotatedSvg(item: RenderItem): string {
     }
     case "ellipse":
       return `<ellipse cx="${item.center[0]}" cy="${item.center[1]}" rx="${item.rx}" ry="${item.ry ?? item.rx}" fill="${esc(item.fill ?? "none")}" ${outlined(item) ? stroke : 'stroke="none"'}/>`;
+    case "web": return `<g><rect x="${item.x}" y="${item.y}" width="${item.w}" height="${item.h}" fill="#f5f1e9" stroke="#888"/><text x="${item.x + 12}" y="${item.y + 28}" font-family="sans-serif" font-size="18">${esc(item.title.slice(0, 70))}</text><text x="${item.x + 12}" y="${item.y + 52}" font-family="sans-serif" font-size="13">Interactive block, open it on the iPad</text></g>`;
     case "rect":
       return `<rect x="${item.x}" y="${item.y}" width="${item.w}" height="${item.h}" rx="4" fill="${esc(item.fill ?? "none")}" ${outlined(item) ? stroke : 'stroke="none"'}/>`;
     case "highlight":
@@ -363,9 +384,9 @@ function unrotatedSvg(item: RenderItem): string {
     case "svg":
       return `<path d="${esc(item.d)}" fill="${esc(item.fill ?? "none")}" ${outlined(item) ? stroke : 'stroke="none"'}${dash}/>${heads}`;
     case "hint": {
-      const shape = item.d === undefined ? prepareItems([item])[0] : item as Item;
-      const label = shape.d ? `<path d="${esc(shape.d)}" fill="${c}"/>` : "";
-      return item.revealed ? label : `<rect x="${item.x}" y="${item.y}" width="${shape.w}" height="${shape.h}" rx="8" fill="${c}" fill-opacity="0.1" stroke="${c}" stroke-width="1.5"/>${label}`;
+      // Opened hints keep their chip, just quieter, so the page reads the same before and after.
+      const chip = hintChip(item);
+      return `<rect x="${item.x}" y="${item.y}" width="${chip.w}" height="${chip.h}" rx="8" fill="${c}" fill-opacity="${item.revealed ? 0.04 : 0.1}" stroke="${c}" stroke-width="1.5"${item.revealed ? ' stroke-dasharray="5 4"' : ""}/><path d="${esc(chip.d)}" fill="${c}"/>`;
     }
     case "molecule": {
       const shape = item.d === undefined ? renderMolecule(item.smiles, item.x, item.y, item.size ?? 180, item) : item;
