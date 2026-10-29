@@ -130,7 +130,13 @@ final class WebBlockCard: UIView, WKNavigationDelegate, WKUIDelegate {
     var fullscreen: (() -> Void)?
     var isLive: Bool { web != nil || loading != nil }
     private static var rules: WKContentRuleList?
-    private static let encodedRules = #"[{"trigger":{"url-filter":".*"},"action":{"type":"block"}},{"trigger":{"url-filter":"^https://(cdnjs\\.cloudflare\\.com|cdn\\.jsdelivr\\.net|unpkg\\.com)(/|$)","url-filter-is-case-sensitive":false},"action":{"type":"ignore-previous-rules"}},{"trigger":{"url-filter":"^(data:|blob:|about:blank)"},"action":{"type":"ignore-previous-rules"}}]"#
+    // WebKit's content-rule regexes have no `|` or `$`, so each allowed origin gets its own rule.
+    private static let encodedRules: String = {
+        let allowed = [#"^https://cdnjs\\.cloudflare\\.com/"#, #"^https://cdn\\.jsdelivr\\.net/"#, #"^https://unpkg\\.com/"#, "^data:", "^blob:", "^about:blank"]
+        let rules = [#"{"trigger":{"url-filter":".*"},"action":{"type":"block"}}"#]
+            + allowed.map { #"{"trigger":{"url-filter":"\#($0)"},"action":{"type":"ignore-previous-rules"}}"# }
+        return "[" + rules.joined(separator: ",") + "]"
+    }()
     init(page: String, item: ClaudeItem, owner: UIViewController?) {
         self.page = page; self.item = item; self.owner = owner
         super.init(frame: .zero)
@@ -176,7 +182,7 @@ final class WebBlockCard: UIView, WKNavigationDelegate, WKUIDelegate {
                 let list: WKContentRuleList
                 if let existing = Self.rules { list = existing }
                 else {
-                    guard let compiled = try await WKContentRuleListStore.default().compileContentRuleList(forIdentifier: "ClaudeBookBlocks-v1", encodedContentRuleList: Self.encodedRules) else {
+                    guard let compiled = try await WKContentRuleListStore.default().compileContentRuleList(forIdentifier: "ClaudeBookBlocks-v2", encodedContentRuleList: Self.encodedRules) else {
                         throw NSError(domain: "ClaudeBookBlocks", code: 1, userInfo: [NSLocalizedDescriptionKey: "Could not install block network sandbox"])
                     }
                     list = compiled; Self.rules = compiled
