@@ -68,7 +68,11 @@ export async function placeImage(store: Store, input: PlaceImageInput,
   // collect a just-normalized resource before its first reference is saved.
   fs.mkdirSync(imageDir(store), { recursive: true });
   const dest = imagePath(store, image.file);
-  if (!fs.existsSync(dest)) fs.writeFileSync(dest, image.bytes);
+  if (!fs.existsSync(dest)) {
+    const temporary = dest + ".tmp";
+    try { fs.writeFileSync(temporary, image.bytes); fs.renameSync(temporary, dest); }
+    finally { fs.rmSync(temporary, { force: true }); }
+  }
   try { store.addClaudeItems(pageId, [item]); }
   catch (error) { sweepImages(store); throw error; }
   return { item, bbox, warnings: warning ? [{ item: 0, type: "image", id: item.id, warning }] : [] };
