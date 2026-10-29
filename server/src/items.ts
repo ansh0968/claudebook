@@ -31,6 +31,7 @@ const chemistryArrow = { from: pt, to: pt, bend: z.number().optional().describe(
 export const ItemSchema = z.union([
   z.object({ type: z.literal("image"), x: z.number(), y: z.number(), w: z.number().positive(), h: z.number().positive(), file: z.string(), fit: z.enum(["contain", "cover", "stretch"]).optional(), opacity: z.number().min(0).max(1).optional(), alt: z.string().optional(), rotation, group })
     .describe('Stored raster image; use place_image to download/crop/store it. draw_on_page skips image items'),
+  z.object({ type: z.literal("web"), x: z.number(), y: z.number(), w: z.number().positive(), h: z.number().positive(), title: z.string(), file: z.string(), rev: z.number().int().positive(), autoplay: z.boolean().optional(), group }).describe("Interactive HTML block. Use add_web_block, never draw_on_page"),
   ...GraphSchemas,
   ...PhysicsSchemas,
   z.object({ type: z.literal("path"), points: z.array(pt).min(2), color, width, closed: z.boolean().optional(), smooth: z.boolean().optional(), dashed, head: head("none"), head_filled: headFilled, group })
@@ -61,7 +62,7 @@ export const ItemSchema = z.union([
 
 export type ItemInput = z.infer<typeof ItemSchema>;
 /** Stored items carry generated outline d, arrowhead outline head_d and dimensions where appropriate. */
-export type Item = ItemInput & { id: string; createdAt: string; d?: string; w?: number; h?: number; head_d?: string; parts?: Part[]; graph?: GraphTransform; rotation_center?: Point; head_filled?: boolean; atoms?: Record<string, Point>; elements?: Record<string, string> };
+export type Item = ItemInput & { id: string; createdAt: string; d?: string; w?: number; h?: number; head_d?: string; parts?: Part[]; graph?: GraphTransform; rotation_center?: Point; head_filled?: boolean; atoms?: Record<string, Point>; elements?: Record<string, string>; poster?: string; posterAt?: string; logs?: string[] };
 /** Expose atom targets where the rendered molecule is, while keeping stored coordinates unrotated.
  * Rotation metadata is optional so this composes with the separate physics drawing feature.
  */
@@ -193,6 +194,7 @@ export function prepareBatch(raw: Record<string, unknown>[], existing: Item[] = 
       warnings.push({ item: index, type, warning: "Skipped: use place_image for images (URL, base64 or page crop)" });
       return;
     }
+    if (type === "web") { warnings.push({ item: index, type, warning: "Skipped: use add_web_block for interactive HTML, e.g. {x:100,y:200,w:800,h:500,title:\"Simulation\",html:\"<canvas></canvas>\"}" }); return; }
     const allowed = itemKeys.get(type);
     if (!allowed) {
       warnings.push({ item: index, type, warning: `Skipped: unknown type "${type}". Types: ${[...itemKeys.keys()].join(", ")}` });
@@ -274,7 +276,7 @@ function unrotatedBBox(item: Item): BBox {
       return pathBounds((shape.d ?? "") + (shape.head_d ?? ""), padding);
     }
     case "ellipse": return pointBounds([[item.center[0] - item.rx, item.center[1] - (item.ry ?? item.rx)], [item.center[0] + item.rx, item.center[1] + (item.ry ?? item.rx)]], padding);
-    case "image": case "rect": case "highlight": return pointBounds([[item.x, item.y], [item.x + item.w, item.y + item.h]], padding);
+    case "web": case "image": case "rect": case "highlight": return pointBounds([[item.x, item.y], [item.x + item.w, item.y + item.h]], padding);
     case "svg": return pathBounds(item.d + (item.head_d ?? ""), item.head_d ? Math.max(padding, (item.width ?? 3) / 2) : padding);
     default: {
       const shape = item.d === undefined ? prepareItems([item])[0] : item;
@@ -288,7 +290,7 @@ function unrotatedBBox(item: Item): BBox {
 export function itemLabel(item: Item): string {
   const value = item.type === "hint" ? (item.revealed ? item.text : item.label ?? "Hint")
     : item.type === "text" ? item.text : item.type === "math" ? item.latex
-    : item.type === "molecule" ? item.smiles : item.type === "image" ? item.alt ?? "image" : item.group ?? item.type;
+    : item.type === "web" ? item.title : item.type === "molecule" ? item.smiles : item.type === "image" ? item.alt ?? "image" : item.group ?? item.type;
   return value.replace(/\s+/g, " ").slice(0, 80);
 }
 
@@ -359,6 +361,7 @@ function unrotatedSvg(item: RenderItem): string {
     }
     case "ellipse":
       return `<ellipse cx="${item.center[0]}" cy="${item.center[1]}" rx="${item.rx}" ry="${item.ry ?? item.rx}" fill="${esc(item.fill ?? "none")}" ${outlined(item) ? stroke : 'stroke="none"'}/>`;
+    case "web": return `<g><rect x="${item.x}" y="${item.y}" width="${item.w}" height="${item.h}" fill="#f5f1e9" stroke="#888"/><text x="${item.x + 12}" y="${item.y + 28}" font-family="sans-serif" font-size="18">${esc(item.title.slice(0, 70))}</text><text x="${item.x + 12}" y="${item.y + 52}" font-family="sans-serif" font-size="13">Interactive block, open it on the iPad</text></g>`;
     case "rect":
       return `<rect x="${item.x}" y="${item.y}" width="${item.w}" height="${item.h}" rx="4" fill="${esc(item.fill ?? "none")}" ${outlined(item) ? stroke : 'stroke="none"'}/>`;
     case "highlight":

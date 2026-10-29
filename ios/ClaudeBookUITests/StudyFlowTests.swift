@@ -370,6 +370,51 @@ final class StudyFlowTests: XCTestCase {
         let hexShot = XCTAttachment(screenshot: app.screenshot()); hexShot.name = "hex-paper"; hexShot.lifetime = .keepAlways; add(hexShot)
     }
 
+    @MainActor
+    func testWebAnimationTapFullscreenAndOffscreenPoster() async throws {
+        let list: SmokeList = try await api.request("notebooks")
+        let notebook = try XCTUnwrap(list.notebooks.first { $0.title == "Interactive blocks" })
+        let page = try XCTUnwrap(notebook.pages.first)
+        let block = try XCTUnwrap(page.claudeLayer.first { $0.type == "web" })
+        try await api.setView(notebook: notebook.id, page: page.id)
+        let app = launch()
+        defer { app.terminate() }
+        try openFirstPage(app, pageId: page.id)
+        let button = app.webViews.buttons["Tap animation"]
+        try requireReady(button, timeout: 15)
+        button.tap()
+        try requireReady(app.webViews.buttons["Clicked"])
+        let _: SmokeItem = try await eventually {
+            let current: SmokeNotebook = try await self.api.request("notebooks/\(notebook.id)")
+            return current.pages[0].claudeLayer.first { $0.id == block.id && $0.logs?.contains(where: { $0.contains("button changed") }) == true && $0.poster != nil && $0.logs?.contains(where: { $0.contains("initial viewport 800x400") }) == true }
+        }
+        let rendered = XCTAttachment(screenshot: app.screenshot()); rendered.name = "web-live-button"; rendered.lifetime = .keepAlways; add(rendered)
+        let controls = app.buttons["web.menu.\(block.id)"]
+        try requireReady(controls)
+        let originalCorner = controls.frame
+        controls.tap(); app.buttons["Fullscreen"].tap()
+        let close = app.buttons["web.fullscreen.close"]
+        try requireReady(close)
+        let full = XCTAttachment(screenshot: app.screenshot()); full.name = "web-fullscreen"; full.lifetime = .keepAlways; add(full)
+        close.tap()
+        let play = app.buttons["web.play.\(block.id)"]
+        try requireReady(play)
+        XCTAssertEqual(controls.frame.minX, originalCorner.minX, accuracy: 2)
+        XCTAssertEqual(controls.frame.minY, originalCorner.minY, accuracy: 2)
+        XCTAssertEqual(controls.frame.width, originalCorner.width, accuracy: 2)
+        play.tap()
+        let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.96, dy: 0.85))
+        let end = app.coordinate(withNormalizedOffset: CGVector(dx: 0.96, dy: 0.15))
+        start.press(forDuration: 0.1, thenDragTo: end)
+        start.press(forDuration: 0.1, thenDragTo: end)
+        let offscreen = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: app.webViews["web.live.\(block.id)"])
+        await fulfillment(of: [offscreen], timeout: 8)
+        let _: SmokeItem = try await eventually {
+            let current: SmokeNotebook = try await self.api.request("notebooks/\(notebook.id)")
+            return current.pages[0].claudeLayer.first { $0.logs?.contains(where: { $0.contains("smoke load error") }) == true }
+        }
+    }
+
     private func fixture() async throws -> SmokeNotebook {
         let list: SmokeList = try await api.request("notebooks")
         return try XCTUnwrap(list.notebooks.first { $0.title == "Organic chemistry" }, "Run scripts/smoke-fixture.mjs first")
@@ -430,7 +475,7 @@ private struct SmokeView: Decodable { var notebookId: String?; var pageId: Strin
 private struct SmokeNotebook: Decodable { var id: String; var title: String; var pages: [SmokePage]; var folderId: String?; var scratch: Bool?; var expiresAt: String? }
 private struct SmokeFolder: Decodable { var id: String; var name: String }
 private struct SmokePage: Decodable { var id: String; var background: String?; var paper: String?; var snapshotVersion: Int?; var paperSnapshotStale: Bool?; var claudeLayer: [SmokeItem]; var doubts: [SmokeDoubt]? }
-private struct SmokeItem: Decodable { var id: String; var type: String; var text: String?; var revealed: Bool? }
+private struct SmokeItem: Decodable { var id: String; var type: String; var text: String?; var revealed: Bool?; var poster: String?; var logs: [String]? }
 private struct SmokeDoubt: Decodable { var id: String; var pageId: String; var region: SmokeRegion }
 private struct SmokeRegion: Decodable { var x: Double; var y: Double; var w: Double; var h: Double }
 private struct SmokeOK: Decodable { var ok: Bool }

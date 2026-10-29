@@ -126,6 +126,7 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
     private let paperContainer = UIView()
     private let claudeContainer = UIView()
     private let hintOverlay = ControlOverlay()
+    private lazy var webBlocks = WebBlockOverlay(owner: self)
     private var hintButtons: [String: UIButton] = [:]
     private var selectionOverlay: RegionSelectionView?
     private let footer = UILabel()
@@ -201,6 +202,10 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
             hintOverlay.trailingAnchor.constraint(equalTo: canvas.trailingAnchor),
         ])
 
+        webBlocks.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(webBlocks)
+        NSLayoutConstraint.activate([webBlocks.topAnchor.constraint(equalTo: canvas.topAnchor), webBlocks.bottomAnchor.constraint(equalTo: canvas.bottomAnchor), webBlocks.leadingAnchor.constraint(equalTo: canvas.leadingAnchor), webBlocks.trailingAnchor.constraint(equalTo: canvas.trailingAnchor)])
+
         footer.text = "Pull up to add a page"
         footer.font = .preferredFont(forTextStyle: .footnote)
         footer.textColor = .secondaryLabel
@@ -214,6 +219,12 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
         canvas.becomeFirstResponder()
+        updateHintButtons()
+    }
+
+    override func viewDidDisappear(_ animated: Bool) {
+        super.viewDidDisappear(animated)
+        webBlocks.suspend()
     }
 
     override func viewDidLayoutSubviews() {
@@ -423,6 +434,7 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
             claudeContainer.isHidden = !newValue
             hintOverlay.isHidden = !newValue
             hintOverlay.refreshAccessibilityElements()
+            updateHintButtons()
         }
     }
 
@@ -633,6 +645,7 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
             hintButtons[key] = nil
         }
         hintOverlay.refreshAccessibilityElements()
+        webBlocks.update(pages: pages, canvas: canvas, content: claudeContainer, enabled: !hintOverlay.isHidden)
     }
 
     private func applyHint(_ item: ClaudeItem, pageId: String) {

@@ -79,5 +79,11 @@ if (["reveal", "focus"].includes(process.argv[2])) {
   ] });
   await api("notebooks", { title: "Scratch · ideas", scratch: true });
   await api("view", { notebookId: notebook.id, pageId: page.id });
+  const interactive = await api("notebooks", { title: "Interactive blocks", pages: 2, background: "blank" });
+  const webPage = interactive.pages[0];
+  await tool("add_web_block", { page_id: webPage.id, x: 100, y: 120, w: 800, h: 400, title: "Animated button", html: `<style>@keyframes orbit{to{transform:translateX(650px)}}.ball{width:40px;height:40px;border-radius:50%;background:coral;animation:orbit 2s infinite alternate}button{font-size:32px;margin:24px}</style><button onclick="this.textContent='Clicked';console.warn('button changed')">Tap animation</button><div class=ball></div><script>console.warn('initial viewport '+innerWidth+'x'+innerHeight);window.addEventListener('load',()=>console.warn('viewport '+innerWidth+'x'+innerHeight));</script>` });
+  await tool("add_web_block", { page_id: webPage.id, x: 100, y: 600, w: 800, h: 220, title: "Intentional error", html: "<p>Error feedback test</p><script>throw new Error('smoke load error')</script>" });
+  // Restore the chemistry page for all existing screenshot and study tests.
+  await api("view", { notebookId: notebook.id, pageId: page.id });
   console.log(`Seeded chemistry smoke notebook ${notebook.id}`);
 }

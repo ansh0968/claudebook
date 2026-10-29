@@ -1,5 +1,6 @@
 import { isBackground, isPaper, type Paper } from "./paper.js";
 import { registerImageRoutes } from "./images.js";
+import { webBlockRoutes } from "./web-blocks.js";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import http from "node:http";
@@ -321,6 +322,7 @@ api.delete("/pages/:id/claude", (req, res) => {
   }
 });
 
+webBlockRoutes(api, store);
 app.use("/api", api);
 
 // --- Web viewer, handy for testing from any browser before the iPad app exists ---
