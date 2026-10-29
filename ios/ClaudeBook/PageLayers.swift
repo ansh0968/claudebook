@@ -4,6 +4,7 @@ import UIKit
 /// this as one value swapped under a lock rather than several separately mutable properties.
 struct PaperStyle {
     var background: PageBackground = .blank
+    var paper: PaperColor? = nil
     var pdf: CGPDFPage?
     var dark = false
     var invertPDF = true
@@ -66,8 +67,13 @@ final class PaperView: TiledPageView {
     static let lightPaper = UIColor(hex: "#FFFEFA")
     static let darkPaper = UIColor(hex: "#1D2527")
 
-    /// Draws the page in page units. Snapshots for Claude always pass a light style.
+    /// Draws in page units. Explicit paper colours take precedence over the app appearance.
     static func drawPaper(_ style: PaperStyle, in ctx: CGContext) {
+        if style.paper != nil || ![PageBackground.blank, .lined, .grid, .dotted].contains(style.background) {
+            PaperTemplates.draw(style.background, paper: style.paper ?? (style.dark ? .slate : .default), in: ctx)
+            if let pdf = style.pdf { drawPDF(pdf, in: ctx, invert: (style.paper?.isDark ?? style.dark) && style.invertPDF) }
+            return
+        }
         let w = PageGeometry.width, h = PageGeometry.height
         ctx.setFillColor((style.dark ? darkPaper : lightPaper).cgColor)
         ctx.fill(PageGeometry.rect)
@@ -101,6 +107,7 @@ final class PaperView: TiledPageView {
                 while y < h { ctx.fillEllipse(in: CGRect(x: x - 1.4, y: y - 1.4, width: 2.8, height: 2.8)); y += 25 }
                 x += 25
             }
+        default: break // New templates were handled by the shared renderer above.
         }
     }
 

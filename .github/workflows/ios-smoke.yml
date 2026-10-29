@@ -221,6 +221,19 @@ jobs:
           xcrun simctl launch "$UDID" in.clarifiq.claudebook
           sleep 8
           xcrun simctl io "$UDID" screenshot shots/19-physics-ipad.png
+      - name: Page type acceptance scenes
+        working-directory: ios
+        run: |
+          UDID=$(xcrun simctl list devices available -j | jq -r '[.devices[][] | select(.name | test("iPad Pro"))][0].udid')
+          export SIMCTL_CHILD_CLAUDEBOOK_SERVER=$BASE SIMCTL_CHILD_CLAUDEBOOK_SECRET=$SECRET SIMCTL_CHILD_CLAUDEBOOK_AUTOOPEN=1
+          unset SIMCTL_CHILD_CLAUDEBOOK_TEST_STROKE SIMCTL_CHILD_CLAUDEBOOK_TEST_SCROLL
+          for PAPER in cornell hex; do
+            xcrun simctl terminate "$UDID" in.clarifiq.claudebook || true
+            node ../scripts/page-types-fixture.mjs "$PAPER"
+            xcrun simctl launch "$UDID" in.clarifiq.claudebook
+            sleep 5
+            xcrun simctl io "$UDID" screenshot "shots/20-paper-$PAPER.png"
+          done
       - uses: actions/upload-artifact@v4
         if: always()
         with:

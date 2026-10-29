@@ -146,6 +146,7 @@ struct NotebookEditor: View {
     @State private var showClaude = true
     @State private var pencilOnly = true
     @State private var showPages = false
+    @State private var showPaperPicker = false
     @State private var addingPage = false
     @State private var testHooksDone = false
     @State private var askingClaude = false
@@ -254,12 +255,16 @@ struct NotebookEditor: View {
                             Button { undoClaude(count: 1) } label: { Label("Undo Claude's last mark", systemImage: "arrow.uturn.backward") }
                             Button(role: .destructive) { undoClaude(count: nil) } label: { Label("Clear Claude's ink on this page", systemImage: "trash") }
                         }
+                        Button("Page type") { controller.flush(); showPaperPicker = true }.disabled(controller.currentPage == nil).accessibilityIdentifier("editor.pageType")
                         AppearanceMenu.Options()
                     } label: {
                         Image(systemName: "ellipsis.circle")
                     }
                     .accessibilityLabel("Notebook options")
                 }
+            }
+            .sheet(isPresented: $showPaperPicker) {
+                if let notebook, let page = controller.currentPage { PaperPicker(notebook: notebook, page: page) { await load() } }
             }
             .sheet(isPresented: $showPages) {
                 if let notebook {
@@ -423,7 +428,7 @@ struct NotebookEditor: View {
         addingPage = true
         defer { addingPage = false; controller.endPullToAdd() }
         do {
-            try await API.current?.addPage(notebookId: nb.id, afterIndex: after, background: nb.pages.isEmpty ? .lined : nb.pages[max(0, after)].background)
+            try await API.current?.addPage(notebookId: nb.id, afterIndex: after, background: nb.pages.isEmpty ? .lined : nb.pages[max(0, after)].background, paper: nb.pages.isEmpty ? nil : nb.pages[max(0, after)].paper)
         } catch {
             notice = "Couldn’t add a page: \(error.localizedDescription)"
             return
@@ -517,7 +522,7 @@ struct PageThumbnail: View {
         .aspectRatio(PageGeometry.width / PageGeometry.height, contentMode: .fit)
         .clipShape(RoundedRectangle(cornerRadius: 4))
         .shadow(color: .black.opacity(0.12), radius: 4, y: 1)
-        .task(id: "\(page.id)-\(page.snapshotVersion)-\(dark)-\(invertPDFs)") { image = await render() }
+        .task(id: "\(page.id)-\(page.snapshotVersion)-\(page.background.rawValue)-\(page.paper?.rawValue ?? "legacy")-\(dark)-\(invertPDFs)") { image = await render() }
         .onReceive(NotificationCenter.default.publisher(for: .localDrawingChanged)) { note in
             if note.userInfo?["pageId"] as? String == page.id { Task { image = await render() } }
         }
@@ -529,16 +534,16 @@ struct PageThumbnail: View {
         let drawing = LocalDrawings.load(page.id) ?? PKDrawing()
         let size = CGSize(width: 200, height: 200 * PageGeometry.height / PageGeometry.width)
         let s = size.width / PageGeometry.width
-        let style = PaperStyle(background: page.background, pdf: pdf, dark: dark, invertPDF: invertPDFs)
+        let style = PaperStyle(background: page.background, paper: page.paper, pdf: pdf, dark: dark, invertPDF: invertPDFs)
         var image = UIImage()
         // PencilKit picks ink colors for the current appearance, so render in the one on screen.
-        UITraitCollection(userInterfaceStyle: style.dark ? .dark : .light).performAsCurrent {
+        UITraitCollection(userInterfaceStyle: page.usesDarkInkPalette(appDark: dark) ? .dark : .light).performAsCurrent {
             image = UIGraphicsImageRenderer(size: size).image { ctx in
                 let cg = ctx.cgContext
                 cg.scaleBy(x: s, y: s)
                 PaperView.drawPaper(style, in: cg)
                 drawing.image(from: PageGeometry.rect, scale: s * 2).draw(in: PageGeometry.rect)
-                for item in page.claudeLayer { ClaudeRenderer.draw(item, dark: style.dark, in: cg) }
+                for item in page.claudeLayer { ClaudeRenderer.draw(item, dark: page.usesDarkInkPalette(appDark: dark), in: cg) }
             }
         }
         return image

@@ -9,8 +9,13 @@ enum PageGeometry {
     static let rect = CGRect(origin: .zero, size: size)
 }
 
-enum PageBackground: String, Codable {
-    case blank, lined, grid, dotted
+enum PageBackground: String, Codable, CaseIterable {
+    case blank, lined, grid, dotted, lines_full, lined_narrow, lined_wide, lined_margin, grid_small, grid_large, graph, dotted_large, isometric, hex, cornell, music, handwriting, two_column
+}
+
+enum PaperColor: String, Codable, CaseIterable {
+    case `default`, white, black, cream, yellow, slate
+    var isDark: Bool { self == .black || self == .slate }
 }
 
 struct TextBox: Codable, Hashable {
@@ -209,6 +214,9 @@ struct PDFRef: Codable, Hashable {
 struct Page: Codable, Identifiable, Hashable {
     var id: String
     var background: PageBackground
+    var paper: PaperColor? = nil
+    var paperSnapshotStale: Bool? = nil
+    var strokeCount: Int? = nil
     var pdf: PDFRef?
     var snapshotVersion: Int
     var textBoxes: [TextBox]

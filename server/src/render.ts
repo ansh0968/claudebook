@@ -6,7 +6,11 @@ import { itemToSvg } from "./items.js";
 import { rasterizePdfPage } from "./pdf.js";
 import { PAGE_H, PAGE_W, type Page, type Store } from "./store.js";
 
-function backgroundSvg(page: Page) {
+import { adaptPaperInk } from "./paper-ink.js";
+import { darkPaper, paperColor, paperPatternSvg } from "./paper.js";
+
+export function backgroundSvg(page: Page) {
+  if (page.paper !== undefined || !["blank", "lined", "grid", "dotted"].includes(page.background)) return paperPatternSvg(page.background, page.paper);
   const lines: string[] = [];
   if (page.background === "lined") {
     for (let y = 120; y < PAGE_H - 40; y += 40) lines.push(`<line x1="40" y1="${y}" x2="${PAGE_W - 40}" y2="${y}" stroke="#C9D7E8" stroke-width="1.5"/>`);
@@ -79,11 +83,11 @@ export async function renderPage(store: Store, page: Page, opts: { grid?: boolea
     ? sharp(await sharp(snap).resize(W, H, { fit: "fill" }).flatten({ background: "#ffffff" }).png().toBuffer())
     : page.pdf
       ? sharp(await sharp(await rasterizePdfPage(store, page.pdf.file, page.pdf.page)).resize(W, H).png().toBuffer())
-      : sharp(Buffer.from(svgDoc(backgroundSvg(page), "#ffffff", k)));
+      : sharp(Buffer.from(svgDoc(backgroundSvg(page), page.paper === undefined && ["blank", "lined", "grid", "dotted"].includes(page.background) ? "#ffffff" : paperColor(page.paper), k)));
 
   const outW = region ? Math.round(Math.min(1400, Math.max(700, region.w * 3))) : PAGE_W * scale;
   const layers: OverlayOptions[] = [];
-  if (claudeLayer && page.claudeLayer.length) layers.push({ input: Buffer.from(svgDoc(page.claudeLayer.map(itemToSvg).join(""), undefined, k)) });
+  if (claudeLayer && page.claudeLayer.length) layers.push({ input: Buffer.from(svgDoc(renderClaudeItems(page), undefined, k)) });
   if (grid) layers.push({ input: Buffer.from(svgDoc(region ? regionOverlaySvg(region, outW / region.w) : coordinateOverlaySvg(), undefined, k)) });
 
   let img = sharp(await base.composite(layers).png().toBuffer());
@@ -98,5 +102,10 @@ export async function renderPage(store: Store, page: Page, opts: { grid?: boolea
 
 /** Just Claude's layer as standalone SVG, for the web viewer and as a fallback for the app. */
 export function claudeLayerSvg(page: Page) {
-  return svgDoc(page.claudeLayer.map(itemToSvg).join(""));
+  return svgDoc(renderClaudeItems(page));
+}
+
+function renderClaudeItems(page: Page) {
+  const svg = page.claudeLayer.map(itemToSvg).join("");
+  return darkPaper(page.paper) ? adaptPaperInk(svg) : svg;
 }
