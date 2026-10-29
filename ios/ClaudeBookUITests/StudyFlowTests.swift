@@ -321,10 +321,16 @@ final class StudyFlowTests: XCTestCase {
         let app = launch()
         defer { app.terminate() }
         try openFirstPage(app, pageId: page.id)
-        let button = app.webViews.buttons["Tap animation"]
-        try requireReady(button, timeout: 15)
-        button.tap()
-        try requireReady(app.webViews.buttons["Clicked"])
+        // CI simulators often can't read WebKit's remote accessibility tree, so wait for the live
+        // view and the block's own console line, then tap where the button is laid out.
+        let live = app.webViews["web.live.\(block.id)"]
+        try requireReady(live, timeout: 15)
+        let _: SmokeItem = try await eventually {
+            let current: SmokeNotebook = try await self.api.request("notebooks/\(notebook.id)")
+            return current.pages[0].claudeLayer.first { $0.id == block.id && $0.logs?.contains(where: { $0.contains("initial viewport") }) == true }
+        }
+        // The button sits at about (24...250, 24...70) in the block's 800x400 CSS viewport.
+        live.coordinate(withNormalizedOffset: CGVector(dx: 0.15, dy: 0.12)).tap()
         let _: SmokeItem = try await eventually {
             let current: SmokeNotebook = try await self.api.request("notebooks/\(notebook.id)")
             return current.pages[0].claudeLayer.first { $0.id == block.id && $0.logs?.contains(where: { $0.contains("button changed") }) == true && $0.poster != nil && $0.logs?.contains(where: { $0.contains("initial viewport 800x400") }) == true }
