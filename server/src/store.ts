@@ -1,3 +1,4 @@
+import { sweepImages } from "./image-assets.js";
 // Tiny file-backed store. One JSON file for metadata, PNGs on disk for page snapshots.
 // Fine for a single user; swap for SQLite if it ever gets big.
 import fs from "node:fs";
@@ -133,6 +134,7 @@ export class Store {
       page.transcripts ??= [];
     }
     if (!existingDatabase) this.seed();
+    sweepImages(this);
   }
 
   private seed() {
@@ -144,6 +146,7 @@ export class Store {
     const tmp = this.file + ".tmp";
     fs.writeFileSync(tmp, JSON.stringify(this.db, null, 1));
     fs.renameSync(tmp, this.file);
+    sweepImages(this);
   }
 
   on(fn: (e: StoreEvent) => void) {

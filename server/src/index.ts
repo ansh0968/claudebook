@@ -1,3 +1,4 @@
+import { registerImageRoutes } from "./images.js";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import http from "node:http";
@@ -94,6 +95,7 @@ app.all("/mcp/:secret", (_req, res) => res.status(405).set("Allow", "POST").end(
 const api = express.Router();
 api.use(requireToken, express.json({ limit: "25mb" }));
 registerPageRoutes(api, store);
+registerImageRoutes(api, store);
 
 /** Notebooks as the app sees them: scratch pads carry the time they'll delete themselves. */
 const withExpiry = (nb: Notebook) => (nb.scratch ? { ...nb, expiresAt: store.scratchExpiry(nb) } : nb);
@@ -269,7 +271,7 @@ api.get("/pages/:id/render.png", async (req, res) => {
 api.get("/pages/:id/claude.svg", (req, res) => {
   const found = store.findPage(req.params.id);
   if (!found) return res.status(404).end();
-  res.type("svg").set("Cache-Control", "no-store").send(claudeLayerSvg(found.page));
+  res.type("svg").set("Cache-Control", "no-store").send(claudeLayerSvg(found.page, store));
 });
 
 api.get("/pages/:id/claude", (req, res) => {

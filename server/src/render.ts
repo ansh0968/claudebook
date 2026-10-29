@@ -2,6 +2,7 @@
 // Claude's own layer on top, and optionally a labelled coordinate grid so Claude can aim.
 import fs from "node:fs";
 import sharp, { type OverlayOptions } from "sharp";
+import { imageHref } from "./image-assets.js";
 import { itemToSvg } from "./items.js";
 import { rasterizePdfPage } from "./pdf.js";
 import { PAGE_H, PAGE_W, type Page, type Store } from "./store.js";
@@ -67,9 +68,9 @@ export function clampRegion(r: Region): Region {
   return { x: Math.min(Math.max(0, r.x), PAGE_W - w), y: Math.min(Math.max(0, r.y), PAGE_H - h), w, h };
 }
 
-export async function renderPage(store: Store, page: Page, opts: { grid?: boolean; claudeLayer?: boolean; scale?: number; region?: Region } = {}) {
+export async function renderPage(store: Store, page: Page, opts: { grid?: boolean; claudeLayer?: boolean; scale?: number; region?: Region; exactRegion?: boolean } = {}) {
   const { grid = false, claudeLayer = true, scale = 1 } = opts;
-  const region = opts.region && clampRegion(opts.region);
+  const region = opts.region && (opts.exactRegion ? opts.region : clampRegion(opts.region));
   // Zoomed views are composed at 2x so small handwriting stays legible (the app uploads 2x snapshots).
   const k = region ? 2 : 1;
   const W = PAGE_W * k, H = PAGE_H * k;
@@ -81,9 +82,13 @@ export async function renderPage(store: Store, page: Page, opts: { grid?: boolea
       ? sharp(await sharp(await rasterizePdfPage(store, page.pdf.file, page.pdf.page)).resize(W, H).png().toBuffer())
       : sharp(Buffer.from(svgDoc(backgroundSvg(page), "#ffffff", k)));
 
-  const outW = region ? Math.round(Math.min(1400, Math.max(700, region.w * 3))) : PAGE_W * scale;
+  // Crops can be a very thin strip. Cap both output dimensions rather than
+  // upscaling a 1-unit-wide crop to the 700px minimum used for reading zooms.
+  const outW = region ? opts.exactRegion
+    ? Math.max(1, Math.round(Math.min(2048, region.w * k, 2048 * region.w / region.h)))
+    : Math.round(Math.min(1400, Math.max(700, region.w * 3))) : PAGE_W * scale;
   const layers: OverlayOptions[] = [];
-  if (claudeLayer && page.claudeLayer.length) layers.push({ input: Buffer.from(svgDoc(page.claudeLayer.map(itemToSvg).join(""), undefined, k)) });
+  if (claudeLayer && page.claudeLayer.length) layers.push({ input: Buffer.from(svgDoc(page.claudeLayer.map(item => itemToSvg(item.type === "image" ? { ...item, image_href: store ? imageHref(store, item.file) : undefined } : item)).join(""), undefined, k)) });
   if (grid) layers.push({ input: Buffer.from(svgDoc(region ? regionOverlaySvg(region, outW / region.w) : coordinateOverlaySvg(), undefined, k)) });
 
   let img = sharp(await base.composite(layers).png().toBuffer());
@@ -97,6 +102,6 @@ export async function renderPage(store: Store, page: Page, opts: { grid?: boolea
 }
 
 /** Just Claude's layer as standalone SVG, for the web viewer and as a fallback for the app. */
-export function claudeLayerSvg(page: Page) {
-  return svgDoc(page.claudeLayer.map(itemToSvg).join(""));
+export function claudeLayerSvg(page: Page, store?: Store) {
+  return svgDoc(page.claudeLayer.map(item => itemToSvg(item.type === "image" ? { ...item, image_href: store ? imageHref(store, item.file) : undefined } : item)).join(""));
 }

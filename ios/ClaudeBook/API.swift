@@ -194,6 +194,10 @@ struct API {
         return try decode(Notebook.self, await request("notebooks/import-pdf", method: "POST", body: data, contentType: "application/pdf", query: query))
     }
 
+    func image(file: String) async throws -> Data {
+        try await request("images/\(file)")
+    }
+
     func pdf(file: String) async throws -> Data {
         try await request("pdfs/\(file)")
     }

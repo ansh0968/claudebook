@@ -171,6 +171,11 @@ final class ClaudeLayerView: TiledPageView {
         _doubts = doubts
         lock.unlock()
         if !same { setNeedsDisplay() }
+        for file in Set(items.filter { $0.type == "image" }.compactMap(\.file)) where ImageCache.cached(file) == nil {
+            Task { @MainActor [weak self] in
+                if await ImageCache.load(file) != nil { self?.setNeedsDisplay() }
+            }
+        }
     }
 
     override func draw(_ rect: CGRect) {
@@ -310,6 +315,7 @@ enum ClaudeRenderer {
         }
 
         switch item.type {
+        case "image": ImageCache.draw(item, in: ctx)
         case "path":
             let pts = (item.points ?? []).compactMap { pt($0) }
             guard pts.count >= 2 else { return }
