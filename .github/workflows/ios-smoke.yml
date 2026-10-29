@@ -140,7 +140,7 @@ jobs:
           xcrun simctl launch "$UDID" in.clarifiq.claudebook
           sleep 10
           xcrun simctl io "$UDID" screenshot shots/9-chemistry-tools.png
-          TEST_RUNNER_CLAUDEBOOK_SERVER=$BASE TEST_RUNNER_CLAUDEBOOK_SECRET=$SECRET \
+          TEST_RUNNER_CLAUDEBOOK_SERVER=$BASE TEST_RUNNER_CLAUDEBOOK_SECRET=$SECRET TEST_RUNNER_CLAUDEBOOK_SHOTS=$PWD/shots \
             xcodebuild -project ClaudeBook.xcodeproj -scheme ClaudeBook -configuration Debug \
             -destination "id=$UDID" -derivedDataPath test-build -resultBundlePath TestResults.xcresult \
             -parallel-testing-enabled NO CODE_SIGNING_ALLOWED=NO test > ui-test.log 2>&1 \
@@ -221,6 +221,29 @@ jobs:
           xcrun simctl launch "$UDID" in.clarifiq.claudebook
           sleep 8
           xcrun simctl io "$UDID" screenshot shots/19-physics-ipad.png
+      - name: Shape snapping scene
+        working-directory: ios
+        run: |
+          UDID=$(xcrun simctl list devices available -j | jq -r '[.devices[][] | select(.name | test("iPad Pro"))][0].udid')
+          xcrun simctl terminate "$UDID" in.clarifiq.claudebook || true
+          api() { curl -fsS -H "Authorization: Bearer $SECRET" -H 'Content-Type: application/json' "$BASE/api/$@"; }
+          NB=$(api notebooks -X POST -d '{"title":"Shape snapping","pages":1}' | jq -r .id)
+          PAGE=$(api notebooks/$NB | jq -r '.pages[0].id')
+          api view -X POST -d "{\"notebookId\":\"$NB\",\"pageId\":\"$PAGE\"}" > /dev/null
+          export SIMCTL_CHILD_CLAUDEBOOK_SERVER=$BASE SIMCTL_CHILD_CLAUDEBOOK_SECRET=$SECRET
+          export SIMCTL_CHILD_CLAUDEBOOK_AUTOOPEN=1 SIMCTL_CHILD_CLAUDEBOOK_TEST_SHAPES=1
+          unset SIMCTL_CHILD_CLAUDEBOOK_TEST_STROKE SIMCTL_CHILD_CLAUDEBOOK_TEST_SCROLL
+          xcrun simctl launch "$UDID" in.clarifiq.claudebook
+          sleep 10
+          # Left: wobbly strokes as drawn. Right: the same strokes snapped; the last keeps its handles.
+          xcrun simctl io "$UDID" screenshot shots/22-shapes-ipad.png
+          sleep 4
+          # What Claude sees: the snapped shapes are ordinary uploaded ink.
+          curl -fsS -H "Authorization: Bearer $SECRET" "$BASE/api/pages/$PAGE/render.png" > shots/23-shapes-server.png
+          xcrun simctl ui "$UDID" appearance dark
+          sleep 3
+          xcrun simctl io "$UDID" screenshot shots/24-shapes-dark.png
+          xcrun simctl ui "$UDID" appearance light
       - uses: actions/upload-artifact@v4
         if: always()
         with:
