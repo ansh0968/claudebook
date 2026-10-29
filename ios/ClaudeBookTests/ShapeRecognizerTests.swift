@@ -29,14 +29,18 @@ final class ShapeRecognizerTests: XCTestCase {
     }
 
     private func oval(_ c: CGPoint, _ rx: CGFloat, _ ry: CGFloat, turn: CGFloat = 0, overshoot: CGFloat = 0.05) -> [CGPoint] {
-        (0..<Int(100 * (1 + overshoot))).map { i in
-            let t = 0.3 + 2 * CGFloat.pi * CGFloat(i) / 100
-            return c + Geo.rotate(CGPoint(x: rx * cos(t), y: ry * sin(t)), by: turn)
+        (0..<Int(100 * (1 + overshoot))).map { i -> CGPoint in
+            let t: CGFloat = 0.3 + 2 * CGFloat.pi * CGFloat(i) / 100
+            let v = CGPoint(x: rx * cos(t), y: ry * sin(t))
+            return c + Geo.rotate(v, by: turn)
         }
     }
 
     private func arc(_ c: CGPoint, _ r: CGFloat) -> [CGPoint] {
-        (0...40).map { CGPoint(x: c.x + r * cos(CGFloat($0) / 40 * .pi), y: c.y - r * sin(CGFloat($0) / 40 * .pi)) }
+        (0...40).map { i -> CGPoint in
+            let t = CGFloat(i) / 40 * .pi
+            return CGPoint(x: c.x + r * cos(t), y: c.y - r * sin(t))
+        }
     }
 
     private func headed(_ shaft: [CGPoint], length: CGFloat = 40, half: Bool = false) -> [CGPoint] {
@@ -105,7 +109,10 @@ final class ShapeRecognizerTests: XCTestCase {
             // The base was level.
             XCTAssertEqual(s.points.map(\.y).filter { abs($0 - 300) < 6 }.count, 2)
         }
-        let hexagon = (0..<6).map { CGPoint(x: 300 + 100 * cos(CGFloat($0) * .pi / 3 + 0.05), y: 300 + 100 * sin(CGFloat($0) * .pi / 3 + 0.05)) }
+        let hexagon = (0..<6).map { k -> CGPoint in
+            let a = CGFloat(k) * .pi / 3 + 0.05
+            return CGPoint(x: 300 + 100 * cos(a), y: 300 + 100 * sin(a))
+        }
         var regular = 0
         for shape in recognize(polyline(hexagon, closed: true)) {
             let s = try XCTUnwrap(shape)
@@ -127,7 +134,7 @@ final class ShapeRecognizerTests: XCTestCase {
             XCTAssertEqual(s.kind, .polyline)
             XCTAssertEqual(s.points.count, 3)
         }
-        let spring = (0...6).map { CGPoint(x: 100 + CGFloat($0) * 30, y: $0 % 2 == 0 ? 200 : 150) }
+        let spring = (0...6).map { k -> CGPoint in CGPoint(x: 100 + CGFloat(k) * 30, y: k % 2 == 0 ? 200 : 150) }
         let springs = recognize(polyline(spring, closed: false, per: 12)).compactMap { $0 }
         XCTAssertGreaterThanOrEqual(springs.filter { $0.kind == .polyline }.count, 4)
     }
@@ -136,7 +143,10 @@ final class ShapeRecognizerTests: XCTestCase {
         for shape in recognize(arc(CGPoint(x: 300, y: 300), 150)) {
             XCTAssertEqual(try XCTUnwrap(shape).kind, .arc)
         }
-        let parabola = stride(from: 150, through: 450, by: 5).map { CGPoint(x: CGFloat($0), y: 400 - pow(CGFloat($0) - 300, 2) / 150) }
+        let parabola = stride(from: 150, through: 450, by: 5).map { x -> CGPoint in
+            let d = CGFloat(x) - 300
+            return CGPoint(x: CGFloat(x), y: 400 - d * d / 150)
+        }
         for shape in recognize(parabola) {
             XCTAssertEqual(try XCTUnwrap(shape).kind, .curve)
         }
@@ -166,7 +176,11 @@ final class ShapeRecognizerTests: XCTestCase {
     }
 
     func testWritingAndDotsDoNotSnap() {
-        let scribble = (0..<80).map { CGPoint(x: 100 + CGFloat($0) * 5, y: 200 + 40 * sin(CGFloat($0) * 0.9) + 20 * cos(CGFloat($0) * 0.37)) }
+        let scribble = (0..<80).map { i -> CGPoint in
+            let t = CGFloat(i)
+            let y: CGFloat = 200 + 40 * sin(t * 0.9) + 20 * cos(t * 0.37)
+            return CGPoint(x: 100 + t * 5, y: y)
+        }
         XCTAssertTrue(recognize(scribble).allSatisfy { $0 == nil })
         XCTAssertNil(ShapeRecognizer.recognize([CGPoint(x: 10, y: 10), CGPoint(x: 13, y: 12), CGPoint(x: 12, y: 15)]))
         XCTAssertNil(ShapeRecognizer.recognize([CGPoint(x: 10, y: 10)]))

@@ -746,15 +746,18 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
             return out + [path[path.count - 1]]
         }
         func oval(_ c: CGPoint, _ rx: CGFloat, _ ry: CGFloat, _ turn: CGFloat) -> [CGPoint] {
-            (0...104).map { i in
-                let t = 0.4 + 2 * CGFloat.pi * CGFloat(i) / 100
-                return c + Geo.rotate(CGPoint(x: rx * cos(t), y: ry * sin(t)), by: turn)
+            (0...104).map { i -> CGPoint in
+                let t: CGFloat = 0.4 + 2 * CGFloat.pi * CGFloat(i) / 100
+                let v = CGPoint(x: rx * cos(t), y: ry * sin(t))
+                return c + Geo.rotate(v, by: turn)
             }
         }
         func bow(_ a: CGPoint, _ b: CGPoint, _ lift: CGFloat) -> [CGPoint] {
-            (0...40).map { i in
+            (0...40).map { i -> CGPoint in
                 let t = CGFloat(i) / 40
-                return a + (b - a) * t + CGPoint(x: 0, y: -lift * 4 * t * (1 - t))
+                let along: CGPoint = a + (b - a) * t
+                let rise: CGFloat = -lift * 4 * t * (1 - t)
+                return CGPoint(x: along.x, y: along.y + rise)
             }
         }
         func headed(_ shaft: [CGPoint], _ length: CGFloat, half: Bool = false) -> [CGPoint] {
@@ -762,24 +765,36 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
             let b1 = tip + Geo.rotate(dir * -length, by: 0.5), b2 = tip + Geo.rotate(dir * -length, by: -0.5)
             return shaft + outline(half ? [tip, b1] : [tip, b1, tip, b2], closed: false)
         }
-        let drawn: [[CGPoint]] = [
-            oval(CGPoint(x: 150, y: 180), 85, 85, 0),
-            oval(CGPoint(x: 360, y: 180), 95, 55, 0.15),
-            outline([CGPoint(x: 60, y: 320), CGPoint(x: 250, y: 326), CGPoint(x: 247, y: 462), CGPoint(x: 57, y: 455)], closed: true),
-            outline([CGPoint(x: 300, y: 470), CGPoint(x: 380, y: 322), CGPoint(x: 460, y: 468)], closed: true),
-            outline((0..<6).map { CGPoint(x: 150 + 82 * cos(CGFloat($0) * .pi / 3 + 0.06), y: 640 + 82 * sin(CGFloat($0) * .pi / 3 + 0.06)) }, closed: true),
-            headed(outline([CGPoint(x: 290, y: 740), CGPoint(x: 455, y: 580)], closed: false), 28),
-            headed(bow(CGPoint(x: 280, y: 1080), CGPoint(x: 450, y: 1080), 70), 20, half: true),
-            outline([CGPoint(x: 60, y: 1050), CGPoint(x: 60, y: 1340), CGPoint(x: 240, y: 1338)], closed: false),
-            outline([CGPoint(x: 280, y: 1250)] + (1...6).map { CGPoint(x: 280 + CGFloat($0) * 28, y: $0 % 2 == 0 ? 1250 : 1210) } + [CGPoint(x: 460, y: 1230)], closed: false),
-            headed(bow(CGPoint(x: 60, y: 940), CGPoint(x: 450, y: 900), 110), 26),
-        ]
-        let wobbly = drawn.enumerated().map { n, points in
-            points.enumerated().map { i, p -> CGPoint in
-                let t = CGFloat(i), seed = CGFloat(n)
-                return CGPoint(x: p.x + 2.4 * sin(t * 0.37 + seed) + 1.2 * sin(t * 1.3 + 2 * seed),
-                               y: p.y + top + 2.4 * cos(t * 0.29 + seed) + 1.2 * sin(t * 1.7 + seed))
+        var hexagon: [CGPoint] = []
+        for k in 0..<6 {
+            let a = CGFloat(k) * .pi / 3 + 0.06
+            hexagon.append(CGPoint(x: 150 + 82 * cos(a), y: 640 + 82 * sin(a)))
+        }
+        var spring: [CGPoint] = [CGPoint(x: 280, y: 1250)]
+        for k in 1...6 { spring.append(CGPoint(x: 280 + CGFloat(k) * 28, y: k % 2 == 0 ? 1250 : 1210)) }
+        spring.append(CGPoint(x: 460, y: 1230))
+        var drawn: [[CGPoint]] = []
+        drawn.append(oval(CGPoint(x: 150, y: 180), 85, 85, 0))
+        drawn.append(oval(CGPoint(x: 360, y: 180), 95, 55, 0.15))
+        drawn.append(outline([CGPoint(x: 60, y: 320), CGPoint(x: 250, y: 326), CGPoint(x: 247, y: 462), CGPoint(x: 57, y: 455)], closed: true))
+        drawn.append(outline([CGPoint(x: 300, y: 470), CGPoint(x: 380, y: 322), CGPoint(x: 460, y: 468)], closed: true))
+        drawn.append(outline(hexagon, closed: true))
+        drawn.append(headed(outline([CGPoint(x: 290, y: 740), CGPoint(x: 455, y: 580)], closed: false), 28))
+        drawn.append(headed(bow(CGPoint(x: 280, y: 1080), CGPoint(x: 450, y: 1080), 70), 20, half: true))
+        drawn.append(outline([CGPoint(x: 60, y: 1050), CGPoint(x: 60, y: 1340), CGPoint(x: 240, y: 1338)], closed: false))
+        drawn.append(outline(spring, closed: false))
+        drawn.append(headed(bow(CGPoint(x: 60, y: 940), CGPoint(x: 450, y: 900), 110), 26))
+        var wobbly: [[CGPoint]] = []
+        for (n, points) in drawn.enumerated() {
+            let seed = CGFloat(n)
+            var shaken: [CGPoint] = []
+            for (i, p) in points.enumerated() {
+                let t = CGFloat(i)
+                let dx: CGFloat = 2.4 * sin(t * 0.37 + seed) + 1.2 * sin(t * 1.3 + 2 * seed)
+                let dy: CGFloat = 2.4 * cos(t * 0.29 + seed) + 1.2 * sin(t * 1.7 + seed)
+                shaken.append(CGPoint(x: p.x + dx, y: p.y + top + dy))
             }
+            wobbly.append(shaken)
         }
         let raw = wobbly.map { points -> PKStroke in
             let ink = points.enumerated().map { i, p in
