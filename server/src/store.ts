@@ -13,7 +13,8 @@ import { normalizeMathSearch } from "./math-search.js";
 export const PAGE_W = 1000;
 export const PAGE_H = 1414;
 
-export type Background = "blank" | "lined" | "grid" | "dotted";
+import { isBackground, isPaper, type Background, type Paper } from "./paper.js";
+export type { Background, Paper } from "./paper.js";
 
 export interface TextBox {
   text: string;
@@ -51,6 +52,9 @@ export interface Doubt {
 export interface Page {
   id: string;
   background: Background;
+  paper?: Paper;
+  /** The last snapshot contains the previous paper until the iPad refreshes it. */
+  paperSnapshotStale?: boolean;
   /** Set when the page came from a PDF; the app renders the PDF page underneath the ink. */
   pdf?: { file: string; page: number };
   /** Bumped every time the app uploads a fresh snapshot of the user's ink. */
@@ -437,8 +441,25 @@ export class Store {
     return { notebook: target, pages };
   }
 
-  newPage(background: Background = "blank"): Page {
-    return { id: nanoid(10), background, snapshotVersion: 0, textBoxes: [], transcripts: [], doubts: [], claudeLayer: [], updatedAt: now() };
+  newPage(background: Background = "blank", paper?: Paper): Page {
+    return { id: nanoid(10), background, ...(paper === undefined ? {} : { paper }), snapshotVersion: 0, textBoxes: [], transcripts: [], doubts: [], claudeLayer: [], updatedAt: now() };
+  }
+
+  /** Validate the whole selection before changing anything; preserve ink and PDFs. */
+  setBackground(pageIds: string[], background?: Background, paper?: Paper) {
+    if (background === undefined && paper === undefined) throw new Error("Send background and/or paper");
+    if (background !== undefined && !isBackground(background)) throw new Error("Invalid background");
+    if (paper !== undefined && !isPaper(paper)) throw new Error("Invalid paper");
+    const found = [...new Set(pageIds)].map(id => { const page = this.findPage(id); if (!page) throw new Error(`No page ${id}`); return page; });
+    for (const { page, notebook } of found) {
+      if (background !== undefined) page.background = background;
+      if (paper !== undefined) page.paper = paper;
+      if (fs.existsSync(this.snapshotPath(page.id))) page.paperSnapshotStale = true;
+      page.updatedAt = notebook.updatedAt = now();
+    }
+    this.save();
+    for (const id of new Set(found.map(f => f.notebook.id))) this.emit({ type: "notebook", notebookId: id });
+    return found.map(f => f.page);
   }
 
   addDoubt(pageId: string, region: PageRegion): Doubt {
@@ -534,12 +555,12 @@ export class Store {
     return item;
   }
 
-  createNotebook(title: string, pageCount = 1, background: Background = "blank", options: { folderId?: string; scratch?: boolean } = {}): Notebook {
+  createNotebook(title: string, pageCount = 1, background: Background = "blank", options: { folderId?: string; scratch?: boolean; paper?: Paper } = {}): Notebook {
     if (options.folderId && !this.getFolder(options.folderId)) throw new RangeError(`No folder ${options.folderId}`);
     const nb: Notebook = {
       id: nanoid(10),
       title,
-      pages: Array.from({ length: Math.max(1, pageCount) }, () => this.newPage(background)),
+      pages: Array.from({ length: Math.max(1, pageCount) }, () => this.newPage(background, options.paper)),
       createdAt: now(),
       updatedAt: now(),
       ...(options.folderId ? { folderId: options.folderId } : {}),
@@ -596,6 +617,7 @@ export class Store {
     const found = this.findPage(pageId);
     if (!found) throw new Error(`No page ${pageId}`);
     fs.writeFileSync(this.snapshotPath(pageId), png);
+    delete found.page.paperSnapshotStale;
     this.invalidateTranscripts(found.page, strokeCount);
     found.page.snapshotVersion++;
     found.page.inkSyncedAt = now();

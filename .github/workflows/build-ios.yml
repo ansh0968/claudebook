@@ -3,9 +3,9 @@ name: Build iPad app
 on:
   push:
     branches: [main]
-    paths: ["ios/**", ".github/workflows/build-ios.yml"]
+    paths: ["ios/**", "server/src/paper-templates.json", ".github/workflows/build-ios.yml"]
   pull_request:
-    paths: ["ios/**", ".github/workflows/build-ios.yml"]
+    paths: ["ios/**", "server/src/paper-templates.json", ".github/workflows/build-ios.yml"]
   workflow_dispatch:
 
 permissions:

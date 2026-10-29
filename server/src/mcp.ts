@@ -11,6 +11,9 @@ import { parsePageRegion } from "./regions.js";
 import { logMistake } from "./study.js";
 import { registerPageTools } from "./page-management.js";
 
+import { registerPaperTools, backgroundSchema, paperSchema } from "./paper-tools.js";
+import { paperRegions } from "./paper.js";
+
 const INSTRUCTIONS = `ClaudeBook is the user's handwritten notebook app on iPad. You can see their pages and draw on them.
 Pages use a fixed coordinate space: x 0..${PAGE_W} left to right, y 0..${PAGE_H} top to bottom.
 Workflow: call get_current_page first (it shows what the user has open, with a labelled blue coordinate grid and the positions of recognized handwriting).
@@ -37,6 +40,7 @@ PDF-backed pages include their own text with page-coordinate line boxes, filtere
 create_pdf ships these exact Typst imports offline (Typst 0.13.1):
 ${TYPST_IMPORTS}
 ${TYPST_COMPATIBILITY}
+Paper: choose per-page pattern and colour with set_page_background, e.g. {background:"cornell",paper:"black"}. create_notebook and add_pages also accept background and paper. On black/slate use light ink; use view_page to check. Structured regions are in page descriptions.
 Notebook/page management: use list_pages to get stable page ids, delete_pages to remove requested pages (including user ink), reorder_pages with a complete ordered id list, duplicate_pages for independent copies, and move_pages to move existing page ids to another notebook. after_page counts target pages before insertion (0=front, default=end), after removal for moves. For a notebook the user explicitly wants deleted, use delete_notebook with direct:true; otherwise omit direct to request iPad confirmation. Empty notebooks can be refilled with add_pages.
 Example drawing: #canvas({ draw.line((0,0),(2,1)); draw.circle((1,1),radius:0.4) }). Chemistry: #ch("H2O").
 The library is organised in folders (list_notebooks shows them). Put new notebooks and PDFs in the folder that fits with the folder parameter, and file notebooks with move_notebook. Scratch pads are temporary and delete themselves a week after their last edit unless the user keeps them.`;
@@ -54,6 +58,7 @@ const describeItem = (item: Item) => ({ id: item.id, type: item.type, label: ite
 export function buildMcpServer(store: Store) {
   const server = new McpServer({ name: "claudebook", version: "0.1.0" }, { instructions: INSTRUCTIONS });
   registerPageTools(server, store);
+  registerPaperTools(server, store);
 
   /** Resolve a page from optional ids, falling back to whatever the user has open. */
   function resolvePage(pageId?: string, notebookId?: string, pageNumber?: number) {
@@ -72,8 +77,10 @@ export function buildMcpServer(store: Store) {
     const { notebook, page, index } = found;
     const lines = [
       `Notebook "${notebook.title}" (id ${notebook.id}), page ${index + 1} of ${notebook.pages.length} (page id ${page.id}).`,
-      `Background: ${page.background}${page.pdf ? `, PDF page ${page.pdf.page}` : ""}. Your layer has ${page.claudeLayer.length} item(s).`,
+      `Background: ${page.background} on ${page.paper ?? "default"} paper. Paper: ${page.paper ?? "default"}${page.pdf ? `, PDF page ${page.pdf.page}` : ""}. Your layer has ${page.claudeLayer.length} item(s).`,
     ];
+    lines.push(...paperRegions(page.background));
+    if (page.paperSnapshotStale) lines.push("Paper changed: the last ink snapshot still contains the previous paper until the iPad syncs. User ink is preserved.");
     const doubts = page.doubts.filter((d) => !d.resolvedAt);
     if (doubts.length) {
       lines.push("Open doubts: zoom into each marked region with view_page before explaining or resolving it (x, y, w, h):");
@@ -351,7 +358,8 @@ export function buildMcpServer(store: Store) {
     },
   );
 
-  const background = z.enum(["blank", "lined", "grid", "dotted"]).optional();
+  const background = backgroundSchema.optional();
+  const paper = paperSchema.optional();
 
   server.registerTool(
     "resolve_doubt",
@@ -430,11 +438,11 @@ export function buildMcpServer(store: Store) {
     {
       title: "Create a notebook",
       description: "Make a new notebook for the user, optionally inside a folder.",
-      inputSchema: { title: z.string(), pages: z.number().int().min(1).max(200).optional(), background, folder: folderParam },
+      inputSchema: { title: z.string(), pages: z.number().int().min(1).max(200).optional(), background, paper, folder: folderParam },
     },
-    async ({ title, pages, background, folder }) => {
+    async ({ title, pages, background, paper, folder }) => {
       const folderId = folder ? resolveFolder(folder, true) : undefined;
-      const nb = store.createNotebook(title, pages ?? 1, background ?? "blank", { folderId });
+      const nb = store.createNotebook(title, pages ?? 1, background ?? "blank", { folderId, paper });
       const where = folderId ? ` in folder "${store.folderPath(folderId).join("/")}"` : "";
       return text(`Created "${nb.title}" (id ${nb.id}) with ${nb.pages.length} page(s)${where}.`);
     },
@@ -468,13 +476,13 @@ export function buildMcpServer(store: Store) {
         notebook_id: z.string().optional(),
         count: z.number().int().min(1).max(100).optional(),
         after_page: z.number().int().min(0).optional().describe("0 inserts at the start"),
-        background,
+        background, paper,
       },
     },
-    async ({ notebook_id, count, after_page, background }) => {
+    async ({ notebook_id, count, after_page, background, paper }) => {
       const nbId = notebook_id ?? store.view().notebookId;
       if (!nbId || !store.getNotebook(nbId)) return fail("Notebook not found.");
-      const pages = Array.from({ length: count ?? 1 }, () => store.newPage(background ?? "blank"));
+      const pages = Array.from({ length: count ?? 1 }, () => store.newPage(background ?? "blank", paper));
       const at = store.insertPages(nbId, pages, after_page === undefined ? undefined : after_page - 1);
       return text(`Added ${pages.length} page(s) starting at page ${at + 1}. Page ids: ${pages.map((p) => p.id).join(", ")}`);
     },

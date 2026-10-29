@@ -311,6 +311,47 @@ final class StudyFlowTests: XCTestCase {
         }
     }
 
+    @MainActor
+    func testPageTypesCornellBlackAndHex() async throws {
+        let notebook: SmokeNotebook = try await api.request("notebooks", method: "POST", body: ["title": "Paper picker test", "pages": 1])
+        let page = try XCTUnwrap(notebook.pages.first)
+        try await api.setView(notebook: notebook.id, page: page.id)
+        let app = launch()
+        defer { app.terminate() }
+        try openFirstPage(app, pageId: page.id)
+        func openPicker() throws {
+            app.buttons["Notebook options"].tap()
+            try requireReady(app.buttons["editor.pageType"])
+            app.buttons["editor.pageType"].tap()
+            try requireReady(app.buttons["paper.color"])
+        }
+        func selectPattern(_ id: String) throws {
+            let row = app.buttons["paper.pattern.\(id)"]
+            for _ in 0..<8 { if row.isHittable { break }; app.swipeUp() }
+            try requireReady(row); row.tap()
+            app.buttons["paper.apply"].tap()
+            try requireReady(app.buttons["editor.askClaude"])
+        }
+        try openPicker()
+        app.buttons["paper.color"].tap()
+        app.buttons["Black"].tap()
+        try selectPattern("cornell")
+        let cornell: SmokeNotebook = try await eventually {
+            let current: SmokeNotebook = try await self.api.request("notebooks/\(notebook.id)")
+            return current.pages.first?.background == "cornell" && current.pages.first?.paper == "black" ? current : nil
+        }
+        XCTAssertEqual(cornell.pages.first?.paper, "black")
+        let blackShot = XCTAttachment(screenshot: app.screenshot()); blackShot.name = "cornell-black"; blackShot.lifetime = .keepAlways; add(blackShot)
+        try openPicker()
+        try selectPattern("hex")
+        let hex: SmokeNotebook = try await eventually {
+            let current: SmokeNotebook = try await self.api.request("notebooks/\(notebook.id)")
+            return current.pages.first?.background == "hex" ? current : nil
+        }
+        XCTAssertEqual(hex.pages.first?.paper, "black")
+        let hexShot = XCTAttachment(screenshot: app.screenshot()); hexShot.name = "hex-paper"; hexShot.lifetime = .keepAlways; add(hexShot)
+    }
+
     private func fixture() async throws -> SmokeNotebook {
         let list: SmokeList = try await api.request("notebooks")
         return try XCTUnwrap(list.notebooks.first { $0.title == "Organic chemistry" }, "Run scripts/smoke-fixture.mjs first")
@@ -370,7 +411,7 @@ private struct SmokeList: Decodable { var notebooks: [SmokeNotebook]; var view: 
 private struct SmokeView: Decodable { var notebookId: String?; var pageId: String? }
 private struct SmokeNotebook: Decodable { var id: String; var title: String; var pages: [SmokePage]; var folderId: String?; var scratch: Bool?; var expiresAt: String? }
 private struct SmokeFolder: Decodable { var id: String; var name: String }
-private struct SmokePage: Decodable { var id: String; var claudeLayer: [SmokeItem]; var doubts: [SmokeDoubt]? }
+private struct SmokePage: Decodable { var id: String; var background: String?; var paper: String?; var claudeLayer: [SmokeItem]; var doubts: [SmokeDoubt]? }
 private struct SmokeItem: Decodable { var id: String; var type: String; var text: String?; var revealed: Bool? }
 private struct SmokeDoubt: Decodable { var id: String; var pageId: String; var region: SmokeRegion }
 private struct SmokeRegion: Decodable { var x: Double; var y: Double; var w: Double; var h: Double }

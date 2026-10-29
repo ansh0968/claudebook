@@ -282,7 +282,7 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
         let paper = PaperView(frame: PageGeometry.rect)
         paper.style = style(for: page)
         let claude = ClaudeLayerView(frame: PageGeometry.rect)
-        claude.update(items: page.claudeLayer, dark: dark, doubts: page.doubts ?? [])
+        claude.update(items: page.claudeLayer, dark: page.usesDarkInkPalette(appDark: dark), doubts: page.doubts ?? [])
         paperContainer.addSubview(paper)
         claudeContainer.addSubview(claude)
         let views = (paper: paper, claude: claude)
@@ -300,7 +300,7 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
     }
 
     private func style(for page: Page) -> PaperStyle {
-        PaperStyle(background: page.background, pdf: page.pdf.flatMap { PDFCache.cached($0) }, dark: dark, invertPDF: invertPDFs)
+        PaperStyle(background: page.background, paper: page.paper, pdf: page.pdf.flatMap { PDFCache.cached($0) }, dark: dark, invertPDF: invertPDFs)
     }
 
     private func clampedOffsetY(_ y: CGFloat) -> CGFloat {
@@ -437,7 +437,7 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
             style.dark = dark
             style.invertPDF = invertPDFs
             views.paper.style = style
-            views.claude.update(items: page.claudeLayer, dark: dark, doubts: page.doubts ?? [])
+            views.claude.update(items: page.claudeLayer, dark: page.usesDarkInkPalette(appDark: dark), doubts: page.doubts ?? [])
         }
         updateHintButtons()
     }
@@ -448,9 +448,12 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
     func setNotebook(_ notebook: Notebook) {
         let first = notebookId != notebook.id
         if !first && notebook.pages.map(\.id) == pages.map(\.id) {
+            let changedPaper = notebook.pages.filter { next in pages.contains { $0.id == next.id && ($0.background != next.background || $0.paper != next.paper) } }.map(\.id)
             pages = notebook.pages
+            PendingUploads.all.formUnion(changedPaper.filter { LocalDrawings.exists($0) })
+            if !changedPaper.isEmpty { scheduleUpload(delay: 0.2) }
             for (id, views) in onScreen {
-                if let page = pages.first(where: { $0.id == id }) { views.claude.update(items: page.claudeLayer, dark: dark, doubts: page.doubts ?? []) }
+                if let page = pages.first(where: { $0.id == id }) { views.paper.style = style(for: page); views.claude.update(items: page.claudeLayer, dark: page.usesDarkInkPalette(appDark: dark), doubts: page.doubts ?? []) }
             }
             updateHintButtons()
             return
@@ -506,7 +509,7 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
             guard let items = try? await API.current?.claudeItems(pageId: pageId),
                   let i = self.pages.firstIndex(where: { $0.id == pageId }) else { return }
             self.pages[i].claudeLayer = items
-            self.onScreen[pageId]?.claude.update(items: items, dark: self.dark, doubts: self.pages[i].doubts ?? [])
+            self.onScreen[pageId]?.claude.update(items: items, dark: self.pages[i].usesDarkInkPalette(appDark: self.dark), doubts: self.pages[i].doubts ?? [])
             self.updateHintButtons()
         }
     }
@@ -517,7 +520,7 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
             guard let doubts = try? await API.current?.doubts(pageId: pageId),
                   let i = self.pages.firstIndex(where: { $0.id == pageId }) else { return }
             self.pages[i].doubts = doubts
-            self.onScreen[pageId]?.claude.update(items: self.pages[i].claudeLayer, dark: self.dark, doubts: doubts)
+            self.onScreen[pageId]?.claude.update(items: self.pages[i].claudeLayer, dark: self.pages[i].usesDarkInkPalette(appDark: self.dark), doubts: doubts)
         }
     }
 
@@ -527,7 +530,7 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
         doubts.removeAll { $0.id == doubt.id }
         doubts.append(doubt)
         pages[index].doubts = doubts
-        onScreen[doubt.pageId]?.claude.update(items: pages[index].claudeLayer, dark: dark, doubts: doubts)
+        onScreen[doubt.pageId]?.claude.update(items: pages[index].claudeLayer, dark: pages[index].usesDarkInkPalette(appDark: dark), doubts: doubts)
     }
 
     /// Selection points live in screen coordinates. Convert through the scroll view so zoom and offsets
@@ -635,7 +638,7 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
         guard let pageIndex = pages.firstIndex(where: { $0.id == pageId }),
               let itemIndex = pages[pageIndex].claudeLayer.firstIndex(where: { $0.id == item.id }) else { return }
         pages[pageIndex].claudeLayer[itemIndex] = item
-        onScreen[pageId]?.claude.update(items: pages[pageIndex].claudeLayer, dark: dark, doubts: pages[pageIndex].doubts ?? [])
+        onScreen[pageId]?.claude.update(items: pages[pageIndex].claudeLayer, dark: pages[pageIndex].usesDarkInkPalette(appDark: dark), doubts: pages[pageIndex].doubts ?? [])
         updateHintButtons()
         UIAccessibility.post(notification: .announcement, argument: item.text ?? "Hint revealed")
     }
@@ -654,7 +657,14 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
     }
 
     /// Fresh install or new device: pull each page's ink backup from the server.
+    /// Rebuild paper-baked snapshots only after the local ink is known, including after an offline change.
+    private func refreshPaperSnapshots() {
+        let stale = pages.filter { $0.paperSnapshotStale == true && LocalDrawings.exists($0.id) }.map(\.id)
+        if !stale.isEmpty { PendingUploads.all.formUnion(stale); scheduleUpload(delay: 0.5) }
+    }
+
     private func restoreBackups() {
+        refreshPaperSnapshots()
         let missing = pages.map(\.id).filter { !LocalDrawings.exists($0) }
         guard !missing.isEmpty, let api = API.current else { return }
         Task {
@@ -682,7 +692,7 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
                     LocalDrawings.save(PKDrawing(), pageId: id)
                 }
             }
-            guard !restored.isEmpty else { return }
+            guard !restored.isEmpty else { refreshPaperSnapshots(); return }
             commitNow()
             for (id, drawing) in restored where pages.contains(where: { $0.id == id }) && !LocalDrawings.isDeleted(id) && (drawings[id]?.strokes.isEmpty ?? true) {
                 drawings[id] = drawing
@@ -690,6 +700,7 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
                 LocalDrawings.save(drawing, pageId: id)
             }
             rebuildCanvasDrawing()
+            refreshPaperSnapshots()
         }
     }
 
@@ -855,7 +866,7 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
                 let boxes = await PageSnapshot.recognizeText(drawing: drawing)
                 // Without the PDF the snapshot would hide it from Claude, so let the server's own render stand.
                 if page.pdf == nil || pdf != nil {
-                    let png = PageSnapshot.png(drawing: drawing, background: page.background, pdf: pdf)
+                    let png = PageSnapshot.png(drawing: drawing, background: page.background, paper: page.paper, pdf: pdf)
                     try await api.uploadSnapshot(pageId: id, png: png, textBoxes: boxes, strokeCount: drawing.strokes.count)
                 }
                 try await api.uploadDrawing(pageId: id, data: drawing.dataRepresentation(), strokeCount: drawing.strokes.count)

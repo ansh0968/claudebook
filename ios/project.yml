@@ -12,7 +12,10 @@ targets:
   ClaudeBook:
     type: application
     platform: iOS
-    sources: [ClaudeBook]
+    sources:
+      - path: ClaudeBook
+      - path: ../server/src/paper-templates.json
+        buildPhase: resources
     scheme:
       testTargets:
         - ClaudeBookTests
