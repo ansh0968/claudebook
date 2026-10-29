@@ -34,11 +34,11 @@ function findBlock(store: Store, page: string, id: string) {
   if (!item || item.type !== "web") throw new Error("Web block not found");
   return item;
 }
-const dimension = z.number().finite().positive().max(10000);
-const geometry = { x: z.number().finite(), y: z.number().finite(), w: dimension, h: dimension };
-const title = z.string().min(1).max(200);
-export const addBlockSchema = z.object({ page_id: z.string().optional(), ...geometry, title, html: z.string().describe('Full HTML or fragment, at most 1 MB. Example: <button onclick="this.textContent=\'Clicked\'">Try it</button>'), autoplay: z.boolean().optional(), group: z.string().optional() });
-export const updateBlockSchema = z.object({ page_id: z.string().optional(), id: z.string(), html: z.string().optional(), title: title.optional(), x: geometry.x.optional(), y: geometry.y.optional(), w: dimension.optional(), h: dimension.optional() });
+const dimension = z.number().finite().positive().max(10000).describe("Size in page units, e.g. w:800, h:500; CSS viewport uses these exact dimensions");
+const geometry = { x: z.number().finite().describe("Top-left horizontal page coordinate, e.g. x:100"), y: z.number().finite().describe("Top-left vertical page coordinate, e.g. y:200"), w: dimension, h: dimension };
+const title = z.string().min(1).max(200).describe('Short poster/accessibility title, e.g. title:"Projectile simulator"');
+export const addBlockSchema = z.object({ page_id: z.string().optional().describe("Target page id, default the open page; e.g. page_id:abc123"), ...geometry, title, html: z.string().describe('Full HTML or fragment, at most 1 MB. Example: <button onclick="this.textContent=\'Clicked\'">Try it</button>'), autoplay: z.boolean().optional().describe("Automatically play on the middle visible page, default true; e.g. autoplay:false"), group: z.string().optional().describe('Optional drawing group for erase/copy, e.g. group:"physics"') });
+export const updateBlockSchema = z.object({ page_id: z.string().optional().describe("Target page id, default the open page; e.g. page_id:abc123"), id: z.string().describe('Existing web item id returned by add_web_block, e.g. id:"b7"'), html: z.string().optional().describe('Replacement full document or fragment, at most 1 MB; e.g. html:"<button>Fixed</button>"'), title: title.optional(), x: geometry.x.optional(), y: geometry.y.optional(), w: dimension.optional(), h: dimension.optional() });
 export function addBlock(store: Store, pageId: string, raw: unknown) {
   const { page_id: _, html, ...fields } = addBlockSchema.parse(raw);
   if (!store.findPage(pageId)) throw new Error("Page not found");
