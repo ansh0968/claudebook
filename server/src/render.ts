@@ -1,5 +1,7 @@
 // Turns a page into a PNG Claude can look at: the user's ink (as uploaded by the app),
 // Claude's own layer on top, and optionally a labelled coordinate grid so Claude can aim.
+import { blockPath } from "./web-blocks.js";
+import type { Item } from "./items.js";
 import fs from "node:fs";
 import sharp, { type OverlayOptions } from "sharp";
 import { imageHref } from "./image-assets.js";
@@ -111,6 +113,16 @@ export function claudeLayerSvg(page: Page, store?: Store) {
 }
 
 function renderClaudeItems(page: Page, store?: Store) {
-  const svg = page.claudeLayer.map(item => itemToSvg(item.type === "image" ? { ...item, image_href: store ? imageHref(store, item.file) : undefined } : item)).join("");
+  const svg = page.claudeLayer.map(item => renderItem(store, item)).join("");
   return darkPaper(page.paper) ? adaptPaperInk(svg) : svg;
+}
+
+function renderItem(store: Store | undefined, item: Item) {
+  if (store && item.type === "web" && item.poster) {
+    try {
+      const bytes = fs.readFileSync(blockPath(store, item.poster));
+      return `<image x="${item.x}" y="${item.y}" width="${item.w}" height="${item.h}" preserveAspectRatio="none" href="data:image/png;base64,${bytes.toString("base64")}"/>`;
+    } catch { /* Missing poster is harmless: keep the placeholder visible. */ }
+  }
+  return itemToSvg(item.type === "image" ? { ...item, image_href: store ? imageHref(store, item.file) : undefined } : item);
 }
