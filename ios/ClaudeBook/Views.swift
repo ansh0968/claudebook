@@ -147,6 +147,8 @@ struct NotebookEditor: View {
     @State private var pencilOnly = true
     @State private var showPages = false
     @State private var addingPage = false
+    /// Bumped whenever the editor adds a page locally, so a notebook fetched before that can't remove it again.
+    @State private var localPageEdits = 0
     @State private var testHooksDone = false
     @State private var askingClaude = false
     @State private var notice: String?
@@ -207,6 +209,7 @@ struct NotebookEditor: View {
                     Button { Task { await addPage(after: index) } } label: { Image(systemName: "doc.badge.plus") }
                         .disabled(addingPage || notebook == nil)
                         .accessibilityLabel("Add a page")
+                        .accessibilityIdentifier("editor.addPage")
                 }
                 ToolbarItemGroup(placement: .topBarTrailing) {
                     if let notebook, notebook.isScratch {
@@ -362,9 +365,12 @@ struct NotebookEditor: View {
 
     private func load() async {
         let nb: Notebook
+        let edits = localPageEdits
         do {
             guard let api = API.current else { return }
             nb = try await api.notebook(notebookId)
+            // A page was added while this was in flight; the reload after that add brings the fresh copy.
+            guard edits == localPageEdits, !addingPage else { return }
             loadError = nil
         } catch {
             if let apiError = error as? APIError, apiError.status == 404 {
@@ -389,14 +395,14 @@ struct NotebookEditor: View {
     }
 
     private func applyNotebook(_ updated: Notebook) {
-        let selected = controller.currentPage?.id
+        let opening = controller.notebookId != updated.id
         let oldIndex = index
         notebook = updated
         controller.setNotebook(updated)
         index = controller.currentIndex
-        if let selected, let i = updated.pages.firstIndex(where: { $0.id == selected }) {
-            controller.scrollTo(page: i, animated: false)
-        } else if !updated.pages.isEmpty {
+        // Once open, the controller keeps whatever is on screen in place when pages come or go.
+        // Snapping to the top of the current page here is what made the view jump after adding a page.
+        if opening, !updated.pages.isEmpty {
             controller.scrollTo(page: min(oldIndex, updated.pages.count - 1), animated: false)
         }
     }
@@ -416,20 +422,32 @@ struct NotebookEditor: View {
         }
     }
 
-    /// Insert a blank page after page `i` and scroll to it.
+    /// Insert a blank page after page `i` and glide to it. The page shows up straight away and the server
+    /// is told in the background; if it says no, the page is taken back out.
     private func addPage(after i: Int) async {
-        guard !addingPage, let nb = notebook else { return }
+        guard !addingPage, var nb = notebook else { return }
         let after = nb.pages.isEmpty ? -1 : min(max(-1, i), nb.pages.count - 1)
+        let page = Page.blank(background: nb.pages.isEmpty ? .lined : nb.pages[max(0, after)].background)
         addingPage = true
-        defer { addingPage = false; controller.endPullToAdd() }
+        localPageEdits += 1
+        nb.pages.insert(page, at: after + 1)
+        applyNotebook(nb)
+        controller.endPullToAdd()
+        controller.reveal(pageId: page.id)
         do {
-            try await API.current?.addPage(notebookId: nb.id, afterIndex: after, background: nb.pages.isEmpty ? .lined : nb.pages[max(0, after)].background)
+            guard let api = API.current else { throw URLError(.notConnectedToInternet) }
+            try await api.addPage(page, notebookId: nb.id, afterIndex: after)
         } catch {
             notice = "Couldn’t add a page: \(error.localizedDescription)"
-            return
+            if var current = notebook {
+                current.pages.removeAll { $0.id == page.id }
+                applyNotebook(current)
+            }
+            // If the server did get it after all, the reload below brings it (and any ink) back.
+            PendingUploads.all.remove(page.id)
         }
+        addingPage = false
         await load()
-        controller.scrollTo(page: after + 1, animated: true)
     }
 
     private func undoClaude(count: Int?) {

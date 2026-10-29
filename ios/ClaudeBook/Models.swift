@@ -217,6 +217,16 @@ struct Page: Codable, Identifiable, Hashable {
     var updatedAt: String
 }
 
+extension Page {
+    /// A blank page made on the iPad, so it can be shown before the server has it.
+    static func blank(background: PageBackground) -> Page {
+        let letters = Array("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789")
+        let id = "p" + String((0..<15).map { _ in letters.randomElement()! })
+        return Page(id: id, background: background, pdf: nil, snapshotVersion: 0, textBoxes: [], claudeLayer: [], doubts: [],
+                    updatedAt: ISO8601DateFormatter().string(from: Date()))
+    }
+}
+
 enum ISODate {
     static func parse(_ s: String) -> Date? {
         let f = ISO8601DateFormatter()

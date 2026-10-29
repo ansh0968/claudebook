@@ -105,6 +105,7 @@ interface DB {
 }
 
 const now = () => new Date().toISOString();
+const CLIENT_PAGE_ID = /^[A-Za-z0-9_-]{8,40}$/;
 
 export class Store {
   private db: DB;
@@ -576,6 +577,23 @@ export class Store {
     this.save();
     this.emit({ type: "notebook", notebookId });
     return at;
+  }
+
+  /**
+   * Insert pages whose ids the app picked itself, so it can show them before the server answers.
+   * Sending the same ids again (a retried request) returns the pages that are already there.
+   */
+  insertClientPages(notebookId: string, ids: string[], background: Background, afterIndex?: number): Page[] {
+    if (!this.getNotebook(notebookId)) throw new Error(`No notebook ${notebookId}`);
+    if (ids.length < 1 || ids.length > 100 || new Set(ids).size !== ids.length || !ids.every(id => typeof id === "string" && CLIENT_PAGE_ID.test(id))) {
+      throw new Error("pageIds must be 1 to 100 unique ids of 8 to 40 letters, digits, _ or -");
+    }
+    const found = ids.map(id => this.findPage(id));
+    if (found.every(f => f?.notebook.id === notebookId)) return found.map(f => f!.page);
+    if (found.some(Boolean)) throw new Error("A page with one of these ids already exists");
+    const pages = ids.map(id => ({ ...this.newPage(background), id }));
+    this.insertPages(notebookId, pages, afterIndex);
+    return pages;
   }
 
   view(): ViewState {

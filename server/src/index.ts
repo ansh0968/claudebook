@@ -211,10 +211,14 @@ api.delete("/notebooks/:id", (req, res) => {
 });
 
 api.post("/notebooks/:id/pages", (req, res) => {
-  const { count, afterIndex, background } = req.body as { count?: number; afterIndex?: number; background?: Background };
+  const { count, afterIndex, background, pageIds } = req.body as { count?: number; afterIndex?: number; background?: Background; pageIds?: string[] };
   try {
     if (count !== undefined && (!Number.isInteger(count) || count < 1 || count > 100)) return res.status(400).json({ error: "count must be an integer from 1 to 100" });
     if (background !== undefined && !["blank", "lined", "grid", "dotted"].includes(background)) return res.status(400).json({ error: "invalid background" });
+    if (pageIds !== undefined) {
+      if (!Array.isArray(pageIds) || (count !== undefined && count !== pageIds.length)) return res.status(400).json({ error: "pageIds must be an array with one id per page" });
+      return res.json({ pages: store.insertClientPages(req.params.id, pageIds, background ?? "blank", afterIndex) });
+    }
     const pages = Array.from({ length: count ?? 1 }, () => store.newPage(background ?? "blank"));
     store.insertPages(req.params.id, pages, afterIndex);
     res.json({ pages });
