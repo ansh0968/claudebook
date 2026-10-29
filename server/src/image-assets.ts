@@ -42,7 +42,10 @@ export function sweepImages(store: Store) {
   if (!fs.existsSync(dir)) return;
   const referenced = new Set(store.listNotebooks().flatMap(nb => nb.pages.flatMap(p =>
     p.claudeLayer.flatMap(i => i.type === "image" ? [i.file] : []))));
-  for (const file of fs.readdirSync(dir)) if (IMAGE_FILE.test(file) && !referenced.has(file)) {
+  for (const file of fs.readdirSync(dir)) {
+    const orphan = IMAGE_FILE.test(file) && !referenced.has(file);
+    const interruptedWrite = file.endsWith(".tmp") && IMAGE_FILE.test(file.slice(0, -4));
+    if (!orphan && !interruptedWrite) continue;
     try { fs.rmSync(path.join(dir, file), { force: true }); }
     catch (error) { console.warn(`Could not remove unused image: ${(error as Error).message}`); }
   }

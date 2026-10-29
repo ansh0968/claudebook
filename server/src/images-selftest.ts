@@ -139,6 +139,18 @@ try {
   assert.ok(!fs.existsSync(dest));
   sweepImages(store);
 
+  const fitPage = store.newPage("blank"); store.insertPages(store.listNotebooks()[0].id, [fitPage]);
+  for (const [i, fit] of (["contain", "cover", "stretch"] as const).entries()) {
+    await placeImage(store, { page_id: fitPage.id, x: 100 + i * 200, y: 100, w: 100, h: 100, fit, data });
+  }
+  await placeImage(store, { page_id: fitPage.id, x: 700, y: 100, w: 100, h: 100, fit: "stretch", opacity: 0.5, data });
+  const fits = await sharp(await renderPage(store, fitPage)).removeAlpha().raw().toBuffer({ resolveWithObject: true });
+  const green = (x: number, y: number) => fits.data[(y * fits.info.width + x) * fits.info.channels + 1];
+  assert.ok(green(110, 110) > 240, "contain leaves space above image");
+  assert.ok(green(110, 140) < 60, "contain preserves image ratio");
+  assert.ok(green(310, 110) < 60, "cover fills its clipped box");
+  assert.ok(green(510, 110) < 60, "stretch fills its box");
+  assert.ok(green(710, 110) > 120 && green(710, 110) < 170, "opacity composites over paper");
   const alpha = await normalizeImage(await sharp({ create: { width: 2500, height: 500, channels: 4, background: "#0000ff88" } }).png().toBuffer());
   assert.ok(alpha.file.endsWith(".png")); assert.equal(alpha.w, 2048); assert.equal(alpha.h, 410);
   const exif = await normalizeImage(await sharp(png).jpeg().withMetadata({ orientation: 6 }).toBuffer());
