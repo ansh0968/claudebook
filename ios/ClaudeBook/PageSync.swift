@@ -53,15 +53,15 @@ enum PendingUploads {
 /// Renders what the user wrote and reads their handwriting, so Claude gets an image plus text positions.
 enum PageSnapshot {
     /// Paper (or PDF page) + user ink at 1000x1414, no Claude layer (the server adds that itself).
-    /// Rendered at 2x so Claude can zoom in and still read small handwriting. Always light, whatever the
-    /// app's appearance, so Claude sees dark ink on white paper.
-    static func png(drawing: PKDrawing, background: PageBackground, pdf: CGPDFPage? = nil) -> Data {
+    /// Rendered at 2x. Legacy paper keeps light snapshots; explicit dark paper preserves its real
+    /// background and dark ink appearance, so light ink remains visible to Claude.
+    static func png(drawing: PKDrawing, background: PageBackground, paper: PaperColor? = nil, pdf: CGPDFPage? = nil) -> Data {
         let format = UIGraphicsImageRendererFormat()
         format.scale = 2
         var data = Data()
-        UITraitCollection(userInterfaceStyle: .light).performAsCurrent {
+        UITraitCollection(userInterfaceStyle: paper?.isDark == true ? .dark : .light).performAsCurrent {
             let image = UIGraphicsImageRenderer(size: PageGeometry.size, format: format).image { ctx in
-                PaperView.drawPaper(PaperStyle(background: background, pdf: pdf), in: ctx.cgContext)
+                PaperView.drawPaper(PaperStyle(background: background, paper: paper, pdf: pdf), in: ctx.cgContext)
                 drawing.image(from: PageGeometry.rect, scale: 2).draw(in: PageGeometry.rect)
             }
             data = image.pngData() ?? Data()

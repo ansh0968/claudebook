@@ -55,7 +55,7 @@ struct API {
         return API(base: url, secret: Credentials.secret)
     }
 
-    private func request(_ path: String, method: String = "GET", json: Encodable? = nil, body: Data? = nil, contentType: String = "application/octet-stream", query: [URLQueryItem] = []) async throws -> Data {
+    func request(_ path: String, method: String = "GET", json: Encodable? = nil, body: Data? = nil, contentType: String = "application/octet-stream", query: [URLQueryItem] = []) async throws -> Data {
         var url = base.appending(path: "api").appending(path: path)
         if !query.isEmpty { url.append(queryItems: query) }
         var req = URLRequest(url: url)
@@ -141,9 +141,9 @@ struct API {
         _ = try await request("notebooks/\(id)/delete-request", method: "DELETE")
     }
 
-    func addPage(notebookId: String, afterIndex: Int, background: PageBackground) async throws {
-        struct Body: Encodable { var count: Int; var afterIndex: Int; var background: PageBackground }
-        _ = try await request("notebooks/\(notebookId)/pages", method: "POST", json: Body(count: 1, afterIndex: afterIndex, background: background))
+    func addPage(notebookId: String, afterIndex: Int, background: PageBackground, paper: PaperColor? = nil) async throws {
+        struct Body: Encodable { var count: Int; var afterIndex: Int; var background: PageBackground; var paper: PaperColor? }
+        _ = try await request("notebooks/\(notebookId)/pages", method: "POST", json: Body(count: 1, afterIndex: afterIndex, background: background, paper: paper))
     }
 
     func deletePages(notebookId: String, pageIds: [String]) async throws -> Notebook {
