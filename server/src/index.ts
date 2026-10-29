@@ -225,11 +225,15 @@ api.delete("/notebooks/:id", (req, res) => {
 });
 
 api.post("/notebooks/:id/pages", (req, res) => {
-  const { count, afterIndex, background, paper } = req.body as { count?: number; afterIndex?: number; background?: Background; paper?: Paper };
+  const { count, afterIndex, background, paper, pageIds } = req.body as { count?: number; afterIndex?: number; background?: Background; paper?: Paper; pageIds?: string[] };
   try {
     if (count !== undefined && (!Number.isInteger(count) || count < 1 || count > 100)) return res.status(400).json({ error: "count must be an integer from 1 to 100" });
     if (background !== undefined && !isBackground(background)) return res.status(400).json({ error: "invalid background" });
     if (paper !== undefined && !isPaper(paper)) return res.status(400).json({ error: "invalid paper" });
+    if (pageIds !== undefined) {
+      if (!Array.isArray(pageIds) || (count !== undefined && count !== pageIds.length)) return res.status(400).json({ error: "pageIds must be an array with one id per page" });
+      return res.json({ pages: store.insertClientPages(req.params.id, pageIds, background ?? "blank", afterIndex, paper) });
+    }
     const pages = Array.from({ length: count ?? 1 }, () => store.newPage(background ?? "blank", paper));
     store.insertPages(req.params.id, pages, afterIndex);
     res.json({ pages });

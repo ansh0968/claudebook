@@ -128,7 +128,7 @@ struct PageGrid: View {
     private func insert(at count: Int) {
         let background = notebook.pages.first?.background ?? .lined
         mutate { api in
-            try await api.addPage(notebookId: notebook.id, afterIndex: count - 1, background: background)
+            try await api.addPage(.blank(background: background), notebookId: notebook.id, afterIndex: count - 1)
             return try await api.notebook(notebook.id)
         }
     }

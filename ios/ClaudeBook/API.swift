@@ -141,9 +141,10 @@ struct API {
         _ = try await request("notebooks/\(id)/delete-request", method: "DELETE")
     }
 
-    func addPage(notebookId: String, afterIndex: Int, background: PageBackground, paper: PaperColor? = nil) async throws {
-        struct Body: Encodable { var count: Int; var afterIndex: Int; var background: PageBackground; var paper: PaperColor? }
-        _ = try await request("notebooks/\(notebookId)/pages", method: "POST", json: Body(count: 1, afterIndex: afterIndex, background: background, paper: paper))
+    /// Add a page the editor is already showing, under the id it picked. Safe to retry.
+    func addPage(_ page: Page, notebookId: String, afterIndex: Int) async throws {
+        struct Body: Encodable { var pageIds: [String]; var afterIndex: Int; var background: PageBackground; var paper: PaperColor? }
+        _ = try await request("notebooks/\(notebookId)/pages", method: "POST", json: Body(pageIds: [page.id], afterIndex: afterIndex, background: page.background, paper: page.paper))
     }
 
     func deletePages(notebookId: String, pageIds: [String]) async throws -> Notebook {

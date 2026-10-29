@@ -10,6 +10,31 @@ final class StudyFlowTests: XCTestCase {
     }
 
     @MainActor
+    func testAddingAPageShowsItRightAwayAndSavesItInPlace() async throws {
+        let notebook: SmokeNotebook = try await api.request("notebooks", method: "POST", body: ["title": "Add page flow", "pages": 2])
+        try await api.setView(notebook: notebook.id, page: notebook.pages[0].id)
+        let app = launch()
+        defer { app.terminate() }
+        XCTAssertTrue(app.navigationBars["Add page flow · 1/2"].waitForExistence(timeout: 10))
+        let add = app.buttons["editor.addPage"]
+        try requireReady(add)
+        add.tap()
+        // The page is made on the iPad, so the editor lands on it without waiting for the server.
+        XCTAssertTrue(app.navigationBars["Add page flow · 2/3"].waitForExistence(timeout: 2), "The new page did not show up straight away")
+        let added: SmokeNotebook = try await eventually {
+            let current: SmokeNotebook = try await self.api.request("notebooks/\(notebook.id)")
+            return current.pages.count == 3 ? current : nil
+        }
+        XCTAssertEqual(added.pages[0].id, notebook.pages[0].id)
+        XCTAssertEqual(added.pages[2].id, notebook.pages[1].id)
+        // The reload after the add must agree with what is on screen, not add or drop a page.
+        try await Task.sleep(for: .seconds(1.5))
+        XCTAssertTrue(app.navigationBars["Add page flow · 2/3"].exists)
+        let settled: SmokeNotebook = try await api.request("notebooks/\(notebook.id)")
+        XCTAssertEqual(settled.pages.map(\.id), added.pages.map(\.id))
+    }
+
+    @MainActor
     func testAskClaudeDragPersistsAPageRegion() async throws {
         let notebook = try await fixture()
         let page = try XCTUnwrap(notebook.pages.first)

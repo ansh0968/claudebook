@@ -65,6 +65,15 @@ try {
   store.insertPages(source.id, [store.newPage("lined")], -1);
   assert.equal(source.pages.length, 1);
   assert.throws(() => store.setView(target.id, source.pages[0].id), /belong/);
+  const [clientPage] = store.insertClientPages(source.id, ["app-made-page-1"], "grid", 0);
+  assert.equal(source.pages[1].id, "app-made-page-1"); assert.equal(clientPage.background, "grid");
+  assert.equal(store.insertClientPages(source.id, ["app-made-page-1"], "grid", 0)[0], clientPage, "A retried add must not insert twice");
+  assert.equal(source.pages.length, 2);
+  for (const ids of [[], ["short"], ["bad id with spaces"], ["dup-dup-dup", "dup-dup-dup"]]) {
+    assert.throws(() => store.insertClientPages(source.id, ids, "blank"), /pageIds/);
+  }
+  assert.throws(() => store.insertClientPages(target.id, ["app-made-page-1"], "blank"), /already exists/, "Ids from another notebook are refused");
+  store.deletePages(source.id, ["app-made-page-1"]);
   store.movePages([copy.id], target.id, 0);
   assert.equal(target.pages[0].id, copy.id, "Same-notebook moves use insertion count after removal");
   const neighbors = store.createNotebook("Neighbors", 6), original = [...neighbors.pages];

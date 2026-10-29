@@ -389,6 +389,21 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
         footer.text = "Pull up to add a page"
     }
 
+    /// A page the user just added: fade it in and glide down to it. Whatever was on screen stays put
+    /// until the glide starts, because setNotebook anchors the view before this runs.
+    func reveal(pageId: String) {
+        guard let i = pages.firstIndex(where: { $0.id == pageId }) else { return }
+        if let views = onScreen[pageId] {
+            views.paper.alpha = 0
+            views.claude.alpha = 0
+            UIView.animate(withDuration: 0.35, delay: 0.05, options: [.curveEaseOut, .allowUserInteraction]) {
+                views.paper.alpha = 1
+                views.claude.alpha = 1
+            }
+        }
+        scrollTo(page: i, animated: true)
+    }
+
     /// How far the user has dragged past the end of the last page's footer.
     private var bottomOverscroll: CGFloat {
         let inset = canvas.adjustedContentInset
@@ -487,13 +502,21 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
             fingerprints[page.id] = Self.fingerprint(drawing.strokes, dy: 0)
         }
         rebuildCanvasDrawing()
-        for views in onScreen.values {
+        // Pages still in the notebook keep their views (layout just moves them), so nothing on screen
+        // flickers while it's redrawn. Gone pages, and everything when switching notebooks, are dropped.
+        for (id, views) in onScreen {
+            if !first, let page = pages.first(where: { $0.id == id }) {
+                views.claude.update(items: page.claudeLayer, dark: dark, doubts: page.doubts ?? [])
+                continue
+            }
             views.paper.removeFromSuperview()
             views.claude.removeFromSuperview()
+            onScreen[id] = nil
         }
-        onScreen = [:]
-        for button in hintButtons.values { button.removeFromSuperview() }
-        hintButtons = [:]
+        if first {
+            for button in hintButtons.values { button.removeFromSuperview() }
+            hintButtons = [:]
+        }
         layoutContent()
 
         if first {
