@@ -66,7 +66,6 @@ struct ClaudeItem: Codable, Identifiable, Hashable {
     var id: String
     var type: String
     var title: String?
-    var file: String?
     var rev: Int?
     var autoplay: Bool?
     var poster: String?
@@ -129,11 +128,12 @@ struct ClaudeItem: Codable, Identifiable, Hashable {
     var fit: String?
     var opacity: Double?
     var alt: String?
+    var file: String?
 
     enum CodingKeys: String, CodingKey {
-        case title, file, rev, autoplay, poster, posterAt, logs
         case id, type, points, from, to, center, rx, ry, x, y, w, h, text, size, color, width, fill, d, closed, dashed, latex, smooth, bend, group, label, revealed, smiles, parts, graph, origin, vertex, at, axes, name, radius, filled
         case fit, opacity, alt
+        case file, title, rev, autoplay, poster, posterAt, logs
         case head
         case headFilled = "head_filled"
         case headD = "head_d"
@@ -156,7 +156,6 @@ struct ClaudeItem: Codable, Identifiable, Hashable {
         id = try c.decode(String.self, forKey: .id)
         type = try c.decode(String.self, forKey: .type)
         title = try c.decodeIfPresent(String.self, forKey: .title)
-        file = try c.decodeIfPresent(String.self, forKey: .file)
         rev = try c.decodeIfPresent(Int.self, forKey: .rev)
         autoplay = try c.decodeIfPresent(Bool.self, forKey: .autoplay)
         poster = try c.decodeIfPresent(String.self, forKey: .poster)
@@ -224,6 +223,7 @@ struct ClaudeItem: Codable, Identifiable, Hashable {
         fit = try c.decodeIfPresent(String.self, forKey: .fit)
         opacity = try c.decodeIfPresent(Double.self, forKey: .opacity)
         alt = try c.decodeIfPresent(String.self, forKey: .alt)
+        file = try c.decodeIfPresent(String.self, forKey: .file)
     }
 }
 
