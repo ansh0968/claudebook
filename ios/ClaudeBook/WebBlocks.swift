@@ -130,11 +130,14 @@ final class WebBlockCard: UIView, WKNavigationDelegate, WKUIDelegate {
     var fullscreen: (() -> Void)?
     var isLive: Bool { web != nil || loading != nil }
     // Several blocks start together; share one compile so they don't race on the same identifier.
+    // A real (unresolvable) origin: with baseURL nil the document is opaque and WebKit masks every
+    // error as "Script error." with no line, which leaves Claude nothing to debug.
+    private static let origin = URL(string: "https://block.claudebook.invalid/")!
     private static var rules: Task<WKContentRuleList, Error>?
     private static func ruleList() async throws -> WKContentRuleList {
         if let rules { return try await rules.value }
         let task = Task<WKContentRuleList, Error> {
-            guard let compiled = try await WKContentRuleListStore.default().compileContentRuleList(forIdentifier: "ClaudeBookBlocks-v2", encodedContentRuleList: encodedRules) else {
+            guard let compiled = try await WKContentRuleListStore.default().compileContentRuleList(forIdentifier: "ClaudeBookBlocks-v3", encodedContentRuleList: encodedRules) else {
                 throw NSError(domain: "ClaudeBookBlocks", code: 1, userInfo: [NSLocalizedDescriptionKey: "Could not install block network sandbox"])
             }
             return compiled
@@ -144,7 +147,7 @@ final class WebBlockCard: UIView, WKNavigationDelegate, WKUIDelegate {
     }
     // WebKit's content-rule regexes have no `|` or `$`, so each allowed origin gets its own rule.
     private static let encodedRules: String = {
-        let allowed = [#"^https://cdnjs\\.cloudflare\\.com/"#, #"^https://cdn\\.jsdelivr\\.net/"#, #"^https://unpkg\\.com/"#, "^data:", "^blob:", "^about:blank"]
+        let allowed = [#"^https://cdnjs\\.cloudflare\\.com/"#, #"^https://cdn\\.jsdelivr\\.net/"#, #"^https://unpkg\\.com/"#, #"^https://block\\.claudebook\\.invalid/"#, "^data:", "^blob:", "^about:blank"]
         let rules = [#"{"trigger":{"url-filter":".*"},"action":{"type":"block"}}"#]
             + allowed.map { #"{"trigger":{"url-filter":"\#($0)"},"action":{"type":"ignore-previous-rules"}}"# }
         return "[" + rules.joined(separator: ",") + "]"
@@ -207,7 +210,7 @@ final class WebBlockCard: UIView, WKNavigationDelegate, WKUIDelegate {
                 view.isOpaque = false; view.backgroundColor = UIColor(StudyPalette.background); view.accessibilityIdentifier = "web.live.\(self.item.id)"
                 self.initialNavigation = true; self.bridgeMessages = 0; self.captured = false; self.web = view; self.insertSubview(view, belowSubview: self.menu)
                 self.label.isHidden = true; self.playButton.isHidden = true
-                view.loadHTMLString(html, baseURL: nil); self.loading = nil
+                view.loadHTMLString(html, baseURL: Self.origin); self.loading = nil
             } catch { guard let self, !Task.isCancelled, token == self.generation else { return }; self.loading = nil; self.record("App: \(error.localizedDescription)") }
         }
     }
@@ -256,7 +259,7 @@ final class WebBlockCard: UIView, WKNavigationDelegate, WKUIDelegate {
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) { record("Web content process stopped; reload the block"); pause() }
     func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
         let url = action.request.url
-        if initialNavigation && action.navigationType == .other && url?.absoluteString == "about:blank" { initialNavigation = false; decisionHandler(.allow); return }
+        if initialNavigation && action.navigationType == .other && url == Self.origin { initialNavigation = false; decisionHandler(.allow); return }
         decisionHandler(.cancel)
         guard action.navigationType == .linkActivated, let url, ["http", "https"].contains(url.scheme?.lowercased() ?? ""), let owner else { return }
         let alert = UIAlertController(title: "Open link in Safari?", message: url.host, preferredStyle: .alert)
