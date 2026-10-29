@@ -320,7 +320,9 @@ final class StudyFlowTests: XCTestCase {
         try await api.setView(notebook: notebook.id, page: page.id)
         let app = launch()
         defer { app.terminate() }
-        try openFirstPage(app, pageId: page.id)
+        // setView + autoopen already lands on this page; the page grid can lose hittability while
+        // the live web content processes register, so don't route through it.
+        try requireReady(app.buttons["editor.askClaude"], timeout: 15)
         // CI simulators often can't read WebKit's remote accessibility tree, so wait for the live
         // view and the block's own console line, then tap where the button is laid out.
         let live = app.webViews["web.live.\(block.id)"]
@@ -356,9 +358,15 @@ final class StudyFlowTests: XCTestCase {
         start.press(forDuration: 0.1, thenDragTo: end)
         let offscreen = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: app.webViews["web.live.\(block.id)"])
         await fulfillment(of: [offscreen], timeout: 8)
-        let _: SmokeItem = try await eventually {
-            let current: SmokeNotebook = try await self.api.request("notebooks/\(notebook.id)")
-            return current.pages[0].claudeLayer.first { $0.logs?.contains(where: { $0.contains("smoke load error") }) == true }
+        do {
+            let _: SmokeItem = try await eventually {
+                let current: SmokeNotebook = try await self.api.request("notebooks/\(notebook.id)")
+                return current.pages[0].claudeLayer.first { $0.logs?.contains(where: { $0.contains("smoke load error") }) == true }
+            }
+        } catch {
+            let current: SmokeNotebook = try await api.request("notebooks/\(notebook.id)")
+            for item in current.pages[0].claudeLayer where item.type == "web" { print("Web block \(item.id) poster \(item.poster ?? "none") logs: \(item.logs ?? [])") }
+            throw error
         }
     }
 

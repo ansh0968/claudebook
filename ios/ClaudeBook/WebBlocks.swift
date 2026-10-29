@@ -129,7 +129,19 @@ final class WebBlockCard: UIView, WKNavigationDelegate, WKUIDelegate {
     var requestPlay: (() -> Void)?
     var fullscreen: (() -> Void)?
     var isLive: Bool { web != nil || loading != nil }
-    private static var rules: WKContentRuleList?
+    // Several blocks start together; share one compile so they don't race on the same identifier.
+    private static var rules: Task<WKContentRuleList, Error>?
+    private static func ruleList() async throws -> WKContentRuleList {
+        if let rules { return try await rules.value }
+        let task = Task<WKContentRuleList, Error> {
+            guard let compiled = try await WKContentRuleListStore.default().compileContentRuleList(forIdentifier: "ClaudeBookBlocks-v2", encodedContentRuleList: encodedRules) else {
+                throw NSError(domain: "ClaudeBookBlocks", code: 1, userInfo: [NSLocalizedDescriptionKey: "Could not install block network sandbox"])
+            }
+            return compiled
+        }
+        rules = task
+        do { return try await task.value } catch { rules = nil; throw error }
+    }
     // WebKit's content-rule regexes have no `|` or `$`, so each allowed origin gets its own rule.
     private static let encodedRules: String = {
         let allowed = [#"^https://cdnjs\\.cloudflare\\.com/"#, #"^https://cdn\\.jsdelivr\\.net/"#, #"^https://unpkg\\.com/"#, "^data:", "^blob:", "^about:blank"]
@@ -179,14 +191,7 @@ final class WebBlockCard: UIView, WKNavigationDelegate, WKUIDelegate {
         loading = Task { [weak self] in
             do {
                 let html = try await api.webHTML(file)
-                let list: WKContentRuleList
-                if let existing = Self.rules { list = existing }
-                else {
-                    guard let compiled = try await WKContentRuleListStore.default().compileContentRuleList(forIdentifier: "ClaudeBookBlocks-v2", encodedContentRuleList: Self.encodedRules) else {
-                        throw NSError(domain: "ClaudeBookBlocks", code: 1, userInfo: [NSLocalizedDescriptionKey: "Could not install block network sandbox"])
-                    }
-                    list = compiled; Self.rules = compiled
-                }
+                let list = try await Self.ruleList()
                 guard let self, !Task.isCancelled, token == self.generation else { return }
                 let config = WKWebViewConfiguration()
                 config.websiteDataStore = .nonPersistent(); config.allowsInlineMediaPlayback = true; config.mediaTypesRequiringUserActionForPlayback = []
