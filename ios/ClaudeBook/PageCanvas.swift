@@ -456,6 +456,7 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
                 if let page = pages.first(where: { $0.id == id }) { views.paper.style = style(for: page); views.claude.update(items: page.claudeLayer, dark: page.usesDarkInkPalette(appDark: dark), doubts: page.doubts ?? []) }
             }
             updateHintButtons()
+            restoreBackups()
             return
         }
 
