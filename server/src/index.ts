@@ -1,3 +1,4 @@
+import { webBlockRoutes } from "./web-blocks.js";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import http from "node:http";
@@ -269,7 +270,7 @@ api.get("/pages/:id/render.png", async (req, res) => {
 api.get("/pages/:id/claude.svg", (req, res) => {
   const found = store.findPage(req.params.id);
   if (!found) return res.status(404).end();
-  res.type("svg").set("Cache-Control", "no-store").send(claudeLayerSvg(found.page));
+  res.type("svg").set("Cache-Control", "no-store").send(claudeLayerSvg(found.page, store));
 });
 
 api.get("/pages/:id/claude", (req, res) => {
@@ -307,6 +308,7 @@ api.delete("/pages/:id/claude", (req, res) => {
   }
 });
 
+webBlockRoutes(api, store);
 app.use("/api", api);
 
 // --- Web viewer, handy for testing from any browser before the iPad app exists ---

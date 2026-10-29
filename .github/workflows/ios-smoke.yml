@@ -145,6 +145,10 @@ jobs:
             -destination "id=$UDID" -derivedDataPath test-build -resultBundlePath TestResults.xcresult \
             -parallel-testing-enabled NO CODE_SIGNING_ALLOWED=NO test > ui-test.log 2>&1 \
             || { cp ui-test.log shots/ui-test.log; grep -n -B25 ": error:" ui-test.log | tail -200; grep -n -A6 "^Failing tests" ui-test.log; exit 1; }
+          # Keep UI-test screenshots beside simulator shots in the per-branch evidence directory.
+          mkdir -p shots/web-attachments
+          xcrun xcresulttool export attachments --path TestResults.xcresult --output-path shots/web-attachments || true
+          find shots/web-attachments -name '*.png' -exec cp {} shots/ \;
           # CRUD UI tests deliberately empty the disposable library; restore study fixtures.
           node ../scripts/smoke-fixture.mjs
           node ../scripts/smoke-fixture.mjs reveal

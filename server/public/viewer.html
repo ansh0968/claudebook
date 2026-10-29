@@ -19,6 +19,9 @@
   #pages button { text-align: left; }
   #pages button.open { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent) inset; }
   #stage { flex: 1; min-width: 0; }
+  #sheet { position: relative; max-width: 800px; margin: 0 auto; }
+  #blocks { position: absolute; inset: 0; pointer-events: none; }
+  #blocks iframe { position: absolute; border: 0; transform-origin: top left; pointer-events: auto; }
   #stage img { width: 100%; max-width: 800px; display: block; margin: 0 auto; background: #fff; border-radius: 6px; box-shadow: 0 2px 12px rgb(0 0 0 / .12); }
   @media (max-width: 600px) { main { flex-direction: column; } #pages { width: auto; flex-direction: row; overflow-x: auto; } }
 </style>
@@ -33,7 +36,7 @@
 </header>
 <main>
   <nav id="pages"></nav>
-  <section id="stage"><img id="page" alt="Current page"></section>
+  <section id="stage"><div id="sheet"><img id="page" alt="Current page"><div id="blocks"></div></div></section>
 </main>
 <script>
 const token = new URLSearchParams(location.search).get("token") || "";
@@ -59,11 +62,35 @@ function drawPages() {
   showPage(openId);
 }
 
-function showPage(id) {
+let blockGeneration = 0;
+async function showPage(id) {
+  const generation = ++blockGeneration;
+  $("blocks").replaceChildren();
   $("page").dataset.id = id;
   $("page").src = `/api/pages/${id}/render.png?token=${encodeURIComponent(token)}&grid=${$("grid").checked ? 1 : 0}&t=${Date.now()}`;
+  const { items } = await (await fetch(`/api/pages/${id}/claude`, { headers: auth })).json();
+  for (const block of items.filter(i => i.type === "web").slice(0, 3)) {
+    const html = await (await fetch(`/api/blocks/${block.file}`, { headers: auth })).text();
+    if (generation !== blockGeneration) return;
+    const frame = document.createElement("iframe");
+    frame.sandbox = "allow-scripts";
+    frame.title = block.title;
+    frame.referrerPolicy = "no-referrer";
+    frame.srcdoc = html;
+    frame.dataset.rect = JSON.stringify([block.x,block.y,block.w,block.h]);
+    $("blocks").append(frame);
+  }
+  layoutBlocks();
 }
 
+function layoutBlocks() {
+  const scale = $("sheet").clientWidth / 1000;
+  for (const frame of $("blocks").children) {
+    const [x,y,w,h] = JSON.parse(frame.dataset.rect);
+    Object.assign(frame.style, { left: `${x*scale}px`, top: `${y*scale}px`, width: `${w}px`, height: `${h}px`, transform: `scale(${scale})` });
+  }
+}
+new ResizeObserver(layoutBlocks).observe($("sheet"));
 $("pages").onclick = async (e) => {
   const id = e.target.dataset?.id;
   if (!id) return;

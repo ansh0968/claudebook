@@ -1,5 +1,7 @@
 // Turns a page into a PNG Claude can look at: the user's ink (as uploaded by the app),
 // Claude's own layer on top, and optionally a labelled coordinate grid so Claude can aim.
+import { blockPath } from "./web-blocks.js";
+import type { Item } from "./items.js";
 import fs from "node:fs";
 import sharp, { type OverlayOptions } from "sharp";
 import { itemToSvg } from "./items.js";
@@ -83,7 +85,7 @@ export async function renderPage(store: Store, page: Page, opts: { grid?: boolea
 
   const outW = region ? Math.round(Math.min(1400, Math.max(700, region.w * 3))) : PAGE_W * scale;
   const layers: OverlayOptions[] = [];
-  if (claudeLayer && page.claudeLayer.length) layers.push({ input: Buffer.from(svgDoc(page.claudeLayer.map(itemToSvg).join(""), undefined, k)) });
+  if (claudeLayer && page.claudeLayer.length) layers.push({ input: Buffer.from(svgDoc(page.claudeLayer.map(item => renderItem(store, item)).join(""), undefined, k)) });
   if (grid) layers.push({ input: Buffer.from(svgDoc(region ? regionOverlaySvg(region, outW / region.w) : coordinateOverlaySvg(), undefined, k)) });
 
   let img = sharp(await base.composite(layers).png().toBuffer());
@@ -97,6 +99,16 @@ export async function renderPage(store: Store, page: Page, opts: { grid?: boolea
 }
 
 /** Just Claude's layer as standalone SVG, for the web viewer and as a fallback for the app. */
-export function claudeLayerSvg(page: Page) {
-  return svgDoc(page.claudeLayer.map(itemToSvg).join(""));
+export function claudeLayerSvg(page: Page, store?: Store) {
+  return svgDoc(page.claudeLayer.map(item => store ? renderItem(store, item) : itemToSvg(item)).join(""));
+}
+
+function renderItem(store: Store, item: Item) {
+  if (item.type === "web" && item.poster) {
+    try {
+      const bytes = fs.readFileSync(blockPath(store, item.poster));
+      return `<image x="${item.x}" y="${item.y}" width="${item.w}" height="${item.h}" preserveAspectRatio="none" href="data:image/png;base64,${bytes.toString("base64")}"/>`;
+    } catch { /* Missing poster is harmless: keep the placeholder visible. */ }
+  }
+  return itemToSvg(item);
 }

@@ -133,6 +133,7 @@ export class Store {
       page.transcripts ??= [];
     }
     if (!existingDatabase) this.seed();
+    this.sweepBlocks();
   }
 
   private seed() {
@@ -144,6 +145,7 @@ export class Store {
     const tmp = this.file + ".tmp";
     fs.writeFileSync(tmp, JSON.stringify(this.db, null, 1));
     fs.renameSync(tmp, this.file);
+    this.sweepBlocks();
   }
 
   on(fn: (e: StoreEvent) => void) {
@@ -643,6 +645,27 @@ export class Store {
     found.page.updatedAt = now();
     this.save();
     this.emit({ type: "claudeLayer", notebookId: found.notebook.id, pageId });
+  }
+
+  replaceClaudeItem(pageId: string, item: Item) {
+    const found = this.findPage(pageId);
+    if (!found || !found.page.claudeLayer.some(i => i.id === item.id)) throw new Error("Block not found");
+    found.page.claudeLayer = found.page.claudeLayer.map(i => i.id === item.id ? item : i);
+    found.page.updatedAt = now();
+    this.save();
+    this.emit({ type: "claudeLayer", notebookId: found.notebook.id, pageId });
+  }
+
+  /** Content-addressed blocks/posters are shared by copies; only unreferenced assets can be removed. */
+  sweepBlocks() {
+    const referenced = new Set<string>();
+    for (const notebook of this.db.notebooks) for (const page of notebook.pages) for (const item of page.claudeLayer) {
+      if (item.type === "web") { referenced.add(item.file); if (item.poster) referenced.add(item.poster); }
+    }
+    const directory = path.join(this.dataDir, "blocks");
+    if (fs.existsSync(directory)) for (const file of fs.readdirSync(directory)) {
+      if (/^[a-f0-9]{64}\.(html|png)$/.test(file) && !referenced.has(file)) fs.unlinkSync(path.join(directory, file));
+    }
   }
 
   /** Remove the last `count` Claude items, or all of them when count is undefined. */
