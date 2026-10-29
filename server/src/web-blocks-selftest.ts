@@ -77,6 +77,16 @@ try {
   const assetCount = fs.readdirSync(path.join(directory,"blocks")).length;
   const same = addBlock(store,page.id,{x:0,y:0,w:300,h:200,title:"Same",html:"<!doctype html><html><head><title>Document</title></head><body>Full document</body></html>"});
   assert.equal(fs.readdirSync(path.join(directory,"blocks")).length,assetCount);
+  const orphan = blockPath(store, "a".repeat(64) + ".html"); fs.writeFileSync(orphan, "orphan");
+  const unlink = fs.unlinkSync, warn = console.warn; const warnings: string[] = [];
+  try {
+    fs.unlinkSync = file => { if (file === orphan) throw new Error("temporary cleanup failure"); return unlink(file); };
+    console.warn = (...args) => { warnings.push(args.join(" ")); };
+    assert.doesNotThrow(() => store.renameNotebook(store.listNotebooks()[0].id, "Cleanup retry"));
+    assert.ok(warnings.some(w => w.includes("Block cleanup deferred")));
+    assert.equal(JSON.parse(fs.readFileSync(path.join(directory,"db.json"),"utf8")).notebooks[0].title,"Cleanup retry");
+  } finally { fs.unlinkSync = unlink; console.warn = warn; }
+  new Store(directory); assert.ok(!fs.existsSync(orphan));
   assert.ok(events.length>=10);
   assert.throws(()=>updateBlock(store,page.id,{id:same.id,w:-10}),/>0/);
   console.log("[web blocks] MCP fragment/full document, size limit, bridge/policy, rev/logs/poster routes, render pixels, move/copy/erase, dedupe/sweep and broadcasts passed");
