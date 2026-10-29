@@ -150,6 +150,7 @@ struct NotebookEditor: View {
     @State private var sync = "synced"
     @State private var showClaude = true
     @State private var pencilOnly = true
+    @AppStorage("snapShapes") private var snapShapes = true
     @State private var showPages = false
     @State private var showPaperPicker = false
     @State private var addingPage = false
@@ -294,6 +295,8 @@ struct NotebookEditor: View {
                         }
                         Section {
                             Toggle(isOn: $pencilOnly) { Label("Draw with Apple Pencil only", systemImage: "applepencil") }
+                            Toggle(isOn: $snapShapes) { Label("Hold to snap shapes", systemImage: "circle.square") }
+                                .accessibilityIdentifier("editor.snapShapes")
                         }
                         Section("Claude's ink") {
                             Toggle(isOn: $showClaude) { Label("Show Claude's ink", systemImage: "eye") }
@@ -330,11 +333,13 @@ struct NotebookEditor: View {
             }
             .onChange(of: showClaude) { _, v in controller.showClaude = v }
             .onChange(of: pencilOnly) { _, v in controller.pencilOnly = v }
+            .onChange(of: snapShapes) { _, v in controller.snapShapes = v }
             .onChange(of: scenePhase) { _, p in if p != .active { controller.flush() } }
             .task { await load() }
             .onAppear {
                 library.prepareNotebookDeletion = { id in if id == notebookId { await controller.pauseUploads() } }
                 library.resumeNotebookUploads = { id in if id == notebookId { controller.flush() } }
+                controller.snapShapes = snapShapes
                 controller.onSyncState = { s in sync = s }
                 controller.onPageChange = { i in index = i }
                 controller.onPullToAdd = { Task { await addPage(after: controller.pages.count - 1) } }
@@ -482,6 +487,14 @@ struct NotebookEditor: View {
             // Keep it up for the screenshot instead of hiding after a few seconds.
             showClaudeWriting(page: index + 1)
             claudeToastTask?.cancel()
+        }
+        // UI tests draw with a simulated finger, which PencilKit ignores in pencil-only mode.
+        if env["CLAUDEBOOK_TEST_FINGER_INK"] == "1" { pencilOnly = false }
+        if env["CLAUDEBOOK_TEST_SHAPES"] == "1" {
+            Task {
+                try? await Task.sleep(for: .seconds(1.5))
+                controller.addTestShapes()
+            }
         }
         if let y = env["CLAUDEBOOK_TEST_SCROLL"].flatMap({ Double($0) }) {
             // Scroll to a notebook y (page units), e.g. between pages 1 and 2.

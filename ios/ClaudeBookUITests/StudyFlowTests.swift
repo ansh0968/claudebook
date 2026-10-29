@@ -68,6 +68,46 @@ final class StudyFlowTests: XCTestCase {
     }
 
     @MainActor
+    func testHoldingAtTheEndOfAStrokeSnapsItAndHandlesAdjustIt() async throws {
+        let notebook: SmokeNotebook = try await api.request("notebooks", method: "POST", body: ["title": "Shapes", "pages": 1])
+        let page = try XCTUnwrap(notebook.pages.first)
+        try await api.setView(notebook: notebook.id, page: page.id)
+        let app = launch(extra: ["CLAUDEBOOK_TEST_FINGER_INK": "1"])
+        defer { app.terminate() }
+        try requireReady(app.buttons["editor.askClaude"])
+        try await Task.sleep(for: .seconds(1))
+        let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.25, dy: 0.45))
+        let end = app.coordinate(withNormalizedOffset: CGVector(dx: 0.7, dy: 0.47))
+        start.press(forDuration: 0.05, thenDragTo: end, withVelocity: .slow, thenHoldForDuration: 1.2)
+        let done = app.buttons["shape.done"]
+        guard done.waitForExistence(timeout: 5) else {
+            print(app.debugDescription)
+            XCTFail("Holding still at the end of a stroke did not snap it")
+            return
+        }
+        let name = app.staticTexts["shape.name"]
+        XCTAssertEqual(name.label, "Line")
+        saveScreenshot("20-hold-snapped-line")
+
+        // Pull the middle handle up: the line bends into an arc and stays editable.
+        let bend = app.buttons["shape.handle.1"]
+        try requireReady(bend, timeout: 3)
+        let from = bend.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+        from.press(forDuration: 0.1, thenDragTo: from.withOffset(CGVector(dx: 0, dy: -140)))
+        let bent = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label == %@", "Arc"), object: name)
+        await fulfillment(of: [bent], timeout: 5)
+        saveScreenshot("21-shape-bent")
+
+        done.tap()
+        let gone = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: done)
+        await fulfillment(of: [gone], timeout: 5)
+        // The snapped shape is saved and uploaded like any handwriting, so Claude sees it.
+        let uploaded: Bool = try await eventually { try await self.api.exists("pages/\(page.id)/drawing") ? true : nil }
+        XCTAssertTrue(uploaded)
+        let _: SmokeOK = try await api.request("notebooks/\(notebook.id)", method: "DELETE")
+    }
+
+    @MainActor
     func testHintChipOpensAPadThatHidesAgain() async throws {
         let notebook = try await fixture()
         let page = try XCTUnwrap(notebook.pages.first)
@@ -485,8 +525,16 @@ final class StudyFlowTests: XCTestCase {
         return try XCTUnwrap(list.notebooks.first { $0.title == "Organic chemistry" }, "Run scripts/smoke-fixture.mjs first")
     }
 
+    /// CI publishes anything saved here alongside the simulator screenshots.
     @MainActor
-    private func launch(autoopen: Bool = true) -> XCUIApplication {
+    private func saveScreenshot(_ name: String) {
+        guard let dir = ProcessInfo.processInfo.environment["CLAUDEBOOK_SHOTS"], !dir.isEmpty else { return }
+        let url = URL(fileURLWithPath: dir).appending(path: "\(name).png")
+        try? XCUIScreen.main.screenshot().pngRepresentation.write(to: url)
+    }
+
+    @MainActor
+    private func launch(autoopen: Bool = true, extra: [String: String] = [:]) -> XCUIApplication {
         XCUIDevice.shared.orientation = .portrait
         let app = XCUIApplication()
         app.launchEnvironment = [
@@ -495,7 +543,7 @@ final class StudyFlowTests: XCTestCase {
             "CLAUDEBOOK_AUTOOPEN": autoopen ? "1" : "0",
             "CLAUDEBOOK_TEST_STROKE": "0",
             "CLAUDEBOOK_TEST_SCROLL": "",
-        ]
+        ].merging(extra) { $1 }
         app.launch()
         return app
     }
@@ -565,6 +613,16 @@ private struct SmokeAPI {
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
         guard (200..<300).contains(status) else { throw SmokeError.response(status) }
         return try JSONDecoder().decode(T.self, from: data)
+    }
+
+    /// Whether a GET succeeds, for endpoints that return binary data.
+    func exists(_ path: String) async throws -> Bool {
+        guard base.host == "127.0.0.1" else { throw SmokeError.unsafeHost }
+        var request = URLRequest(url: base.appending(path: "api").appending(path: path))
+        request.timeoutInterval = 3
+        request.setValue("Bearer \(secret)", forHTTPHeaderField: "Authorization")
+        let (_, response) = try await URLSession.shared.data(for: request)
+        return (response as? HTTPURLResponse)?.statusCode == 200
     }
 
     func setView(notebook: String, page: String) async throws {
