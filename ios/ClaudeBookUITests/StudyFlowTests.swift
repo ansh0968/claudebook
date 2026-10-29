@@ -331,13 +331,18 @@ final class StudyFlowTests: XCTestCase {
         }
         let rendered = XCTAttachment(screenshot: app.screenshot()); rendered.name = "web-live-button"; rendered.lifetime = .keepAlways; add(rendered)
         let controls = app.buttons["web.menu.\(block.id)"]
-        try requireReady(controls); controls.tap(); app.buttons["Fullscreen"].tap()
+        try requireReady(controls)
+        let originalCorner = controls.frame
+        controls.tap(); app.buttons["Fullscreen"].tap()
         let close = app.buttons["web.fullscreen.close"]
         try requireReady(close)
         let full = XCTAttachment(screenshot: app.screenshot()); full.name = "web-fullscreen"; full.lifetime = .keepAlways; add(full)
         close.tap()
         let play = app.buttons["web.play.\(block.id)"]
         try requireReady(play)
+        XCTAssertEqual(controls.frame.minX, originalCorner.minX, accuracy: 2)
+        XCTAssertEqual(controls.frame.minY, originalCorner.minY, accuracy: 2)
+        XCTAssertEqual(controls.frame.width, originalCorner.width, accuracy: 2)
         play.tap()
         let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.96, dy: 0.85))
         let end = app.coordinate(withNormalizedOffset: CGVector(dx: 0.96, dy: 0.15))

@@ -29,6 +29,7 @@ extension API {
 final class WebBlockOverlay: UIView {
     private weak var owner: UIViewController?
     private var cards: [String: WebBlockCard] = [:]
+    private var pageRects: [String: CGRect] = [:]
     private var fullKey: String?
     private var replay: (() -> Void)?
     init(owner: UIViewController) {
@@ -62,9 +63,10 @@ final class WebBlockOverlay: UIView {
             if rect.intersects(bounds) { visible.append(("\(page.id):\(item.id)", page.id, item, rect, index)) }
         } }
         let wanted = Set(visible.map { $0.0 })
-        for key in cards.keys.filter({ !wanted.contains($0) && $0 != fullKey }) { cards[key]?.pause(); cards[key]?.removeFromSuperview(); cards[key] = nil }
+        for key in cards.keys.filter({ !wanted.contains($0) && $0 != fullKey }) { cards[key]?.pause(); cards[key]?.removeFromSuperview(); cards[key] = nil; pageRects[key] = nil }
         var slots = fullKey == nil ? 3 : 2
         for (key, page, item, rect, index) in visible.sorted(by: { abs($0.3.midY-bounds.midY) < abs($1.3.midY-bounds.midY) }) {
+            pageRects[key] = rect
             if key == fullKey { cards[key]?.refresh(item); continue }
             let card: WebBlockCard
             if let existing = cards[key], existing.item.rev == item.rev { card = existing; card.refresh(item) }
@@ -83,7 +85,10 @@ final class WebBlockOverlay: UIView {
                     card.removeFromSuperview()
                     owner.present(WebBlockFullscreen(card: card) { [weak self, weak card] in
                         guard let self, let card else { return }
-                        self.fullKey = nil; self.addSubview(card); card.userPaused = true; card.pause()
+                        self.fullKey = nil
+                        if let rect = self.pageRects[key] { card.frame = rect }
+                        self.addSubview(card); card.userPaused = true; card.pause()
+                        self.replay?()
                     }, animated: true)
                 }
                 cards[key] = card; addSubview(card)
