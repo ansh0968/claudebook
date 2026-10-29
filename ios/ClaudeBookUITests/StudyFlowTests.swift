@@ -43,7 +43,7 @@ final class StudyFlowTests: XCTestCase {
     }
 
     @MainActor
-    func testHiddenHintTapPersistsRevealAndRemovesChip() async throws {
+    func testHintChipOpensAPadThatHidesAgain() async throws {
         let notebook = try await fixture()
         let page = try XCTUnwrap(notebook.pages.first)
         let hint = try XCTUnwrap(page.claudeLayer.first { $0.type == "hint" && $0.revealed != true }, "Seed an unrevealed hint before this test")
@@ -63,13 +63,24 @@ final class StudyFlowTests: XCTestCase {
         }
         XCTAssertTrue(chip.isHittable)
         chip.tap()
+        // The text shows in a pad, not inline on the page, and the peek is recorded for Claude.
+        let text = app.staticTexts["hint.text"]
+        XCTAssertTrue(text.waitForExistence(timeout: 5), "Tapping the chip should open the hint pad")
+        XCTAssertEqual(text.label, hint.text)
         let revealed: SmokeItem = try await eventually {
             let current: SmokeNotebook = try await self.api.request("notebooks/\(notebook.id)")
             return current.pages.first?.claudeLayer.first { $0.id == hint.id && $0.revealed == true }
         }
         XCTAssertEqual(revealed.text, hint.text)
-        let removed = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: chip)
-        await fulfillment(of: [removed], timeout: 5)
+        let close = app.buttons["hint.close"]
+        try requireReady(close, timeout: 5)
+        close.tap()
+        let gone = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: text)
+        await fulfillment(of: [gone], timeout: 5)
+        // The chip stays so the hint can be opened again.
+        XCTAssertTrue(chip.waitForExistence(timeout: 3))
+        chip.tap()
+        XCTAssertTrue(app.staticTexts["hint.text"].waitForExistence(timeout: 5), "An opened hint should reopen")
     }
 
     @MainActor
@@ -230,6 +241,35 @@ final class StudyFlowTests: XCTestCase {
         XCTAssertEqual(moved.pages.map(\.id), target.pages.map(\.id) + [first])
         let source: SmokeNotebook = try await api.request("notebooks/\(notebook.id)")
         XCTAssertEqual(source.pages.map(\.id), [notebook.pages[1].id])
+    }
+
+    @MainActor
+    func testSelectingSeveralPagesDeletesThemTogether() async throws {
+        executionTimeAllowance = 120
+        let notebook: SmokeNotebook = try await api.request("notebooks", method: "POST", body: ["title": "Bulk delete", "pages": 4])
+        let ids = notebook.pages.map(\.id)
+        try await api.setView(notebook: notebook.id, page: ids[0])
+        let app = launch()
+        defer { app.terminate() }
+        try requireCRUDReady(app.buttons["editor.pages"])
+        app.buttons["editor.pages"].tap()
+        try requireCRUDReady(app.buttons["pages.edit"])
+        app.buttons["pages.edit"].tap()
+        // Pick pages 2 and 4, then one delete removes both.
+        for id in [ids[1], ids[3]] {
+            let row = app.descendants(matching: .any)["pages.select.\(id)"].firstMatch
+            XCTAssertTrue(row.waitForExistence(timeout: 5), "Row for \(id) should be selectable")
+            row.tap()
+        }
+        try requireCRUDReady(app.buttons["pages.deleteSelected"])
+        app.buttons["pages.deleteSelected"].tap()
+        try requireCRUDReady(app.buttons["pages.confirmDelete"])
+        app.buttons["pages.confirmDelete"].tap()
+        let remaining: SmokeNotebook = try await eventually {
+            let current: SmokeNotebook = try await self.api.request("notebooks/\(notebook.id)")
+            return current.pages.count == 2 ? current : nil
+        }
+        XCTAssertEqual(remaining.pages.map(\.id), [ids[0], ids[2]])
     }
 
     @MainActor

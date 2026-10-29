@@ -57,7 +57,7 @@ if (["reveal", "focus"].includes(process.argv[2])) {
     { type: "text", x: 150, y: 855, text: "electron pair", size: 24, color: "#64776D" },
     { type: "text", x: 550, y: 855, text: "one electron", size: 24, color: "#64776D" },
     { type: "path", points: [[100, 970], [170, 920], [240, 970], [310, 920]], smooth: false, color: "#253A46", width: 3 },
-    { type: "hint", x: 500, y: 950, label: "Hint 1", text: "Start at the electron-rich site.", size: 25, color: "#357A73" },
+    { type: "hint", x: 500, y: 950, label: "Hint 1", text: "Start at the electron-rich site: the oxygen lone pair in phenol pushes into the ring, so look at where the negative charge can spread out once H⁺ leaves.", size: 25, color: "#357A73" },
     { type: "text", x: 75, y: 1100, text: "What makes phenol more acidic?", size: 32, color: "#253A46" },
   ] });
   await api(`pages/${page.id}/doubts`, { region: { x: 65, y: 1060, w: 800, h: 150 } });

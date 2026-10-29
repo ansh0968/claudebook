@@ -53,10 +53,13 @@ final class ControlOverlay: UIView {
         return nil
     }
 
+    /// Subviews with this tag are accessibility containers (the hint pad) rather than single elements.
+    static let containerTag = 7_341
+
     func refreshAccessibilityElements() {
         isAccessibilityElement = false
         accessibilityElements = isHidden ? [] : subviews.filter {
-            $0.isAccessibilityElement && !$0.isHidden && $0.alpha > 0.01 && $0.frame.intersects(bounds)
+            ($0.isAccessibilityElement || $0.tag == Self.containerTag) && !$0.isHidden && $0.alpha > 0.01 && $0.frame.intersects(bounds)
         }
     }
 }
@@ -104,9 +107,9 @@ final class RegionSelectionView: UIView {
         guard let start, let end, let ctx = UIGraphicsGetCurrentContext() else { return }
         let selected = CGRect(x: min(start.x, end.x), y: min(start.y, end.y),
                               width: abs(end.x - start.x), height: abs(end.y - start.y))
-        ctx.setFillColor(UIColor(hex: "#D97757").withAlphaComponent(0.12).cgColor)
+        ctx.setFillColor(Theme.claudeOrange.withAlphaComponent(0.12).cgColor)
         ctx.fill(selected)
-        ctx.setStrokeColor(UIColor(hex: "#D97757").cgColor)
+        ctx.setStrokeColor(Theme.claudeOrange.cgColor)
         ctx.setLineWidth(2)
         ctx.setLineDash(phase: 0, lengths: [7, 5])
         ctx.stroke(selected)
@@ -127,6 +130,12 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
     private let claudeContainer = UIView()
     private let hintOverlay = ControlOverlay()
     private var hintButtons: [String: UIButton] = [:]
+    /// Each hint chip's tap target in overlay coordinates, by "pageId:itemId".
+    private var hintChips: [String: CGRect] = [:]
+    private var hintPad: (key: String, host: UIHostingController<HintPad>)?
+    private let padDismissTap = UITapGestureRecognizer()
+    /// When this iPad last changed Claude's layer itself, so the editor doesn't announce it as Claude writing.
+    var lastLocalLayerChange = Date.distantPast
     private var selectionOverlay: RegionSelectionView?
     private let footer = UILabel()
 
@@ -160,7 +169,7 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        view.backgroundColor = UIColor { $0.userInterfaceStyle == .dark ? UIColor(hex: "#151A1D") : UIColor(hex: "#EDE8DF") }
+        view.backgroundColor = Theme.desk
 
         canvas.translatesAutoresizingMaskIntoConstraints = false
         canvas.backgroundColor = .clear
@@ -200,6 +209,13 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
             hintOverlay.leadingAnchor.constraint(equalTo: canvas.leadingAnchor),
             hintOverlay.trailingAnchor.constraint(equalTo: canvas.trailingAnchor),
         ])
+
+        // A tap anywhere on the page puts an open hint pad away again. Off unless a pad is showing.
+        padDismissTap.addTarget(self, action: #selector(dismissHintPadFromTap))
+        padDismissTap.cancelsTouchesInView = false
+        padDismissTap.delegate = self
+        padDismissTap.isEnabled = false
+        canvas.addGestureRecognizer(padDismissTap)
 
         footer.text = "Pull up to add a page"
         footer.font = .preferredFont(forTextStyle: .footnote)
@@ -589,8 +605,9 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
         let visible = pages.enumerated().filter { onScreen[$0.element.id] != nil }
         var wanted = Set<String>()
         for (index, page) in visible {
-            for item in page.claudeLayer where item.type == "hint" && item.revealed != true {
-                guard let x = item.x, let y = item.y else { continue }
+            // Opened hints keep their chip too: tapping again brings the pad back.
+            for item in page.claudeLayer where item.type == "hint" {
+                guard let pageChip = HintChip.frame(item) else { continue }
                 let key = "\(page.id):\(item.id)"
                 wanted.insert(key)
                 let button: UIButton
@@ -599,27 +616,19 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
                     button.isAccessibilityElement = true
                     button.accessibilityTraits = .button
                     button.accessibilityIdentifier = "hint.\(item.id)"
-                    button.accessibilityHint = "Reveal Claude's hidden hint"
-                    button.addAction(UIAction { [weak self, weak button] _ in
-                        guard let api = API.current else { return }
-                        button?.isEnabled = false
-                        Task {
-                            defer { button?.isEnabled = true }
-                            do {
-                                let revealed = try await api.revealHint(pageId: page.id, itemId: item.id)
-                                self?.applyHint(revealed, pageId: page.id)
-                            } catch { self?.onHintError?(error.localizedDescription) }
-                        }
-                    }, for: .touchUpInside)
+                    let pageId = page.id, itemId = item.id
+                    button.addAction(UIAction { [weak self] _ in self?.toggleHintPad(pageId: pageId, itemId: itemId) }, for: .touchUpInside)
                     hintOverlay.addSubview(button)
                     hintButtons[key] = button
                 }
                 button.accessibilityLabel = item.label ?? "Hint"
+                button.accessibilityHint = item.revealed == true ? "Shows Claude's hint again" : "Shows Claude's hidden hint"
                 let s = canvas.zoomScale
                 // The tiled layer draws the chip in page units. Its transparent target grows to 44pt.
-                let pageChip = CGRect(x: CGFloat(x) * s, y: (NotebookLayout.offset(index) + CGFloat(y)) * s,
-                                      width: CGFloat(item.w ?? 100) * s, height: CGFloat(item.h ?? 34) * s)
-                let chip = claudeContainer.convert(pageChip, to: hintOverlay)
+                let scaled = CGRect(x: pageChip.minX * s, y: (NotebookLayout.offset(index) + pageChip.minY) * s,
+                                    width: pageChip.width * s, height: pageChip.height * s)
+                let chip = claudeContainer.convert(scaled, to: hintOverlay)
+                hintChips[key] = chip
                 button.frame = chip.insetBy(dx: -max(0, (44 - chip.width) / 2), dy: -max(0, (44 - chip.height) / 2))
                 button.isHidden = !button.frame.intersects(hintOverlay.bounds)
             }
@@ -627,7 +636,9 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
         for key in hintButtons.keys.filter({ !wanted.contains($0) }) {
             hintButtons[key]?.removeFromSuperview()
             hintButtons[key] = nil
+            hintChips[key] = nil
         }
+        positionHintPad()
         hintOverlay.refreshAccessibilityElements()
     }
 
@@ -637,8 +648,109 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
         pages[pageIndex].claudeLayer[itemIndex] = item
         onScreen[pageId]?.claude.update(items: pages[pageIndex].claudeLayer, dark: dark, doubts: pages[pageIndex].doubts ?? [])
         updateHintButtons()
-        UIAccessibility.post(notification: .announcement, argument: item.text ?? "Hint revealed")
     }
+
+    // MARK: Hint pad
+
+    private func hintItem(pageId: String, itemId: String) -> ClaudeItem? {
+        pages.first { $0.id == pageId }?.claudeLayer.first { $0.id == itemId && $0.type == "hint" }
+    }
+
+    /// Tap a chip: its pad pops out of it. Tap the same chip again, the page, or the pad's X, and it tucks away.
+    private func toggleHintPad(pageId: String, itemId: String) {
+        let key = "\(pageId):\(itemId)"
+        if hintPad?.key == key { closeHintPad(); return }
+        closeHintPad(animated: false)
+        guard let item = hintItem(pageId: pageId, itemId: itemId) else { return }
+        let host = UIHostingController(rootView: padView(for: item, width: padWidth))
+        host.view.backgroundColor = .clear
+        host.view.tag = ControlOverlay.containerTag
+        addChild(host)
+        hintOverlay.addSubview(host.view)
+        host.didMove(toParent: self)
+        hintPad = (key, host)
+        padDismissTap.isEnabled = true
+        positionHintPad()
+        UIImpactFeedbackGenerator(style: .soft).impactOccurred()
+
+        let v = host.view!
+        if let chip = hintChips[key], !UIAccessibility.isReduceMotionEnabled {
+            v.transform = CGAffineTransform(translationX: (chip.midX - v.center.x) * 0.7, y: (chip.midY - v.center.y) * 0.7).scaledBy(x: 0.25, y: 0.25)
+        }
+        v.alpha = 0
+        UIView.animate(withDuration: 0.5, delay: 0, usingSpringWithDamping: 0.72, initialSpringVelocity: 0.3, options: [.allowUserInteraction]) {
+            v.transform = .identity
+            v.alpha = 1
+        }
+        hintOverlay.refreshAccessibilityElements()
+        UIAccessibility.post(notification: .layoutChanged, argument: v)
+
+        // Record the peek so Claude knows; the pad already shows the text the app has.
+        guard item.revealed != true, let api = API.current else { return }
+        lastLocalLayerChange = Date()
+        Task {
+            do {
+                let revealed = try await api.revealHint(pageId: pageId, itemId: itemId)
+                self.applyHint(revealed, pageId: pageId)
+                if let pad = self.hintPad, pad.key == key { pad.host.rootView = self.padView(for: revealed, width: self.padWidth) }
+            } catch { self.onHintError?(error.localizedDescription) }
+        }
+    }
+
+    /// For CI screenshots: open the first hint on screen.
+    func openFirstHintPad() {
+        guard let key = hintButtons.keys.sorted().first, let pageId = key.split(separator: ":").first, let itemId = key.split(separator: ":").last else { return }
+        toggleHintPad(pageId: String(pageId), itemId: String(itemId))
+    }
+
+    private var padWidth: CGFloat { min(380, max(220, hintOverlay.bounds.width - 32)) }
+
+    private func padView(for item: ClaudeItem, width: CGFloat) -> HintPad {
+        HintPad(label: item.label ?? "Hint", text: item.text, tint: Color(uiColor: ClaudeRenderer.adapt(UIColor(hex: item.color ?? ClaudeRenderer.defaultColor), dark: dark)),
+                textHeight: HintPad.measure(item.text, width: width - HintPad.padding * 2)) { [weak self] in self?.closeHintPad() }
+    }
+
+    /// Keeps the open pad beside its chip as the page scrolls, inside the screen, below the chip when it fits
+    /// and above it otherwise. A chip that scrolls away takes its pad with it.
+    private func positionHintPad() {
+        guard let pad = hintPad else { return }
+        guard let chip = hintChips[pad.key], chip.intersects(hintOverlay.bounds.insetBy(dx: 0, dy: 8)) else {
+            closeHintPad()
+            return
+        }
+        let bounds = hintOverlay.bounds
+        let width = padWidth
+        let height = min(pad.host.sizeThatFits(in: CGSize(width: width, height: .greatestFiniteMagnitude)).height, bounds.height - 24)
+        var y = chip.maxY + 10
+        if y + height > bounds.maxY - 12 { y = chip.minY - 10 - height }
+        y = min(max(12, y), bounds.maxY - 12 - height)
+        let x = min(max(16, chip.midX - width / 2), bounds.maxX - 16 - width)
+        pad.host.view.bounds = CGRect(x: 0, y: 0, width: width, height: height)
+        pad.host.view.center = CGPoint(x: x + width / 2, y: y + height / 2)
+    }
+
+    private func closeHintPad(animated: Bool = true) {
+        guard let pad = hintPad else { return }
+        hintPad = nil
+        padDismissTap.isEnabled = false
+        let v = pad.host.view!
+        let finish = {
+            pad.host.willMove(toParent: nil)
+            v.removeFromSuperview()
+            pad.host.removeFromParent()
+            self.hintOverlay.refreshAccessibilityElements()
+        }
+        guard animated, v.window != nil else { finish(); return }
+        let chip = hintChips[pad.key]
+        UIView.animate(withDuration: 0.22, delay: 0, options: [.curveEaseIn]) {
+            v.alpha = 0
+            if let chip, !UIAccessibility.isReduceMotionEnabled {
+                v.transform = CGAffineTransform(translationX: (chip.midX - v.center.x) * 0.7, y: (chip.midY - v.center.y) * 0.7).scaledBy(x: 0.3, y: 0.3)
+            }
+        } completion: { _ in finish() }
+    }
+
+    @objc private func dismissHintPadFromTap() { closeHintPad() }
 
     var currentPage: Page? { pages.indices.contains(currentIndex) ? pages[currentIndex] : nil }
 
@@ -718,6 +830,10 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
     }
 
     // MARK: Saving and syncing
+
+    func canvasViewDidBeginUsingTool(_ canvasView: PKCanvasView) {
+        closeHintPad()
+    }
 
     func canvasViewDrawingDidChange(_ canvasView: PKCanvasView) {
         guard !loading, !pages.isEmpty else { return }
@@ -896,4 +1012,9 @@ struct NotebookCanvas: UIViewControllerRepresentable {
     func updateUIViewController(_ vc: NotebookCanvasController, context: Context) {
         vc.setAppearance(dark: dark, invertPDFs: invertPDFs)
     }
+}
+
+extension NotebookCanvasController: UIGestureRecognizerDelegate {
+    /// The hint pad's dismiss tap only watches; scrolling, zooming and drawing carry on as normal.
+    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool { true }
 }

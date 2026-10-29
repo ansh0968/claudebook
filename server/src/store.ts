@@ -4,8 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { nanoid } from "nanoid";
 import type { Item } from "./items.js";
-import { translateItem } from "./items.js";
-import { renderHandwriting } from "./handwriting.js";
+import { hintChip, translateItem } from "./items.js";
 import { normalizeMathSearch } from "./math-search.js";
 
 // Every page uses the same logical coordinate space so Claude can reason in round numbers.
@@ -526,7 +525,7 @@ export class Store {
     const item = found.page.claudeLayer.find((i) => i.id === itemId);
     if (!item || item.type !== "hint") return;
     if (!item.revealed) {
-      Object.assign(item, renderHandwriting(item.text, item.x, item.y, item.size ?? 32), { revealed: true });
+      Object.assign(item, hintChip(item), { revealed: true });
       found.page.updatedAt = now();
       this.save();
       this.emit({ type: "claudeLayer", notebookId: found.notebook.id, pageId });

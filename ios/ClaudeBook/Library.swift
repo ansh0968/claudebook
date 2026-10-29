@@ -347,16 +347,6 @@ final class LibraryModel: ObservableObject {
     }
 }
 
-enum LibraryTint {
-    /// Same color every launch (String.hashValue changes per launch).
-    static func color(for id: String) -> Color {
-        let palette: [Color] = [Color(red: 0.77, green: 0.39, blue: 0.30), Color(red: 0.22, green: 0.48, blue: 0.46),
-                                Color(red: 0.39, green: 0.44, blue: 0.58), Color(red: 0.64, green: 0.47, blue: 0.36),
-                                Color(red: 0.49, green: 0.38, blue: 0.55), Color(red: 0.36, green: 0.52, blue: 0.36)]
-        return palette[id.unicodeScalars.reduce(0) { ($0 &* 31 &+ Int($1.value)) & 0xFFFF } % palette.count]
-    }
-}
-
 struct LibraryView: View {
     var onSignOut: () -> Void
     @StateObject private var model = LibraryModel()
@@ -393,14 +383,20 @@ struct LibraryView: View {
         .onChange(of: model.prompt?.id) { _, value in if value == nil { Task { await model.load() } } }
         .overlay(alignment: .bottom) {
             if let message = model.actionError {
-                HStack {
-                    Text(message).foregroundStyle(.red)
-                    Button("Dismiss") { model.actionError = nil }
+                HStack(spacing: 12) {
+                    Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(Theme.danger)
+                    Text(message).foregroundStyle(Theme.ink).font(.subheadline.weight(.medium))
+                    Button("Dismiss") { withAnimation(Theme.Motion.pop) { model.actionError = nil } }
+                        .font(.subheadline.weight(.semibold))
                 }
-                .padding().background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12)).padding()
+                .padding(.horizontal, 18).padding(.vertical, 14)
+                .themedCard(radius: 16)
+                .padding()
+                .transition(.move(edge: .bottom).combined(with: .opacity))
                 .accessibilityIdentifier("library.actionError")
             }
         }
+        .animation(Theme.Motion.pop, value: model.actionError)
         .task {
             let view = await model.load()
             let env = ProcessInfo.processInfo.environment
@@ -496,11 +492,12 @@ struct ShelfView: View {
     @State private var searchError: String?
     @State private var dropTarget: String?
     @State private var showImport = false
+    @State private var entered = false
 
     private var isRoot: Bool { folderId == nil }
     private var folder: Folder? { model.folder(folderId) }
     private var query: String { searchText.trimmingCharacters(in: .whitespacesAndNewlines) }
-    private var titleColor: Color { colorScheme == .dark ? .white : Color(red: 0.16, green: 0.22, blue: 0.23) }
+    private var titleColor: Color { Theme.ink }
     private let columns = [GridItem(.adaptive(minimum: 180, maximum: 240), spacing: 24)]
 
     var body: some View {
@@ -523,7 +520,7 @@ struct ShelfView: View {
             }
             .padding(28)
         }
-        .background(StudyPalette.background)
+        .background(Theme.background)
         .navigationTitle(isRoot ? "ClaudeBook" : (folder?.name ?? "Folder"))
         .navigationBarTitleDisplayMode(.inline)
         .toolbar { toolbar }
@@ -535,7 +532,15 @@ struct ShelfView: View {
         .onAppear {
             live.onEvent = { e in if e.type == "notebook" || e.type == "folders" { Task { await model.load() } } }
             Task { await model.load() }
+            if model.notebooks.count + model.folders.count > 0 { revealCards() }
         }
+        .onChange(of: model.notebooks.count + model.folders.count) { _, _ in revealCards() }
+    }
+
+    /// Cards render hidden once, then animate in on the next run loop turn.
+    private func revealCards() {
+        guard !entered else { return }
+        DispatchQueue.main.async { entered = true }
     }
 
     // MARK: Header
@@ -543,16 +548,19 @@ struct ShelfView: View {
     private var header: some View {
         VStack(alignment: .leading, spacing: 6) {
             if !isRoot { breadcrumbs }
-            Text(isRoot ? "Your notebooks" : (folder?.name ?? ""))
-                .font(.system(.largeTitle, design: .rounded, weight: .bold))
-                .foregroundStyle(titleColor)
+            HStack(alignment: .lastTextBaseline, spacing: 14) {
+                Text(isRoot ? "Your notebooks" : (folder?.name ?? ""))
+                    .font(Theme.title())
+                    .foregroundStyle(titleColor)
+                if isRoot { HeaderClawd().alignmentGuide(.lastTextBaseline) { $0[.bottom] - 4 } }
+            }
             HStack(spacing: 6) {
                 Text(summary)
                 let questions = (isRoot ? model.notebooks : model.notebooks(in: folderId)).reduce(0) { $0 + $1.openDoubts }
                 if questions > 0 {
                     Text("·")
                     Label("\(questions) open question\(questions == 1 ? "" : "s") for Claude", systemImage: "questionmark.bubble.fill")
-                        .foregroundStyle(StudyPalette.coral)
+                        .foregroundStyle(Theme.accent)
                 }
             }
             .font(.subheadline.weight(.medium)).foregroundStyle(.secondary)
@@ -587,9 +595,9 @@ struct ShelfView: View {
         } label: {
             Label(name, systemImage: id == nil ? "books.vertical" : "folder")
                 .padding(.horizontal, 10).padding(.vertical, 5)
-                .background(StudyPalette.teal.opacity(dropTarget == key ? 0.22 : 0.08), in: Capsule())
+                .background(Theme.accent.opacity(dropTarget == key ? 0.22 : 0.08), in: Capsule())
         }
-        .foregroundStyle(StudyPalette.teal)
+        .foregroundStyle(Theme.accent)
         .dropDestination(for: String.self) { items, _ in model.drop(items, into: id) } isTargeted: { setTarget(key, $0) }
     }
 
@@ -615,7 +623,7 @@ struct ShelfView: View {
             }
         }
         .padding(.horizontal, 16).padding(.vertical, 13)
-        .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 14))
+        .themedCard(radius: Theme.Radius.field)
     }
 
     private var titleMatches: [Notebook] {
@@ -634,13 +642,13 @@ struct ShelfView: View {
         } else {
             LazyVStack(alignment: .leading, spacing: 10) {
                 ForEach(titles) { nb in
-                    resultRow(icon: nb.isScratch ? "scribble.variable" : "book.closed", tint: LibraryTint.color(for: nb.id), title: nb.title,
+                    resultRow(icon: nb.isScratch ? "scribble.variable" : "book.closed", tint: Theme.cover(for: nb.id), title: nb.title,
                               detail: nb.isScratch ? "Scratch pad" : model.pathName(nb.folderId)) {
                         model.open(nb.id)
                     }
                 }
                 ForEach(searchHits) { hit in
-                    resultRow(icon: "text.magnifyingglass", tint: StudyPalette.teal, title: hit.box.text, detail: "\(hit.notebookTitle) · Page \(hit.pageNumber)") {
+                    resultRow(icon: "text.magnifyingglass", tint: Theme.accent, title: hit.box.text, detail: "\(hit.notebookTitle) · Page \(hit.pageNumber)") {
                         model.path.append(.notebook(NotebookDestination(notebookId: hit.notebookId, pageId: hit.pageId,
                                                                         region: PageRegion(x: hit.box.x, y: hit.box.y, w: hit.box.w, h: hit.box.h))))
                     }
@@ -665,9 +673,9 @@ struct ShelfView: View {
                 Image(systemName: "chevron.right").font(.caption).foregroundStyle(.tertiary)
             }
             .padding(14)
-            .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 14))
+            .themedCard(radius: Theme.Radius.field)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(PressableStyle(scale: 0.98))
     }
 
     private func search() async {
@@ -692,7 +700,7 @@ struct ShelfView: View {
 
     private func sectionHeader(_ title: String, detail: String? = nil) -> some View {
         VStack(alignment: .leading, spacing: 2) {
-            Text(title).font(.system(.title3, design: .rounded, weight: .semibold)).foregroundStyle(titleColor)
+            Text(title).font(Theme.title(.title3)).foregroundStyle(titleColor)
             if let detail { Text(detail).font(.subheadline).foregroundStyle(.secondary) }
         }
     }
@@ -716,16 +724,18 @@ struct ShelfView: View {
                     NewScratchTile(busy: model.creatingScratch) { Task { await model.newScratchPad() } }
                         .frame(width: 150)
                         .accessibilityIdentifier("library.newScratch")
-                    ForEach(pads.prefix(12)) { nb in
+                    ForEach(Array(pads.prefix(12).enumerated()), id: \.element.id) { i, nb in
                         NavigationLink(value: LibraryRoute.notebook(NotebookDestination(notebookId: nb.id))) { ScratchCard(notebook: nb) }
-                            .buttonStyle(.plain)
+                            .buttonStyle(PressableStyle())
                             .frame(width: 150)
+                            .entrance(entered, index: i + 1)
                             .modifier(NotebookActions(notebook: nb))
                             .accessibilityIdentifier("notebook.\(nb.id)")
                     }
                     if pads.isEmpty {
                         VStack(alignment: .leading, spacing: 8) {
-                            Label("Need somewhere to think?", systemImage: "lightbulb").font(.subheadline.weight(.semibold))
+                            ClawdView(mood: .thinking, size: 40)
+                            Text("Need somewhere to think?").font(.subheadline.weight(.semibold))
                             Text("Tap for a blank grid page. Keep it if it turns into something, or let it delete itself after a week.")
                                 .font(.subheadline).foregroundStyle(.secondary)
                         }
@@ -751,12 +761,13 @@ struct ShelfView: View {
                         .font(.subheadline.weight(.semibold))
                 }
                 LazyVGrid(columns: columns, spacing: 26) {
-                    ForEach(subs) { f in
+                    ForEach(Array(subs.enumerated()), id: \.element.id) { i, f in
                         let counts = model.counts(in: f.id)
                         NavigationLink(value: LibraryRoute.folder(f.id)) {
                             FolderTile(folder: f, notebooks: counts.notebooks, folders: counts.folders, targeted: dropTarget == "folder.\(f.id)")
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(PressableStyle())
+                        .entrance(entered, index: i)
                         .accessibilityIdentifier("folder.\(f.id)")
                         .contextMenu {
                             Button { model.ask(.renameFolder(f)) } label: { Label("Rename", systemImage: "pencil") }
@@ -771,9 +782,9 @@ struct ShelfView: View {
         } else if isRoot && model.keptCount > 0 {
             HStack(spacing: 18) {
                 Image(systemName: "folder.badge.plus")
-                    .font(.system(size: 30)).foregroundStyle(StudyPalette.teal)
+                    .font(.system(size: 30)).foregroundStyle(Theme.accent)
                     .frame(width: 60, height: 60)
-                    .background(StudyPalette.teal.opacity(0.10), in: RoundedRectangle(cornerRadius: 16))
+                    .background(Theme.accent.opacity(0.10), in: RoundedRectangle(cornerRadius: 16))
                 VStack(alignment: .leading, spacing: 3) {
                     Text("Sort notebooks by subject").font(.headline)
                     Text("Make a folder, then drag notebooks onto it or long-press one and choose Move.")
@@ -785,7 +796,7 @@ struct ShelfView: View {
                     .accessibilityIdentifier("library.firstFolder")
             }
             .padding(18)
-            .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 18))
+            .themedCard()
         }
     }
 
@@ -794,23 +805,14 @@ struct ShelfView: View {
         let notebooks = model.notebooks(in: folderId)
         if notebooks.isEmpty {
             if isRoot && model.keptCount == 0 {
-                ContentUnavailableView {
-                    Label("No notebooks yet", systemImage: "book.closed")
-                } description: { Text("Create a notebook or import a PDF to begin.") } actions: {
+                CrabEmptyState(title: "No notebooks yet", message: "Create a notebook or import a PDF, and Claude can start helping.") {
                     Button("New notebook") { model.ask(.newNotebook(folderId: nil)) }
                         .buttonStyle(.borderedProminent).accessibilityIdentifier("library.emptyCreate")
                 }
-                // No identifier on the container: it would replace the button's own "library.emptyCreate".
-                .frame(maxWidth: .infinity)
             } else if !isRoot && model.subfolders(of: folderId).isEmpty {
-                ContentUnavailableView {
-                    Label("Nothing in here yet", systemImage: "folder")
-                } description: {
-                    Text("Create a notebook here, or drag one onto this folder from the library.")
-                } actions: {
+                CrabEmptyState(title: "Nothing in here yet", message: "Create a notebook here, or drag one onto this folder from the library.") {
                     Button("New notebook") { model.ask(.newNotebook(folderId: folderId)) }.buttonStyle(.borderedProminent)
                 }
-                .frame(maxWidth: .infinity)
             }
         } else {
             VStack(alignment: .leading, spacing: 16) {
@@ -818,11 +820,12 @@ struct ShelfView: View {
                     sectionHeader("Notebooks")
                 }
                 LazyVGrid(columns: columns, spacing: 28) {
-                    ForEach(notebooks) { nb in
+                    ForEach(Array(notebooks.enumerated()), id: \.element.id) { i, nb in
                         NavigationLink(value: LibraryRoute.notebook(NotebookDestination(notebookId: nb.id))) {
-                            NotebookCard(notebook: nb, tint: LibraryTint.color(for: nb.id))
+                            NotebookCard(notebook: nb, tint: Theme.cover(for: nb.id))
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(PressableStyle())
+                        .entrance(entered, index: i + 2)
                         .accessibilityIdentifier("notebook.\(nb.id)")
                         .modifier(NotebookActions(notebook: nb))
                     }
@@ -840,8 +843,15 @@ struct ShelfView: View {
                 Menu {
                     Button("Disconnect server", role: .destructive) { Credentials.secret = ""; onSignOut() }
                 } label: {
-                    Label(live.connected ? "Live" : "Offline", systemImage: live.connected ? "dot.radiowaves.left.and.right" : "wifi.slash")
+                    HStack(spacing: 6) {
+                        LiveDot(live: live.connected)
+                        Text(live.connected ? "Live" : "Offline").font(.subheadline.weight(.semibold))
+                    }
+                    .foregroundStyle(live.connected ? Theme.ink : Theme.secondaryInk)
+                    .padding(.horizontal, 10).padding(.vertical, 5)
+                    .background(Theme.surfaceRaised, in: Capsule())
                 }
+                .accessibilityLabel(live.connected ? "Live, connected to the server" : "Offline")
             }
         }
         ToolbarItemGroup(placement: .topBarTrailing) {
@@ -887,7 +897,7 @@ struct NotebookActions: ViewModifier {
             }
             .draggable("notebook:\(notebook.id)") {
                 Group {
-                    if notebook.isScratch { ScratchCard(notebook: notebook) } else { NotebookCard(notebook: notebook, tint: LibraryTint.color(for: notebook.id)) }
+                    if notebook.isScratch { ScratchCard(notebook: notebook) } else { NotebookCard(notebook: notebook, tint: Theme.cover(for: notebook.id)) }
                 }
                 .frame(width: 150)
             }
@@ -900,11 +910,20 @@ struct NotebookCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            RoundedRectangle(cornerRadius: 13)
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .fill(tint.gradient)
                 .aspectRatio(0.76, contentMode: .fit)
+                // Soft light from the top so the cover reads as a physical object.
+                .overlay(LinearGradient(colors: [.white.opacity(0.16), .clear], startPoint: .top, endPoint: .center)
+                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous)))
                 .overlay(alignment: .leading) {
-                    Rectangle().fill(.black.opacity(0.12)).frame(width: 12).padding(.leading, 8)
+                    // Spine with a little stitched seam.
+                    ZStack {
+                        Rectangle().fill(.black.opacity(0.10))
+                        Rectangle().fill(.clear).frame(width: 1)
+                            .overlay(Line().stroke(.white.opacity(0.35), style: StrokeStyle(lineWidth: 1.5, dash: [5, 5])))
+                    }
+                    .frame(width: 14).padding(.leading, 9)
                 }
                 .overlay(alignment: .topTrailing) {
                     if notebook.openDoubts > 0 {
@@ -914,17 +933,18 @@ struct NotebookCard: View {
                             .background(.white, in: Capsule())
                             .padding(14)
                     } else {
-                        Image(systemName: "sparkle").font(.title2).foregroundStyle(.white.opacity(0.62)).padding(18)
+                        SparkShape().fill(.white.opacity(0.55)).frame(width: 22, height: 22).padding(18)
                     }
                 }
                 .overlay(alignment: .bottomLeading) {
-                    Text(notebook.title).font(.system(.title3, design: .rounded, weight: .bold))
-                        .foregroundStyle(.white).lineLimit(3).padding(18)
+                    Text(notebook.title).font(.system(.title3, design: .serif, weight: .semibold))
+                        .foregroundStyle(.white).lineLimit(3).padding(.leading, 34).padding([.trailing, .bottom], 18)
+                        .shadow(color: .black.opacity(0.12), radius: 2, y: 1)
                 }
-                .shadow(color: tint.opacity(0.17), radius: 10, y: 5)
+                .shadow(color: tint.opacity(0.22), radius: 12, y: 6)
             VStack(alignment: .leading, spacing: 2) {
                 Text("\(notebook.pages.count) page\(notebook.pages.count == 1 ? "" : "s")")
-                    .font(.subheadline.weight(.medium))
+                    .font(.subheadline.weight(.medium)).foregroundStyle(Theme.ink)
                 if let edited = notebook.lastActivityDate {
                     Text("Edited \(edited, format: .relative(presentation: .named))")
                         .font(.caption).foregroundStyle(.secondary)
@@ -944,7 +964,7 @@ struct FolderTile: View {
     let folders: Int
     var targeted = false
 
-    private var tint: Color { LibraryTint.color(for: folder.id) }
+    private var tint: Color { Theme.cover(for: folder.id) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -986,7 +1006,7 @@ struct FolderTile: View {
             .scaleEffect(targeted ? 1.05 : 1)
             .overlay {
                 if targeted {
-                    RoundedRectangle(cornerRadius: 16).strokeBorder(StudyPalette.teal, lineWidth: 3).padding(-6)
+                    RoundedRectangle(cornerRadius: 16).strokeBorder(Theme.accent, lineWidth: 3).padding(-6)
                 }
             }
             .animation(.spring(duration: 0.25), value: targeted)
@@ -1015,15 +1035,15 @@ struct NewScratchTile: View {
         Button(action: action) {
             VStack(alignment: .leading, spacing: 8) {
                 RoundedRectangle(cornerRadius: 8)
-                    .strokeBorder(StudyPalette.teal.opacity(0.55), style: StrokeStyle(lineWidth: 2, dash: [7, 6]))
-                    .background(StudyPalette.teal.opacity(0.07), in: RoundedRectangle(cornerRadius: 8))
+                    .strokeBorder(Theme.accent.opacity(0.55), style: StrokeStyle(lineWidth: 2, dash: [7, 6]))
+                    .background(Theme.accent.opacity(0.07), in: RoundedRectangle(cornerRadius: 8))
                     .aspectRatio(PageGeometry.width / PageGeometry.height, contentMode: .fit)
                     .overlay {
                         VStack(spacing: 10) {
                             if busy { ProgressView() } else { Image(systemName: "scribble.variable").font(.system(size: 32, weight: .medium)) }
                             Text("New scratch pad").font(.subheadline.weight(.semibold)).multilineTextAlignment(.center)
                         }
-                        .foregroundStyle(StudyPalette.teal)
+                        .foregroundStyle(Theme.accent)
                         .padding(10)
                     }
                 Text("One tap, no name").font(.caption).foregroundStyle(.secondary).padding(.horizontal, 2)
@@ -1078,7 +1098,7 @@ struct ExpiryBadge: View {
         Label(Self.text(date), systemImage: "timer")
             .font(.caption2.weight(.bold))
             .lineLimit(1)
-            .foregroundStyle(urgent ? AnyShapeStyle(StudyPalette.coral) : AnyShapeStyle(.secondary))
+            .foregroundStyle(urgent ? AnyShapeStyle(Theme.accent) : AnyShapeStyle(.secondary))
             .padding(.horizontal, 7).padding(.vertical, 4)
             .background(.regularMaterial, in: Capsule())
     }
@@ -1095,8 +1115,8 @@ struct ScratchPadsView: View {
             VStack(alignment: .leading, spacing: 26) {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("Scratch pads")
-                        .font(.system(.largeTitle, design: .rounded, weight: .bold))
-                        .foregroundStyle(colorScheme == .dark ? Color.white : Color(red: 0.16, green: 0.22, blue: 0.23))
+                        .font(Theme.title())
+                        .foregroundStyle(Theme.ink)
                     Text("Each one deletes itself 7 days after you last write on it. Keep the ones worth saving and they become normal notebooks.")
                         .font(.subheadline.weight(.medium)).foregroundStyle(.secondary)
                 }
@@ -1104,7 +1124,7 @@ struct ScratchPadsView: View {
                     NewScratchTile(busy: model.creatingScratch) { Task { await model.newScratchPad() } }
                     ForEach(model.scratchPads) { nb in
                         NavigationLink(value: LibraryRoute.notebook(NotebookDestination(notebookId: nb.id))) { ScratchCard(notebook: nb) }
-                            .buttonStyle(.plain)
+                            .buttonStyle(PressableStyle())
                             .modifier(NotebookActions(notebook: nb))
                             .accessibilityIdentifier("notebook.\(nb.id)")
                     }
@@ -1117,7 +1137,7 @@ struct ScratchPadsView: View {
             }
             .padding(28)
         }
-        .background(StudyPalette.background)
+        .background(Theme.background)
         .navigationTitle("Scratch pads")
         .navigationBarTitleDisplayMode(.inline)
         .refreshable { await model.load() }
@@ -1188,7 +1208,7 @@ struct FolderPicker: View {
                     }
                     if addingFolder {
                         HStack(spacing: 12) {
-                            Image(systemName: "folder.badge.plus").foregroundStyle(StudyPalette.teal)
+                            Image(systemName: "folder.badge.plus").foregroundStyle(Theme.accent)
                             TextField("New folder in \(selection.flatMap { model.folder($0)?.name } ?? "Your notebooks")", text: $newFolderName)
                                 .focused($newFolderFocused)
                                 .onSubmit { Task { await addFolder() } }
@@ -1231,7 +1251,7 @@ struct FolderPicker: View {
         Button { selection = id } label: {
             HStack(spacing: 12) {
                 Image(systemName: id == nil ? "books.vertical.fill" : "folder.fill")
-                    .foregroundStyle(id.map { LibraryTint.color(for: $0) } ?? StudyPalette.teal)
+                    .foregroundStyle(id.map { Theme.cover(for: $0) } ?? Theme.accent)
                     .frame(width: 24)
                 Text(name).foregroundStyle(Color.primary)
                 if id != nil && id == current {
@@ -1239,7 +1259,7 @@ struct FolderPicker: View {
                 }
                 Spacer()
                 if selection == id {
-                    Image(systemName: "checkmark").fontWeight(.semibold).foregroundStyle(StudyPalette.teal)
+                    Image(systemName: "checkmark").fontWeight(.semibold).foregroundStyle(Theme.accent)
                 }
             }
             .padding(.leading, CGFloat(depth) * 22)
