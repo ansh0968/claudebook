@@ -216,6 +216,7 @@ struct Page: Codable, Identifiable, Hashable {
     var background: PageBackground
     var paper: PaperColor? = nil
     var paperSnapshotStale: Bool? = nil
+    var strokeCount: Int? = nil
     var pdf: PDFRef?
     var snapshotVersion: Int
     var textBoxes: [TextBox]
