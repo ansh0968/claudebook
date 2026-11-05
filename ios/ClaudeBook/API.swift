@@ -88,8 +88,16 @@ struct API {
     }
 
     func createNotebook(title: String, background: PageBackground, folderId: String? = nil, scratch: Bool = false) async throws -> Notebook {
-        struct Body: Encodable { var title: String; var pages: Int; var background: PageBackground; var folderId: String?; var scratch: Bool? }
-        let body = Body(title: title, pages: 1, background: background, folderId: folderId, scratch: scratch ? true : nil)
+        struct Body: Encodable {
+            var title: String
+            var pages: Int
+            var background: PageBackground
+            var folderId: String?
+            var scratch: Bool?
+            var activateView: ClientSequence
+        }
+        let report = try await ClientSequence.next()
+        let body = Body(title: title, pages: 1, background: background, folderId: folderId, scratch: scratch ? true : nil, activateView: report)
         return try decode(Notebook.self, await request("notebooks", method: "POST", json: body))
     }
 
@@ -170,19 +178,26 @@ struct API {
     }
 
 
-    func setView(notebookId: String, pageId: String) async throws {
-        struct Body: Encodable { var notebookId: String; var pageId: String }
-        _ = try await request("view", method: "POST", json: Body(notebookId: notebookId, pageId: pageId))
+    func setView(notebookId: String, pageId: String, report: ClientSequence) async throws {
+        struct Body: Encodable { var notebookId: String; var pageId: String; var report: ClientSequence }
+        _ = try await request("view", method: "POST", json: Body(notebookId: notebookId, pageId: pageId, report: report))
     }
 
-    /// strokeCount lets Claude tell an empty page from one whose ink hasn't synced.
-    func uploadSnapshot(pageId: String, png: Data, textBoxes: [TextBox], strokeCount: Int) async throws {
-        struct Body: Encodable { var png: String; var textBoxes: [TextBox]; var strokeCount: Int }
-        _ = try await request("pages/\(pageId)/snapshot", method: "PUT", json: Body(png: png.base64EncodedString(), textBoxes: textBoxes, strokeCount: strokeCount))
+    /// Publish the visible snapshot, OCR, and PencilKit backup as one server revision.
+    func uploadInk(pageId: String, png: Data, drawing: Data, textBoxes: [TextBox], strokeCount: Int,
+                   order: ClientSequence) async throws {
+        struct Body: Encodable { var png: Data; var drawing: Data; var textBoxes: [TextBox]; var strokeCount: Int; var clientOrder: ClientSequence }
+        _ = try await request("pages/\(pageId)/ink", method: "PUT",
+                              json: Body(png: png, drawing: drawing, textBoxes: textBoxes, strokeCount: strokeCount, clientOrder: order))
     }
 
-    func uploadDrawing(pageId: String, data: Data, strokeCount: Int) async throws {
-        _ = try await request("pages/\(pageId)/drawing", method: "PUT", body: data, query: [URLQueryItem(name: "strokes", value: String(strokeCount))])
+    func uploadDrawing(pageId: String, data: Data, strokeCount: Int, order: ClientSequence) async throws {
+        let query = [
+            URLQueryItem(name: "strokes", value: String(strokeCount)),
+            URLQueryItem(name: "clientId", value: order.clientId),
+            URLQueryItem(name: "sequence", value: String(order.sequence))
+        ]
+        _ = try await request("pages/\(pageId)/drawing", method: "PUT", body: data, query: query)
     }
 
     func drawing(pageId: String) async throws -> Data? {

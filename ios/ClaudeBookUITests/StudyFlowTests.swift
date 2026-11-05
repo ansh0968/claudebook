@@ -10,6 +10,21 @@ final class StudyFlowTests: XCTestCase {
     }
 
     @MainActor
+    func testPencilKitPaletteCanBeHiddenAndRestored() async throws {
+        let notebook = try await fixture()
+        try await api.setView(notebook: notebook.id, page: try XCTUnwrap(notebook.pages.first).id)
+        let app = launch()
+        defer { app.terminate() }
+        let palette = app.buttons["editor.pencilTools"]
+        try requireReady(palette)
+        for (index, label) in ["Hide PencilKit tools", "Show PencilKit tools", "Hide PencilKit tools"].enumerated() {
+            let matches = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label == %@", label), object: palette)
+            await fulfillment(of: [matches], timeout: 5)
+            if index < 2 { palette.tap() }
+        }
+    }
+
+    @MainActor
     func testAddingAPageShowsItRightAwayAndSavesItInPlace() async throws {
         let notebook: SmokeNotebook = try await api.request("notebooks", method: "POST", body: ["title": "Add page flow", "pages": 2])
         try await api.setView(notebook: notebook.id, page: notebook.pages[0].id)
@@ -590,10 +605,17 @@ final class StudyFlowTests: XCTestCase {
 
     private func eventually<T>(_ probe: () async throws -> T?) async throws -> T {
         let deadline = Date().addingTimeInterval(10)
+        var lastTimeout: URLError?
         while Date() < deadline {
-            if let value = try await probe() { return value }
+            do {
+                if let value = try await probe() { return value }
+                lastTimeout = nil
+            } catch let error as URLError where error.code == .timedOut {
+                lastTimeout = error
+            }
             try await Task.sleep(for: .milliseconds(150))
         }
+        if let lastTimeout { throw lastTimeout }
         XCTFail("Server state did not change within 10 seconds")
         throw SmokeError.timeout
     }

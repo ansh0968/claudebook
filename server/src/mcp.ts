@@ -19,7 +19,7 @@ import { paperRegions } from "./paper.js";
 const INSTRUCTIONS = `ClaudeBook is the user's handwritten notebook app on iPad. You can see their pages and draw on them.
 Pages use a fixed coordinate space: x 0..${PAGE_W} left to right, y 0..${PAGE_H} top to bottom.
 Interactive blocks: add_web_block runs HTML/JS in empty space, e.g. {x:100,y:200,w:800,h:500,title:"Wave",html:"<svg><circle r=20><animate attributeName=cx values=20;700;20 dur=3s repeatCount=indefinite /></circle></svg>"}. Sliders: <input type=range oninput="document.querySelector(\'output\').value=this.value"><output>50</output>. Libraries: <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.4/p5.min.js"></script>. Only HTTPS cdnjs.cloudflare.com, cdn.jsdelivr.net and unpkg.com subresources are allowed. update_web_block fixes a block by id. Check view_page after the iPad runs it: the server shows captured posters and descriptions report current-revision console warnings/errors. Uncaught errors only show as "Script error." (WebKit hides the text), so wrap risky code in try{...}catch(e){console.error(e.message, e.stack)} to see the real message and line. Neither Claude nor ChatGPT can forward images pasted in chat into a block; use self-contained graphics or ask the user to import the file.
-Workflow: call get_current_page first (it shows what the user has open, with a labelled blue coordinate grid and the positions of recognized handwriting).
+Workflow: call get_current_page first (it shows what the user has open, with a labelled blue coordinate grid and the positions of recognized handwriting). When editing the page you just inspected, pass its page_id so navigation during the conversation cannot redirect the edit.
 When checking work or reading small handwriting, zoom into each region (the zoom parameter) before judging it; the full-page image is too small to read every symbol.
 After reading maths from the image, save it with set_transcript so future page descriptions and search can use your reading, e.g. {region:{x:100,y:200,w:400,h:80},text:"2πrh + 4πr²",latex:"2\\\\pi r h + 4\\\\pi r^2"}. Vision is unreliable for maths; zoom in on low-confidence lines and compare alternatives. Recheck stale transcripts against the image and save the same rectangle again to replace them. Transcripts survive snapshots; any page stroke-count change marks them stale (changes elsewhere can flag them, and equal-count edits cannot be detected). Uploads without stroke counts also mark them stale.
 search_notes searches Vision candidates and Claude transcripts using maths-aware spellings, e.g. query:"4pir^2" also finds "4πr²". Results identify source and stale transcript readings.
@@ -76,7 +76,9 @@ export function buildMcpServer(store: Store) {
       const page = nb.pages[pageNumber - 1];
       return page && { notebook: nb, page, index: pageNumber - 1 };
     }
-    return store.view().pageId ? store.findPage(store.view().pageId!) : { notebook: nb, page: nb.pages[0], index: 0 };
+    const view = store.view();
+    const index = view.notebookId === nb.id ? Math.max(0, nb.pages.findIndex(page => page.id === view.pageId)) : 0;
+    return { notebook: nb, page: nb.pages[index], index };
   }
 
   async function describe(found: { notebook: { title: string; id: string; pages: Page[] }; page: Page; index: number }, region?: Region) {
@@ -139,8 +141,10 @@ export function buildMcpServer(store: Store) {
 
   async function pageWithImage(found: NonNullable<ReturnType<typeof resolvePage>>, grid: boolean, zoom?: Region): Promise<ToolResult> {
     const region = zoom && clampRegion(zoom);
-    const png = await renderPage(store, found.page, { grid, region });
-    let text = await describe(found, region);
+    // The render captures its ink bytes before awaiting. Keep its matching metadata for the response.
+    const page = { ...found.page };
+    const png = await renderPage(store, page, { grid, region });
+    let text = await describe({ ...found, page }, region);
     if (region) text += `\nZoomed into x ${region.x}..${region.x + region.w}, y ${region.y}..${region.y + region.h}; grid labels are still page coordinates.`;
     return { content: [{ type: "text", text }, { type: "image", data: png.toString("base64"), mimeType: "image/png" }] };
   }

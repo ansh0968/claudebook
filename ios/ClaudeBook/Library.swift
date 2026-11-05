@@ -64,6 +64,8 @@ final class LibraryModel: ObservableObject {
     @Published var actionError: String?
     var prepareNotebookDeletion: ((String) async -> Void)?
     var resumeNotebookUploads: ((String) -> Void)?
+    weak var activeCanvas: NotebookCanvasController?
+    private(set) var pageCommandGeneration = 0
     private var loadGeneration = 0
     @Published var path: [LibraryRoute] = []
     @Published var prompt: LibraryPrompt?
@@ -81,14 +83,18 @@ final class LibraryModel: ObservableObject {
             guard generation == loadGeneration else { return list.view }
             let liveIds = Set(list.notebooks.map(\.id))
             let livePageIds = Set(list.notebooks.flatMap { $0.pages.map(\.id) })
-            for removed in notebooks where !liveIds.contains(removed.id) {
-                let ids = removed.pages.map(\.id).filter { !livePageIds.contains($0) }
-                LocalDrawings.remove(ids)
-                NotificationCenter.default.post(name: .pagesDeleted, object: nil, userInfo: ["pageIds": ids])
+            LocalDrawings.reconcileLegacyDeletions(livePageIds: livePageIds)
+            if let deleted = list.deletedPageIds {
+                confirmDeletedPages(deleted)
+            } else {
+                for removed in notebooks where !liveIds.contains(removed.id) {
+                    confirmDeletedPages(removed.pages.map(\.id).filter { !livePageIds.contains($0) }, authoritative: false)
+                }
             }
-            notebooks = list.notebooks
+            notebooks = list.notebooks + PendingPageCreations.localNotebooks.filter { !liveIds.contains($0.id) }
+            let available = Set(notebooks.map(\.id))
             path.removeAll { route in
-                if case .notebook(let destination) = route { return !liveIds.contains(destination.notebookId) }
+                if case .notebook(let destination) = route { return !available.contains(destination.notebookId) }
                 return false
             }
             folders = list.folders ?? []
@@ -99,9 +105,22 @@ final class LibraryModel: ObservableObject {
             return list.view
         } catch {
             guard generation == loadGeneration else { return nil }
+            let cachedIds = Set(notebooks.map(\.id))
+            notebooks += PendingPageCreations.localNotebooks.filter { !cachedIds.contains($0.id) }
             self.error = error.localizedDescription
             return nil
         }
+    }
+
+    func confirmDeletedPages(_ pageIds: [String], authoritative: Bool = true) {
+        if authoritative {
+            let activePageIds = Set(activeCanvas?.pages.map(\.id) ?? [])
+            try? PendingPageCreations.pruneDeletedBlankPages(pageIds, activePageIds: activePageIds)
+        }
+        let ids = pageIds.filter { !PendingPageCreations.contains($0) && !LocalDrawings.confirmedDeletedIds.contains($0) }
+        guard !ids.isEmpty else { return }
+        LocalDrawings.remove(ids)
+        NotificationCenter.default.post(name: .pagesDeleted, object: nil, userInfo: ["pageIds": ids])
     }
 
     // MARK: Lookups
@@ -210,10 +229,22 @@ final class LibraryModel: ObservableObject {
         switch event.type {
         case "openPage":
             guard let pageId = event.pageId else { return }
-            if let last = path.last, case .notebook(let destination) = last, destination.notebookId == notebookId {
-                NotificationCenter.default.post(name: .claudeOpenPage, object: nil, userInfo: ["notebookId": notebookId, "pageId": pageId])
+            pageCommandGeneration += 1
+            let generation = pageCommandGeneration
+            let navigate = { [weak self] in
+                guard let self, self.pageCommandGeneration == generation else { return }
+                if let last = self.path.last, case .notebook(let destination) = last, destination.notebookId == notebookId {
+                    NotificationCenter.default.post(name: .claudeOpenPage, object: nil,
+                                                    userInfo: ["notebookId": notebookId, "pageId": pageId, "generation": generation])
+                } else {
+                    self.path = [.notebook(NotebookDestination(notebookId: notebookId, pageId: pageId))]
+                }
+            }
+            if let activeCanvas, let last = path.last, case .notebook(let destination) = last,
+               activeCanvas.notebookId == destination.notebookId {
+                activeCanvas.performPageCommand(navigate)
             } else {
-                path = [.notebook(NotebookDestination(notebookId: notebookId, pageId: pageId))]
+                navigate()
             }
         case "deleteRequest":
             Task { await load() }
@@ -236,16 +267,16 @@ final class LibraryModel: ObservableObject {
         let title = "Scratch · " + Date().formatted(.dateTime.day().month(.abbreviated).hour().minute())
         do {
             guard let nb = try await API.current?.createNotebook(title: title, background: .grid, scratch: true) else { return }
-            await load()
             open(nb.id)
+            await load()
         } catch { self.actionError = error.localizedDescription }
     }
 
     func createNotebook(title: String, in folderId: String?) async {
         do {
             guard let nb = try await API.current?.createNotebook(title: title, background: .lined, folderId: folderId) else { return }
-            await load()
             open(nb.id)
+            await load()
         } catch { self.actionError = error.localizedDescription }
     }
 
@@ -377,6 +408,7 @@ struct LibraryView: View {
         .onAppear {
             live.onCommand = { event in model.handleCommand(event) }
             live.onLibraryEvent = { event in
+                if let ids = event.deletedPageIds { model.confirmDeletedPages(ids) }
                 if ["hello", "notebook", "folders"].contains(event.type) { Task { await model.load() } }
             }
         }

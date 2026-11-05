@@ -5,6 +5,46 @@ import PencilKit
 
 final class NotebookLayoutTests: XCTestCase {
     @MainActor
+    func testRemoteReorderAndNavigationWaitForTheFinishingStroke() async throws {
+        let first = Page.blank(background: .lined)
+        let second = Page.blank(background: .grid)
+        let originalIds = [first.id, second.id]
+        defer { LocalDrawings.remove(originalIds) }
+        for id in originalIds { LocalDrawings.save(PKDrawing(), pageId: id) }
+
+        var notebook = Notebook(id: UUID().uuidString, title: "Canvas sync test", pages: [first, second],
+                                createdAt: first.updatedAt, updatedAt: first.updatedAt)
+        let controller = NotebookCanvasController()
+        controller.loadViewIfNeeded()
+        controller.setNotebook(notebook)
+        let library = LibraryModel()
+        library.activeCanvas = controller
+        library.path = [.notebook(NotebookDestination(notebookId: notebook.id))]
+        let lastTarget = NotebookDestination(notebookId: UUID().uuidString, pageId: Page.blank(background: .lined).id)
+
+        controller.canvasViewDidBeginUsingTool(controller.canvas)
+        notebook.pages.reverse()
+        controller.setNotebook(notebook)
+        library.handleCommand(LiveEvent(type: "openPage", notebookId: UUID().uuidString, pageId: first.id))
+        library.handleCommand(LiveEvent(type: "openPage", notebookId: lastTarget.notebookId, pageId: lastTarget.pageId))
+        XCTAssertEqual(controller.pages.map(\.id), originalIds)
+        XCTAssertEqual(library.path, [.notebook(NotebookDestination(notebookId: notebook.id))])
+
+        // Simulate PencilKit publishing its completed drawing after the remote update.
+        controller.addTestStroke()
+        controller.canvasViewDidEndUsingTool(controller.canvas)
+        let reorderedIds = [second.id, first.id]
+        for _ in 0..<40 {
+            if controller.pages.map(\.id) == reorderedIds { break }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        XCTAssertEqual(controller.pages.map(\.id), reorderedIds)
+        XCTAssertEqual(library.path, [.notebook(lastTarget)])
+        XCTAssertEqual(LocalDrawings.load(first.id)?.strokes.count, 2)
+        XCTAssertEqual(LocalDrawings.load(second.id)?.strokes.count, 1)
+    }
+
+    @MainActor
     func testConfirmedDeletionStopsLateDrawingSavesAndPendingUploads() {
         let id = "deleted-test-" + UUID().uuidString
         LocalDrawings.save(PKDrawing(), pageId: id)
@@ -16,6 +56,76 @@ final class NotebookLayoutTests: XCTestCase {
         XCTAssertFalse(LocalDrawings.exists(id))
         XCTAssertNil(LocalDrawings.load(id))
         XCTAssertFalse(PendingUploads.all.contains(id))
+    }
+
+    @MainActor
+    func testAcknowledgingAnOlderUploadRetainsTheNewInkRevision() throws {
+        let id = "revision-test-" + UUID().uuidString
+        defer { LocalDrawings.remove([id]) }
+        XCTAssertTrue(PendingUploads.mark([id]))
+        let first = try XCTUnwrap(PendingUploads.revision(id))
+        XCTAssertTrue(PendingUploads.mark([id]))
+        let second = try XCTUnwrap(PendingUploads.revision(id))
+        XCTAssertNotEqual(first, second)
+
+        PendingUploads.acknowledge(id, revision: first, vectorOnly: false)
+        XCTAssertEqual(PendingUploads.revision(id), second)
+        PendingUploads.acknowledge(id, revision: second, vectorOnly: true)
+        let vectorBackup = try XCTUnwrap(PendingUploads.revision(id))
+        XCTAssertEqual(vectorBackup.id, second.id)
+        XCTAssertTrue(vectorBackup.vectorBackedUp)
+        PendingUploads.acknowledge(id, revision: vectorBackup, vectorOnly: false)
+        XCTAssertNil(PendingUploads.revision(id))
+    }
+
+    @MainActor
+    func testPendingCreationFollowsItsAnchorAndMergesWithoutDuplicatingItsId() throws {
+        let anchor = Page.blank(background: .lined)
+        let other = Page.blank(background: .grid)
+        let draft = Page.blank(background: .blank)
+        var notebook = Notebook(id: UUID().uuidString, title: "Pending page", pages: [anchor, other],
+                                createdAt: anchor.updatedAt, updatedAt: anchor.updatedAt)
+        defer { try? PendingPageCreations.confirm(draft.id, in: notebook.id) }
+        try PendingPageCreations.add(.init(page: draft, afterPageId: anchor.id, afterIndex: 0), to: notebook)
+        XCTAssertTrue(PendingPageCreations.contains(draft.id))
+        XCTAssertEqual(PendingPageCreations.localNotebooks.first { $0.id == notebook.id }?.pages.map(\.id), [draft.id])
+        notebook.pages.reverse()
+        XCTAssertEqual(PendingPageCreations.merging(into: notebook).pages.map(\.id), [other.id, anchor.id, draft.id])
+        notebook.pages.append(draft)
+        XCTAssertEqual(PendingPageCreations.merging(into: notebook).pages.count, 3)
+        try PendingPageCreations.confirm(draft.id, in: notebook.id)
+        XCTAssertFalse(PendingPageCreations.contains(draft.id))
+    }
+
+    @MainActor
+    func testAuthoritativeDeletionDropsOnlyInactiveBlankPendingPages() throws {
+        let blank = Page.blank(background: .grid)
+        let active = Page.blank(background: .grid)
+        let queued = Page.blank(background: .grid)
+        let drawn = Page.blank(background: .grid)
+        let ids = [blank.id, active.id, queued.id, drawn.id]
+        let notebook = Notebook(id: UUID().uuidString, title: "Drafts", pages: [],
+                                createdAt: blank.updatedAt, updatedAt: blank.updatedAt)
+        defer {
+            for id in ids { try? PendingPageCreations.confirm(id, in: notebook.id) }
+            LocalDrawings.remove(ids)
+        }
+        for page in [blank, active, queued, drawn] {
+            try PendingPageCreations.add(.init(page: page, afterPageId: nil, afterIndex: 0), to: notebook)
+        }
+        XCTAssertTrue(PendingUploads.mark([queued.id]))
+        let points = [CGPoint(x: 20, y: 20), CGPoint(x: 60, y: 60)].enumerated().map { index, point in
+            PKStrokePoint(location: point, timeOffset: Double(index) * 0.01, size: CGSize(width: 5, height: 5),
+                          opacity: 1, force: 1, azimuth: 0, altitude: .pi / 2)
+        }
+        let stroke = PKStroke(ink: PKInk(.pen, color: .systemBlue), path: PKStrokePath(controlPoints: points, creationDate: Date()))
+        XCTAssertTrue(LocalDrawings.save(PKDrawing(strokes: [stroke]), pageId: drawn.id))
+
+        try PendingPageCreations.pruneDeletedBlankPages(ids, activePageIds: [active.id])
+        XCTAssertFalse(PendingPageCreations.contains(blank.id))
+        XCTAssertTrue(PendingPageCreations.contains(active.id))
+        XCTAssertTrue(PendingPageCreations.contains(queued.id))
+        XCTAssertTrue(PendingPageCreations.contains(drawn.id))
     }
 
     func testBottomSearchMatchKeepsViewportCenterOnMatchingPage() {

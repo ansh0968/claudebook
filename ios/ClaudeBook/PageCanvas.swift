@@ -123,7 +123,7 @@ final class RegionSelectionView: UIView {
 /// Each page's ink is stored separately in that page's own coordinates (what the server and Claude use),
 /// and split back out of the canvas after every edit. Paper sits under the ink and Claude's layer over it,
 /// as tiled views that exist only for pages near the screen.
-final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
+final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate, PKToolPickerObserver {
     let canvas = PKCanvasView()
     let toolPicker = PKToolPicker()
     private let paperContainer = UIView()
@@ -150,8 +150,21 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
     private var fingerprints: [String: Int] = [:]
     private var onScreen: [String: (paper: PaperView, claude: ClaudeLayerView)] = [:]
     private var commitTask: Task<Void, Never>?
+    private var canvasSettledTask: Task<Void, Never>?
+    private var usingCanvasTool = false
+    private var deferredNotebook: Notebook?
+    private var deferredDeletedPageIds: Set<String> = []
+    private var deferredRevealPageId: String?
+    private var deferredPageCommand: (() -> Void)?
+    private var restoringPageIds: Set<String> = []
+    private var deferredBackups: [String: PKDrawing] = [:]
     private var uploadTask: Task<Void, Never>?
+    private var uploading = false
+    private var uploadsPaused = false
+    private var unsavedDrawingIds = Set<String>()
     private var viewTask: Task<Void, Never>?
+    private var viewReportingEnabled = false
+    private var wantsToolPicker = true
     private var loading = false
     private var lastWidth: CGFloat = 0
     private var pendingScroll: CGFloat?
@@ -162,6 +175,7 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
 
     var onSyncState: ((String) -> Void)?
     var onPageChange: ((Int) -> Void)?
+    var onToolPickerVisibilityChange: ((Bool) -> Void)?
     var onPullToAdd: (() -> Void)?
     var onDoubtRegion: ((String, PageRegion) -> Void)?
     var onHintError: ((String) -> Void)?
@@ -169,6 +183,7 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
 
     private static let footerInset: CGFloat = 140
     private static let pullDistance: CGFloat = 70
+    private static let inkCommitDelay: Duration = .milliseconds(350)
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -213,6 +228,8 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
             hintOverlay.trailingAnchor.constraint(equalTo: canvas.trailingAnchor),
         ])
         shapes.attach(to: canvas, in: view)
+        shapes.onDragEnded = { [weak self] in self?.canvasInputEnded() }
+        canvas.drawingGestureRecognizer.addTarget(self, action: #selector(canvasDrawingGestureChanged(_:)))
 
         webBlocks.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(webBlocks)
@@ -231,19 +248,35 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
         footer.textAlignment = .center
         canvas.addSubview(footer)
 
-        toolPicker.setVisible(true, forFirstResponder: canvas)
         toolPicker.addObserver(canvas)
+        toolPicker.addObserver(self)
     }
 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
-        canvas.becomeFirstResponder()
+        applyToolPickerVisibility()
         updateHintButtons()
     }
 
     override func viewDidDisappear(_ animated: Bool) {
         super.viewDidDisappear(animated)
         webBlocks.suspend()
+    }
+
+    func toggleToolPicker() {
+        wantsToolPicker = !toolPicker.isVisible
+        applyToolPickerVisibility()
+    }
+
+    private func applyToolPickerVisibility() {
+        let visible = wantsToolPicker && selectionOverlay == nil
+        toolPicker.setVisible(visible, forFirstResponder: canvas)
+        if selectionOverlay == nil { canvas.becomeFirstResponder() }
+        onToolPickerVisibilityChange?(toolPicker.isVisible)
+    }
+
+    func toolPickerVisibilityDidChange(_ toolPicker: PKToolPicker) {
+        onToolPickerVisibilityChange?(toolPicker.isVisible)
     }
 
     override func viewDidLayoutSubviews() {
@@ -413,7 +446,12 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
     /// A page the user just added: fade it in and glide down to it. Whatever was on screen stays put
     /// until the glide starts, because setNotebook anchors the view before this runs.
     func reveal(pageId: String) {
-        guard let i = pages.firstIndex(where: { $0.id == pageId }) else { return }
+        guard let i = pages.firstIndex(where: { $0.id == pageId }) else {
+            if deferredNotebook?.pages.contains(where: { $0.id == pageId }) == true {
+                deferredRevealPageId = pageId
+            }
+            return
+        }
         if let views = onScreen[pageId] {
             views.paper.alpha = 0
             views.claude.alpha = 0
@@ -444,16 +482,37 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
         reportView()
     }
 
-    /// Tell the server which page is on screen, so "look at my page" just works in Claude.
-    private func reportView() {
+    func setViewReportingEnabled(_ enabled: Bool) {
+        viewReportingEnabled = enabled
+        if enabled { reportView(immediate: true) }
+        else { viewTask?.cancel() }
+    }
+
+    /// A new selection replaces pending work. Retry the same report until it is superseded or acknowledged.
+    func reportView(immediate: Bool = false) {
+        viewTask?.cancel()
         guard let nb = notebookId, pages.indices.contains(currentIndex) else { return }
         let pageId = pages[currentIndex].id
         UserDefaults.standard.set(currentIndex, forKey: "lastPage.\(nb)")
-        viewTask?.cancel()
+        guard viewReportingEnabled, !PendingPageCreations.contains(pageId) else { return }
+        guard let report = try? ClientSequence.next() else { return }
         viewTask = Task {
-            try? await Task.sleep(for: .milliseconds(400))
-            guard !Task.isCancelled else { return }
-            try? await API.current?.setView(notebookId: nb, pageId: pageId)
+            if !immediate { try? await Task.sleep(for: .milliseconds(400)) }
+            var delay = 1
+            while !Task.isCancelled {
+                do {
+                    guard let api = API.current else { return }
+                    try await api.setView(notebookId: nb, pageId: pageId, report: report)
+                    return
+                } catch let error as APIError where (400..<500).contains(error.status) && error.status != 408 && error.status != 429 {
+                    // An invalid or removed target should be resolved by the next notebook refresh.
+                    return
+                } catch {
+                    guard !Task.isCancelled else { return }
+                    try? await Task.sleep(for: .seconds(delay))
+                    delay = min(delay * 2, 20)
+                }
+            }
         }
     }
 
@@ -503,10 +562,15 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
     /// Show a notebook, or refresh the one on screen. If only Claude's layers changed, the ink is left alone.
     func setNotebook(_ notebook: Notebook) {
         let first = notebookId != notebook.id
-        if !first && notebook.pages.map(\.id) == pages.map(\.id) {
+        let sameLayout = !first && notebook.pages.map(\.id) == pages.map(\.id)
+        if shouldDeferCanvasChanges && (!sameLayout || deferredNotebook != nil) {
+            deferredNotebook = notebook
+            return
+        }
+        if sameLayout {
             let changedPaper = notebook.pages.filter { next in pages.contains { $0.id == next.id && ($0.background != next.background || $0.paper != next.paper) } }.map(\.id)
             pages = notebook.pages
-            PendingUploads.all.formUnion(pages.filter { changedPaper.contains($0.id) && canRefreshPaperSnapshot($0) }.map(\.id))
+            PendingUploads.mark(pages.filter { changedPaper.contains($0.id) && canRefreshPaperSnapshot($0) }.map(\.id))
             if !changedPaper.isEmpty { scheduleUpload(delay: 0.2) }
             for (id, views) in onScreen {
                 if let page = pages.first(where: { $0.id == id }) { views.paper.style = style(for: page); views.claude.update(items: page.claudeLayer, dark: page.usesDarkInkPalette(appDark: dark), doubts: page.doubts ?? []) }
@@ -567,12 +631,20 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
         footer.text = "Pull up to add a page"
     }
 
+    func knowsPage(_ pageId: String) -> Bool {
+        pages.contains(where: { $0.id == pageId })
+            || deferredNotebook?.pages.contains(where: { $0.id == pageId }) == true
+    }
+
     /// Claude drew on a page: refresh just that page's layer.
     func reloadClaudeLayer(pageId: String) {
-        guard pages.contains(where: { $0.id == pageId }) else { return }
+        guard knowsPage(pageId) else { return }
         Task {
-            guard let items = try? await API.current?.claudeItems(pageId: pageId),
-                  let i = self.pages.firstIndex(where: { $0.id == pageId }) else { return }
+            guard let items = try? await API.current?.claudeItems(pageId: pageId) else { return }
+            if let deferredIndex = self.deferredNotebook?.pages.firstIndex(where: { $0.id == pageId }) {
+                self.deferredNotebook?.pages[deferredIndex].claudeLayer = items
+            }
+            guard let i = self.pages.firstIndex(where: { $0.id == pageId }) else { return }
             self.pages[i].claudeLayer = items
             self.onScreen[pageId]?.claude.update(items: items, dark: self.pages[i].usesDarkInkPalette(appDark: self.dark), doubts: self.pages[i].doubts ?? [])
             self.updateHintButtons()
@@ -580,10 +652,13 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
     }
 
     func reloadDoubts(pageId: String) {
-        guard pages.contains(where: { $0.id == pageId }) else { return }
+        guard knowsPage(pageId) else { return }
         Task {
-            guard let doubts = try? await API.current?.doubts(pageId: pageId),
-                  let i = self.pages.firstIndex(where: { $0.id == pageId }) else { return }
+            guard let doubts = try? await API.current?.doubts(pageId: pageId) else { return }
+            if let deferredIndex = self.deferredNotebook?.pages.firstIndex(where: { $0.id == pageId }) {
+                self.deferredNotebook?.pages[deferredIndex].doubts = doubts
+            }
+            guard let i = self.pages.firstIndex(where: { $0.id == pageId }) else { return }
             self.pages[i].doubts = doubts
             self.onScreen[pageId]?.claude.update(items: self.pages[i].claudeLayer, dark: self.pages[i].usesDarkInkPalette(appDark: self.dark), doubts: doubts)
         }
@@ -595,6 +670,9 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
         doubts.removeAll { $0.id == doubt.id }
         doubts.append(doubt)
         pages[index].doubts = doubts
+        if let deferredIndex = deferredNotebook?.pages.firstIndex(where: { $0.id == doubt.pageId }) {
+            deferredNotebook?.pages[deferredIndex].doubts = doubts
+        }
         onScreen[doubt.pageId]?.claude.update(items: pages[index].claudeLayer, dark: pages[index].usesDarkInkPalette(appDark: dark), doubts: doubts)
     }
 
@@ -605,7 +683,6 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
         shapes.endEditing()
         flush()
         canvas.setContentOffset(canvas.contentOffset, animated: false)
-        toolPicker.setVisible(false, forFirstResponder: canvas)
         let overlay = RegionSelectionView(frame: canvas.frame)
         overlay.onAccessibleSelect = { [weak self] in
             guard let self, let page = self.currentPage else { return }
@@ -644,13 +721,14 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
             overlay.trailingAnchor.constraint(equalTo: canvas.trailingAnchor),
         ])
         selectionOverlay = overlay
+        applyToolPickerVisibility()
     }
 
     func cancelDoubtSelection() {
         guard selectionOverlay != nil else { return }
         selectionOverlay?.removeFromSuperview()
         selectionOverlay = nil
-        toolPicker.setVisible(true, forFirstResponder: canvas)
+        applyToolPickerVisibility()
     }
 
     private func updateHintButtons() {
@@ -700,6 +778,10 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
         guard let pageIndex = pages.firstIndex(where: { $0.id == pageId }),
               let itemIndex = pages[pageIndex].claudeLayer.firstIndex(where: { $0.id == item.id }) else { return }
         pages[pageIndex].claudeLayer[itemIndex] = item
+        if let deferredPage = deferredNotebook?.pages.firstIndex(where: { $0.id == pageId }),
+           let deferredItem = deferredNotebook?.pages[deferredPage].claudeLayer.firstIndex(where: { $0.id == item.id }) {
+            deferredNotebook?.pages[deferredPage].claudeLayer[deferredItem] = item
+        }
         onScreen[pageId]?.claude.update(items: pages[pageIndex].claudeLayer, dark: pages[pageIndex].usesDarkInkPalette(appDark: dark), doubts: pages[pageIndex].doubts ?? [])
         updateHintButtons()
     }
@@ -830,13 +912,19 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
 
     private func refreshPaperSnapshots() {
         let stale = pages.filter { $0.paperSnapshotStale == true && canRefreshPaperSnapshot($0) }.map(\.id)
-        if !stale.isEmpty { PendingUploads.all.formUnion(stale); scheduleUpload(delay: 0.5) }
+        if !stale.isEmpty { PendingUploads.mark(stale, replacing: false); scheduleUpload(delay: 0.5) }
     }
 
     private func restoreBackups() {
         refreshPaperSnapshots()
-        let missing = pages.map(\.id).filter { !LocalDrawings.exists($0) }
+        let missing = pages.map(\.id).filter { id in
+            !restoringPageIds.contains(id) && deferredBackups[id] == nil
+                && !LocalDrawings.isDeleted(id) && !LocalDrawings.exists(id)
+                && !PendingPageCreations.contains(id)
+                && PendingUploads.revision(id) == nil
+        }
         guard !missing.isEmpty, let api = API.current else { return }
+        restoringPageIds.formUnion(missing)
         Task {
             let results = await withTaskGroup(of: (String, Data?, Bool).self) { group -> [(String, Data?, Bool)] in
                 for id in missing {
@@ -852,25 +940,14 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
                 for await result in group { out.append(result) }
                 return out
             }
-            var restored: [String: PKDrawing] = [:]
+            restoringPageIds.subtract(missing)
             for (id, data, reached) in results {
-                guard self.pages.contains(where: { $0.id == id }), !LocalDrawings.isDeleted(id) else { continue }
-                if let data, let drawing = try? PKDrawing(data: data) { restored[id] = drawing }
-                // The server has no ink for this page either: remember that so we don't ask again,
-                // unless the user has drawn on it in the meantime (that already saved a file).
-                else if reached && data == nil && !LocalDrawings.exists(id) && (drawings[id]?.strokes.isEmpty ?? true) {
-                    LocalDrawings.save(PKDrawing(), pageId: id)
-                }
+                guard reached, pages.contains(where: { $0.id == id }) else { continue }
+                // Cache an empty drawing when the server confirms there is no vector backup.
+                if let data { deferredBackups[id] = try? PKDrawing(data: data) }
+                else { deferredBackups[id] = PKDrawing() }
             }
-            guard !restored.isEmpty else { refreshPaperSnapshots(); return }
-            commitNow()
-            for (id, drawing) in restored where pages.contains(where: { $0.id == id }) && !LocalDrawings.isDeleted(id) && (drawings[id]?.strokes.isEmpty ?? true) {
-                drawings[id] = drawing
-                fingerprints[id] = Self.fingerprint(drawing.strokes, dy: 0)
-                LocalDrawings.save(drawing, pageId: id)
-            }
-            rebuildCanvasDrawing()
-            refreshPaperSnapshots()
+            applyDeferredCanvasChanges()
         }
     }
 
@@ -975,8 +1052,91 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
 
     // MARK: Saving and syncing
 
+    private var shouldDeferCanvasChanges: Bool {
+        let gesture = canvas.drawingGestureRecognizer.state
+        return usingCanvasTool || shapes.isDragging || canvasSettledTask != nil
+            || gesture == .began || gesture == .changed
+    }
+
+    func performPageCommand(_ command: @escaping () -> Void) {
+        if shouldDeferCanvasChanges {
+            deferredPageCommand = command
+        } else {
+            deferredPageCommand = nil
+            command()
+        }
+    }
+
+    func cancelDeferredPageCommand() {
+        deferredPageCommand = nil
+    }
+
+    private func canvasInputEnded() {
+        // PencilKit may publish the final stroke just after its end callback.
+        canvasSettledTask?.cancel()
+        canvasSettledTask = Task { [weak self] in
+            try? await Task.sleep(for: Self.inkCommitDelay)
+            guard !Task.isCancelled, let self else { return }
+            self.canvasSettledTask = nil
+            self.applyDeferredCanvasChanges()
+        }
+    }
+
+    private func applyDeferredCanvasChanges() {
+        guard !shouldDeferCanvasChanges else { return }
+        defer {
+            if let command = deferredPageCommand {
+                deferredPageCommand = nil
+                commitNow()
+                command()
+            }
+        }
+        let deleted = deferredDeletedPageIds
+        deferredDeletedPageIds.removeAll()
+        if var notebook = deferredNotebook {
+            deferredNotebook = nil
+            notebook.pages.removeAll { deleted.contains($0.id) }
+            setNotebook(notebook)
+        } else if !deleted.isEmpty {
+            discardPages(Array(deleted))
+        }
+        if let id = deferredRevealPageId {
+            deferredRevealPageId = nil
+            reveal(pageId: id)
+        }
+        guard !deferredBackups.isEmpty else { return }
+        let backups = deferredBackups
+        deferredBackups.removeAll()
+        commitNow()
+        var needsRebuild = false
+        for (id, drawing) in backups {
+            // A local edit or erasure made while the request was in flight takes precedence.
+            guard pages.contains(where: { $0.id == id }), !LocalDrawings.exists(id),
+                  !unsavedDrawingIds.contains(id), PendingUploads.revision(id) == nil,
+                  drawings[id]?.strokes.isEmpty != false,
+                  LocalDrawings.save(drawing, pageId: id) else { continue }
+            drawings[id] = drawing
+            fingerprints[id] = Self.fingerprint(drawing.strokes, dy: 0)
+            if !drawing.strokes.isEmpty { needsRebuild = true }
+        }
+        if needsRebuild { rebuildCanvasDrawing() }
+        refreshPaperSnapshots()
+    }
+
     func canvasViewDidBeginUsingTool(_ canvasView: PKCanvasView) {
+        usingCanvasTool = true
         closeHintPad()
+    }
+
+    func canvasViewDidEndUsingTool(_ canvasView: PKCanvasView) {
+        usingCanvasTool = false
+        canvasInputEnded()
+    }
+
+    @objc private func canvasDrawingGestureChanged(_ gesture: UIGestureRecognizer) {
+        guard usingCanvasTool, gesture.state == .cancelled || gesture.state == .failed else { return }
+        usingCanvasTool = false
+        canvasInputEnded()
     }
 
     func canvasViewDrawingDidChange(_ canvasView: PKCanvasView) {
@@ -984,10 +1144,11 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
         shapes.drawingDidChange()
         // A dragged shape is lifted out of the ink until it's dropped; that drop saves it.
         guard !shapes.isDragging else { return }
+        if canvasSettledTask != nil { canvasInputEnded() }
         onSyncState?("unsynced")
         commitTask?.cancel()
         commitTask = Task {
-            try? await Task.sleep(for: .milliseconds(350))
+            try? await Task.sleep(for: Self.inkCommitDelay)
             guard !Task.isCancelled else { return }
             self.commitNow()
         }
@@ -1003,18 +1164,28 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
             buckets[NotebookLayout.page(forStrokeAt: stroke.renderBounds.midY, count: pages.count)].append(stroke)
         }
         var changed = false
-        for (i, page) in pages.enumerated() {
+        for (i, page) in pages.enumerated() where !LocalDrawings.isDeleted(page.id) {
             let dy = NotebookLayout.offset(i)
             let fp = Self.fingerprint(buckets[i], dy: dy)
-            guard fp != fingerprints[page.id] else { continue }
+            guard fp != fingerprints[page.id] || unsavedDrawingIds.contains(page.id) else { continue }
             let drawing = PKDrawing(strokes: buckets[i]).transformed(using: CGAffineTransform(translationX: 0, y: -dy))
             drawings[page.id] = drawing
+            // Persist the retry marker before the drawing. A crash between writes can
+            // repeat the previous saved revision, but cannot strand newly saved ink.
+            guard PendingUploads.mark([page.id]), LocalDrawings.save(drawing, pageId: page.id) else {
+                unsavedDrawingIds.insert(page.id)
+                continue
+            }
             fingerprints[page.id] = fp
-            LocalDrawings.save(drawing, pageId: page.id)
-            PendingUploads.all.insert(page.id)
+            unsavedDrawingIds.remove(page.id)
             changed = true
         }
-        if changed { scheduleUpload(delay: 1.5) } else if pendingIds.isEmpty { onSyncState?("synced") }
+        if changed { scheduleUpload(delay: 1.5) }
+        if pages.contains(where: { unsavedDrawingIds.contains($0.id) }) {
+            onSyncState?("offline")
+        } else if pendingIds.isEmpty && !pages.contains(where: { PendingPageCreations.contains($0.id) }) {
+            onSyncState?("synced")
+        }
     }
 
     /// Cheap change detector for a page's strokes. Positions are rounded so moving ink between notebook and
@@ -1046,24 +1217,27 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
         return PendingUploads.all.filter { ids.contains($0) }
     }
 
+    private var readyUploadIds: Set<String> {
+        pendingIds.filter { !PendingPageCreations.contains($0) && !unsavedDrawingIds.contains($0) }
+    }
+
     /// Capture current ink, cancel queued work and wait out any request already in
     /// flight. Explicit deletion may discard unsynced ink, so it does not upload.
     func pauseUploads() async {
-        let previous = uploadTask
-        previous?.cancel()
+        uploadsPaused = true
         commitNow()
-        let queued = uploadTask
-        queued?.cancel()
-        await previous?.value
-        await queued?.value
-        uploadTask = nil
+        let active = uploadTask
+        if !uploading { active?.cancel(); uploadTask = nil }
+        await active?.value
     }
 
     /// Duplicating a page must use its latest saved handwriting, not an older backup.
     func flushAndWait() async throws {
         await pauseUploads()
-        await uploadPending()
-        if !pendingIds.isEmpty {
+        uploadsPaused = false
+        resumePendingUploads()
+        await uploadTask?.value
+        if !pendingIds.isEmpty || pages.contains(where: { unsavedDrawingIds.contains($0.id) || PendingPageCreations.contains($0.id) }) {
             throw NSError(domain: "ClaudeBook", code: 1, userInfo: [NSLocalizedDescriptionKey: "Couldn't save the latest handwriting. Check your connection and try again."])
         }
     }
@@ -1071,8 +1245,13 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
     /// Called after confirmed deletion, before the editor's final disappearance flush.
     func discardPages(_ ids: [String]) {
         let removed = Set(ids)
+        if shouldDeferCanvasChanges {
+            deferredDeletedPageIds.formUnion(removed)
+            return
+        }
         guard pages.contains(where: { removed.contains($0.id) }) else { return }
-        commitTask?.cancel(); uploadTask?.cancel(); viewTask?.cancel()
+        commitNow()
+        viewTask?.cancel()
         pages.removeAll { removed.contains($0.id) }
         for id in ids {
             drawings.removeValue(forKey: id); fingerprints.removeValue(forKey: id)
@@ -1084,17 +1263,31 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
         rebuildCanvasDrawing()
         layoutContent()
         updateHintButtons()
+        updateCurrentPage(force: true)
+        if !pendingIds.isEmpty { scheduleUpload(delay: 0.2) }
     }
 
     /// Upload right away (used when leaving the notebook or the app going to background).
     func flush() {
+        uploadsPaused = false
         commitNow()
-        if !pendingIds.isEmpty { scheduleUpload(delay: 0) }
+        resumePendingUploads()
     }
 
-    private func scheduleUpload(delay: Double) {
+    func resumePendingUploads() {
+        if !readyUploadIds.isEmpty {
+            scheduleUpload(delay: 0)
+        } else if pages.contains(where: { unsavedDrawingIds.contains($0.id) }) {
+            onSyncState?("offline")
+        } else {
+            onSyncState?(pendingIds.isEmpty && !pages.contains(where: { PendingPageCreations.contains($0.id) }) ? "synced" : "unsynced")
+        }
+    }
+
+    private func scheduleUpload(delay: Double, retry: Bool = false) {
+        guard !uploadsPaused, !uploading else { return }
         uploadTask?.cancel()
-        onSyncState?("unsynced")
+        if !retry { onSyncState?("unsynced") }
         uploadTask = Task {
             if delay > 0 { try? await Task.sleep(for: .seconds(delay)) }
             guard !Task.isCancelled else { return }
@@ -1103,47 +1296,60 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate {
     }
 
     private func uploadPending() async {
-        guard let api = API.current else { return }
+        guard let api = API.current else {
+            uploadTask = nil
+            if !readyUploadIds.isEmpty { onSyncState?("offline") }
+            return
+        }
+        uploading = true
         onSyncState?("syncing")
         var failed = false
-        for id in pendingIds {
-            guard !Task.isCancelled else { return }
-            guard !LocalDrawings.isDeleted(id), let page = pages.first(where: { $0.id == id }) else { continue }
-            let drawing = drawings[id] ?? PKDrawing()
-            PendingUploads.all.remove(id)
-            do {
-                // Resolve the PDF here, not earlier: it may still have been downloading then.
-                var pdf: CGPDFPage?
-                if let ref = page.pdf { pdf = await PDFCache.page(ref) }
-                let boxes = await PageSnapshot.recognizeText(drawing: drawing)
-                // Without the PDF the snapshot would hide it from Claude, so let the server's own render stand.
-                if page.pdf == nil || pdf != nil {
-                    let png = PageSnapshot.png(drawing: drawing, background: page.background, paper: page.paper, pdf: pdf)
-                    try await api.uploadSnapshot(pageId: id, png: png, textBoxes: boxes, strokeCount: drawing.strokes.count)
-                }
-                try await api.uploadDrawing(pageId: id, data: drawing.dataRepresentation(), strokeCount: drawing.strokes.count)
-            } catch {
-                if let apiError = error as? APIError, apiError.status == 404 {
-                    LocalDrawings.remove([id])
-                    continue
-                }
-                PendingUploads.all.insert(id)
-                if Task.isCancelled { return }
-                failed = true
+        var waiting = false
+        defer {
+            uploading = false
+            uploadTask = nil
+            if !Task.isCancelled && !uploadsPaused {
+                let pendingPages = pages.contains { PendingPageCreations.contains($0.id) }
+                let localError = pages.contains { unsavedDrawingIds.contains($0.id) }
+                let hasPendingWork = !pendingIds.isEmpty || pendingPages
+                onSyncState?(failed || localError ? "offline" : hasPendingWork ? "unsynced" : "synced")
+                if !readyUploadIds.isEmpty { scheduleUpload(delay: failed || waiting ? 20 : 0.5, retry: true) }
             }
         }
-        guard !Task.isCancelled else { return }
-        if failed {
-            onSyncState?("offline")
-            // Try again in a bit; edits in the meantime reschedule sooner.
-            uploadTask = Task {
-                try? await Task.sleep(for: .seconds(20))
-                guard !Task.isCancelled else { return }
-                await self.uploadPending()
+        for id in readyUploadIds {
+            guard !Task.isCancelled, !uploadsPaused else { return }
+            guard let revision = PendingUploads.revision(id), let page = pages.first(where: { $0.id == id }) else { continue }
+            guard let drawing = LocalDrawings.load(id) else { failed = true; continue }
+            guard PendingUploads.begin(id) else { waiting = true; continue }
+            defer { PendingUploads.end(id) }
+            do {
+                // Resolve the PDF here, not earlier: it may still have been downloading then.
+                var pdf: CGPDFPage? = nil
+                if let ref = page.pdf { pdf = await PDFCache.page(ref) }
+                let vectorOnly = page.pdf != nil && pdf == nil
+                let boxes = vectorOnly ? [] : await PageSnapshot.recognizeText(drawing: drawing)
+                guard !Task.isCancelled, !uploadsPaused else { return }
+                guard PendingUploads.revision(id) == revision, !unsavedDrawingIds.contains(id) else { continue }
+                if vectorOnly {
+                    // Back up the raw drawing now. Leave the paired revision pending until
+                    // the PDF can be rendered, so the assistant keeps the previous snapshot.
+                    waiting = true
+                    if !revision.vectorBackedUp {
+                        try await api.uploadDrawing(pageId: id, data: drawing.dataRepresentation(), strokeCount: drawing.strokes.count,
+                                                    order: ClientSequence.next())
+                        PendingUploads.acknowledge(id, revision: revision, vectorOnly: true)
+                    }
+                } else {
+                    let png = PageSnapshot.png(drawing: drawing, background: page.background, paper: page.paper, pdf: pdf)
+                    try await api.uploadInk(pageId: id, png: png, drawing: drawing.dataRepresentation(),
+                                            textBoxes: boxes, strokeCount: drawing.strokes.count, order: ClientSequence.next())
+                    PendingUploads.acknowledge(id, revision: revision, vectorOnly: false)
+                }
+            } catch {
+                // HTTP errors leave ink queued. Only a confirmed server deletion
+                // can remove the local drawing and its retry record.
+                failed = true
             }
-        } else {
-            onSyncState?(pendingIds.isEmpty ? "synced" : "unsynced")
-            uploadTask = nil
         }
     }
 }
