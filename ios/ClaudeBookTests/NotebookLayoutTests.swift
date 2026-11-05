@@ -97,6 +97,37 @@ final class NotebookLayoutTests: XCTestCase {
         XCTAssertFalse(PendingPageCreations.contains(draft.id))
     }
 
+    @MainActor
+    func testAuthoritativeDeletionDropsOnlyInactiveBlankPendingPages() throws {
+        let blank = Page.blank(background: .grid)
+        let active = Page.blank(background: .grid)
+        let queued = Page.blank(background: .grid)
+        let drawn = Page.blank(background: .grid)
+        let ids = [blank.id, active.id, queued.id, drawn.id]
+        let notebook = Notebook(id: UUID().uuidString, title: "Drafts", pages: [],
+                                createdAt: blank.updatedAt, updatedAt: blank.updatedAt)
+        defer {
+            for id in ids { try? PendingPageCreations.confirm(id, in: notebook.id) }
+            LocalDrawings.remove(ids)
+        }
+        for page in [blank, active, queued, drawn] {
+            try PendingPageCreations.add(.init(page: page, afterPageId: nil, afterIndex: 0), to: notebook)
+        }
+        XCTAssertTrue(PendingUploads.mark([queued.id]))
+        let points = [CGPoint(x: 20, y: 20), CGPoint(x: 60, y: 60)].enumerated().map { index, point in
+            PKStrokePoint(location: point, timeOffset: Double(index) * 0.01, size: CGSize(width: 5, height: 5),
+                          opacity: 1, force: 1, azimuth: 0, altitude: .pi / 2)
+        }
+        let stroke = PKStroke(ink: PKInk(.pen, color: .systemBlue), path: PKStrokePath(controlPoints: points, creationDate: Date()))
+        XCTAssertTrue(LocalDrawings.save(PKDrawing(strokes: [stroke]), pageId: drawn.id))
+
+        try PendingPageCreations.pruneDeletedBlankPages(ids, activePageIds: [active.id])
+        XCTAssertFalse(PendingPageCreations.contains(blank.id))
+        XCTAssertTrue(PendingPageCreations.contains(active.id))
+        XCTAssertTrue(PendingPageCreations.contains(queued.id))
+        XCTAssertTrue(PendingPageCreations.contains(drawn.id))
+    }
+
     func testBottomSearchMatchKeepsViewportCenterOnMatchingPage() {
         let region = PageRegion(x: 120, y: 1200, w: 650, h: 45)
         let viewport: CGFloat = 1100

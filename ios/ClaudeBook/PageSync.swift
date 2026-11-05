@@ -197,6 +197,29 @@ enum PendingPageCreations {
         drafts = updated
     }
 
+    /// A lost create response can leave a draft for a page the server later deleted.
+    /// Keep local ink, retry records, and pages that may still have an unfinished stroke.
+    static func pruneDeletedBlankPages(_ ids: [String], activePageIds: Set<String>) throws {
+        let candidates = Set(ids).subtracting(activePageIds)
+        guard !candidates.isEmpty else { return }
+        var updated = drafts
+        var changed = false
+        for (id, var draft) in drafts {
+            let count = draft.creations.count
+            draft.creations.removeAll { creation in
+                let pageId = creation.page.id
+                guard candidates.contains(pageId), PendingUploads.revision(pageId) == nil else { return false }
+                return !LocalDrawings.exists(pageId)
+            }
+            guard draft.creations.count != count else { continue }
+            changed = true
+            updated[id] = draft.creations.isEmpty ? nil : draft
+        }
+        guard changed else { return }
+        try SyncQueueFile.write(updated, file)
+        drafts = updated
+    }
+
     static func merging(into notebook: Notebook) -> Notebook {
         var result = notebook
         for creation in pending(notebook.id) where !result.pages.contains(where: { $0.id == creation.page.id }) {

@@ -598,16 +598,13 @@ struct NotebookEditor: View {
                 var serverPages = list.notebooks.first(where: { $0.id == notebookId })?.pages
                 for creation in queued where livePageIds.contains(creation.page.id) && !deletedPageIds.contains(creation.page.id) {
                     let pageId = creation.page.id
-                    try PendingPageCreations.confirm(pageId, in: notebookId)
-                    notebookLoadGeneration += 1
+                    try confirmPageCreation(pageId, inThisNotebook: serverPages?.contains(where: { $0.id == pageId }) == true)
                     confirmed = true
-                    if controller.currentPage?.id == pageId, serverPages?.contains(where: { $0.id == pageId }) == true {
-                        controller.reportView(immediate: true)
-                    }
                 }
                 for creation in queued where !livePageIds.contains(creation.page.id) || deletedPageIds.contains(creation.page.id) {
                     guard !Task.isCancelled else { return }
                     let page = creation.page
+                    guard PendingPageCreations.contains(page.id) else { continue }
                     guard let existing = serverPages, !deletedPageIds.contains(page.id) else {
                         blocked.insert(page.id)
                         notice = "A pending page is unavailable on the server. Its handwriting is saved on this iPad."
@@ -615,8 +612,11 @@ struct NotebookEditor: View {
                     }
                     let index = creation.insertionIndex(in: existing)
                     do {
-                        // Keep the local record until a fresh list confirms this ID is live.
                         try await api.addPage(page, notebookId: notebookId, afterIndex: index - 1)
+                        // Persist an explicit acknowledgment before observing cancellation
+                        // or awaiting another refresh.
+                        try confirmPageCreation(page.id, inThisNotebook: true)
+                        confirmed = true
                         serverPages?.insert(page, at: index)
                     } catch let error as APIError where [400, 401, 403, 404, 410, 422].contains(error.status)
                         && !error.body.contains("already exists") {
@@ -629,6 +629,7 @@ struct NotebookEditor: View {
                 retry = true
                 sync = "offline"
             }
+            guard !Task.isCancelled else { return }
             if confirmed {
                 controller.resumePendingUploads()
                 await load()
@@ -639,6 +640,14 @@ struct NotebookEditor: View {
             } else {
                 delay = 2
             }
+        }
+    }
+
+    private func confirmPageCreation(_ pageId: String, inThisNotebook: Bool) throws {
+        try PendingPageCreations.confirm(pageId, in: notebookId)
+        notebookLoadGeneration += 1
+        if !Task.isCancelled, inThisNotebook, controller.currentPage?.id == pageId {
+            controller.reportView(immediate: true)
         }
     }
 

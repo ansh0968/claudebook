@@ -88,7 +88,7 @@ final class LibraryModel: ObservableObject {
                 confirmDeletedPages(deleted)
             } else {
                 for removed in notebooks where !liveIds.contains(removed.id) {
-                    confirmDeletedPages(removed.pages.map(\.id).filter { !livePageIds.contains($0) })
+                    confirmDeletedPages(removed.pages.map(\.id).filter { !livePageIds.contains($0) }, authoritative: false)
                 }
             }
             notebooks = list.notebooks + PendingPageCreations.localNotebooks.filter { !liveIds.contains($0.id) }
@@ -112,7 +112,11 @@ final class LibraryModel: ObservableObject {
         }
     }
 
-    func confirmDeletedPages(_ pageIds: [String]) {
+    func confirmDeletedPages(_ pageIds: [String], authoritative: Bool = true) {
+        if authoritative {
+            let activePageIds = Set(activeCanvas?.pages.map(\.id) ?? [])
+            try? PendingPageCreations.pruneDeletedBlankPages(pageIds, activePageIds: activePageIds)
+        }
         let ids = pageIds.filter { !PendingPageCreations.contains($0) && !LocalDrawings.confirmedDeletedIds.contains($0) }
         guard !ids.isEmpty else { return }
         LocalDrawings.remove(ids)
