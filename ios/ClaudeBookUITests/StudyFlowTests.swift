@@ -605,10 +605,17 @@ final class StudyFlowTests: XCTestCase {
 
     private func eventually<T>(_ probe: () async throws -> T?) async throws -> T {
         let deadline = Date().addingTimeInterval(10)
+        var lastTimeout: URLError?
         while Date() < deadline {
-            if let value = try await probe() { return value }
+            do {
+                if let value = try await probe() { return value }
+                lastTimeout = nil
+            } catch let error as URLError where error.code == .timedOut {
+                lastTimeout = error
+            }
             try await Task.sleep(for: .milliseconds(150))
         }
+        if let lastTimeout { throw lastTimeout }
         XCTFail("Server state did not change within 10 seconds")
         throw SmokeError.timeout
     }
