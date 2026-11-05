@@ -83,7 +83,7 @@ export async function renderPage(store: Store, page: Page, opts: { grid?: boolea
   // Base: the app's snapshot (paper + PDF + ink) if it has sent one, else the bare PDF page, else paper.
   const snap = store.snapshotPath(page.id);
   const base = fs.existsSync(snap)
-    ? sharp(await sharp(snap).resize(W, H, { fit: "fill" }).flatten({ background: "#ffffff" }).png().toBuffer())
+    ? sharp(await sharp(fs.readFileSync(snap)).resize(W, H, { fit: "fill" }).flatten({ background: "#ffffff" }).png().toBuffer())
     : page.pdf
       ? sharp(await sharp(await rasterizePdfPage(store, page.pdf.file, page.pdf.page)).resize(W, H).png().toBuffer())
       : sharp(Buffer.from(svgDoc(backgroundSvg(page), page.paper === undefined && ["blank", "lined", "grid", "dotted"].includes(page.background) ? "#ffffff" : paperColor(page.paper), k)));

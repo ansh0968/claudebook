@@ -5,6 +5,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import http from "node:http";
 import path from "node:path";
+import { pipeline } from "node:stream";
 import { fileURLToPath } from "node:url";
 import express, { type NextFunction, type Request, type Response } from "express";
 import { WebSocketServer, type WebSocket } from "ws";
@@ -15,7 +16,7 @@ import { buildMcpServer } from "./mcp.js";
 import { registerPageRoutes } from "./page-management.js";
 import { PDF_ID, pdfPath, savePdf } from "./pdf.js";
 import { claudeLayerSvg, renderPage } from "./render.js";
-import { Store, type Background, type Notebook, type TextBox } from "./store.js";
+import { DeletedPageError, Store, type Background, type ClientSequence, type Notebook, type TextBox } from "./store.js";
 import { parsePageRegion } from "./regions.js";
 
 const PORT = Number(process.env.PORT ?? 8787);
@@ -95,7 +96,47 @@ app.all("/mcp/:secret", (_req, res) => res.status(405).set("Allow", "POST").end(
 
 // --- REST API for the iPad app and the web viewer ---
 const api = express.Router();
-api.use(requireToken, express.json({ limit: "25mb" }));
+api.use(requireToken);
+
+const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+const isBase64 = (value: unknown): value is string =>
+  typeof value === "string" && value.length % 4 === 0 && /^[A-Za-z0-9+/]+={0,2}$/.test(value);
+function isTextBox(value: unknown): value is TextBox {
+  if (typeof value !== "object" || value === null) return false;
+  const { text, alts, confidence, x, y, w, h } = value as Partial<TextBox>;
+  return typeof text === "string" && [x, y, w, h].every(Number.isFinite)
+    && (alts === undefined || (Array.isArray(alts) && alts.every(alt => typeof alt === "string")))
+    && (confidence === undefined || Number.isFinite(confidence));
+}
+
+function writeInkResponse(pageId: string, res: Response, write: () => void) {
+  if (!store.findPage(pageId)) return res.status(404).json({ error: "no such page" });
+  try {
+    write();
+    res.json({ ok: true });
+  } catch (error) {
+    console.error("could not save page ink", error);
+    res.status(500).json({ error: "could not save page ink" });
+  }
+}
+
+/** A single request publishes the complete revision. Larger limits only apply to this route. */
+api.put("/pages/:id/ink", express.json({ limit: "92mb" }), (req, res) => {
+  const { png, drawing, textBoxes, strokeCount, clientOrder } = (req.body ?? {}) as Record<string, unknown>;
+  const count = strokeCountFrom(strokeCount);
+  if (!isBase64(png) || !isBase64(drawing) || !Array.isArray(textBoxes) || !textBoxes.every(isTextBox) || count === undefined) {
+    return res.status(400).json({ error: "send a PNG, a drawing, textBoxes and a strokeCount" });
+  }
+  if (clientOrder !== undefined && !isClientSequence(clientOrder)) return res.status(400).json({ error: "invalid clientOrder" });
+  const snapshotBytes = Buffer.from(png, "base64"), drawingBytes = Buffer.from(drawing, "base64");
+  if (!snapshotBytes.subarray(0, PNG_SIGNATURE.length).equals(PNG_SIGNATURE)) return res.status(400).json({ error: "invalid PNG" });
+  if (drawingBytes.length > 50 * 1024 * 1024 || png.length + Buffer.byteLength(JSON.stringify(textBoxes)) > 25 * 1024 * 1024) {
+    return res.status(413).json({ error: "snapshot or drawing exceeds its size limit" });
+  }
+  writeInkResponse(req.params.id, res, () => store.saveInk(req.params.id, snapshotBytes, drawingBytes, textBoxes, count, clientOrder));
+});
+
+api.use(express.json({ limit: "25mb" }));
 registerPageRoutes(api, store);
 registerImageRoutes(api, store);
 
@@ -111,20 +152,33 @@ api.post("/pages/background", (req, res) => {
   } catch (error) { res.status(400).json({ error: (error as Error).message }); }
 });
 
-api.get("/notebooks", (_req, res) => res.json({ notebooks: store.listNotebooks().map(withExpiry), folders: store.listFolders(), view: store.view() }));
+api.get("/notebooks", (_req, res) => res.json({
+  notebooks: store.listNotebooks().map(withExpiry),
+  folders: store.listFolders(),
+  view: store.view(),
+  deletedPageIds: store.deletedPageIds(),
+}));
 
 api.get("/search", (req, res) => {
   if (typeof req.query.q !== "string" || !req.query.q.trim()) return res.status(400).json({ error: "q must be nonempty text" });
   res.json({ results: store.searchNotes(req.query.q) });
 });
 
+function isClientSequence(value: unknown): value is ClientSequence {
+  if (typeof value !== "object" || value === null) return false;
+  const { clientId, sequence } = value as Partial<ClientSequence>;
+  return typeof clientId === "string" && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(clientId)
+    && typeof sequence === "number" && Number.isSafeInteger(sequence) && sequence > 0;
+}
+
 api.post("/notebooks", (req, res) => {
-  const { title, pages, background, paper, folderId, scratch } = req.body as { title?: string; pages?: number; background?: Background; paper?: Paper; folderId?: string; scratch?: boolean };
+  const { title, pages, background, paper, folderId, scratch, activateView } = req.body as { title?: string; pages?: number; background?: Background; paper?: Paper; folderId?: string; scratch?: boolean; activateView?: unknown };
   if (folderId !== undefined && (typeof folderId !== "string" || (folderId && !store.getFolder(folderId)))) return res.status(400).json({ error: "folderId must name an existing folder" });
   if (scratch && folderId) return res.status(400).json({ error: "scratch pads live outside folders" });
   if (background !== undefined && !isBackground(background)) return res.status(400).json({ error: "invalid background" });
   if (paper !== undefined && !isPaper(paper)) return res.status(400).json({ error: "invalid paper" });
-  const nb = store.createNotebook(title || (scratch ? "Scratch pad" : "Untitled"), pages ?? 1, background ?? (scratch ? "grid" : "blank"), { folderId: folderId || undefined, scratch: scratch === true, paper });
+  if (activateView !== undefined && !isClientSequence(activateView)) return res.status(400).json({ error: "invalid view report" });
+  const nb = store.createNotebook(title || (scratch ? "Scratch pad" : "Untitled"), pages ?? 1, background ?? (scratch ? "grid" : "blank"), { folderId: folderId || undefined, scratch: scratch === true, paper, activateView });
   res.json(withExpiry(nb));
 });
 
@@ -225,7 +279,8 @@ api.delete("/notebooks/:id", (req, res) => {
 });
 
 api.post("/notebooks/:id/pages", (req, res) => {
-  const { count, afterIndex, background, paper, pageIds } = req.body as { count?: number; afterIndex?: number; background?: Background; paper?: Paper; pageIds?: string[] };
+  const { count, afterIndex, background, paper, pageIds } = (req.body ?? {}) as { count?: number; afterIndex?: number; background?: Background; paper?: Paper; pageIds?: string[] };
+  if (!store.getNotebook(req.params.id)) return res.status(404).json({ error: "no such notebook" });
   try {
     if (count !== undefined && (!Number.isInteger(count) || count < 1 || count > 100)) return res.status(400).json({ error: "count must be an integer from 1 to 100" });
     if (background !== undefined && !isBackground(background)) return res.status(400).json({ error: "invalid background" });
@@ -237,45 +292,57 @@ api.post("/notebooks/:id/pages", (req, res) => {
     const pages = Array.from({ length: count ?? 1 }, () => store.newPage(background ?? "blank", paper));
     store.insertPages(req.params.id, pages, afterIndex);
     res.json({ pages });
-  } catch (e) {
-    res.status(400).json({ error: String(e) });
+  } catch (error) {
+    if (error instanceof DeletedPageError) return res.status(410).json({ error: error.message });
+    if (error instanceof RangeError) return res.status(400).json({ error: error.message });
+    console.error("could not create pages", error);
+    res.status(500).json({ error: "could not create pages" });
   }
 });
 
 /** The app reports what's on screen so Claude knows what "this page" means. */
 api.post("/view", (req, res) => {
-  const { notebookId, pageId } = req.body as { notebookId: string; pageId: string };
+  const { notebookId, pageId, report } = req.body as { notebookId: string; pageId: string; report?: unknown };
+  if (report !== undefined && !isClientSequence(report)) return res.status(400).json({ error: "invalid view report" });
   const found = store.findPage(pageId);
   if (!found) return res.status(404).json({ error: "no such page" });
   if (found.notebook.id !== notebookId) return res.status(400).json({ error: "page does not belong to this notebook" });
-  store.setView(notebookId, pageId);
+  store.setView(notebookId, pageId, report);
   res.json(store.view());
 });
 
 /** The app uploads a render of the user's ink (PNG, base64) plus on-device handwriting recognition. */
 api.put("/pages/:id/snapshot", (req, res) => {
-  const { png, textBoxes, strokeCount } = req.body as { png: string; textBoxes?: TextBox[]; strokeCount?: number };
-  try {
-    store.saveSnapshot(req.params.id, Buffer.from(png, "base64"), textBoxes, strokeCountFrom(strokeCount));
-    res.json({ ok: true });
-  } catch (e) {
-    res.status(404).json({ error: String(e) });
+  const { png, textBoxes, strokeCount } = (req.body ?? {}) as { png?: unknown; textBoxes?: unknown; strokeCount?: number };
+  if (typeof png !== "string" || (textBoxes !== undefined && (!Array.isArray(textBoxes) || !textBoxes.every(isTextBox)))) {
+    return res.status(400).json({ error: "send a PNG and optional textBoxes" });
   }
+  writeInkResponse(req.params.id, res, () => store.saveSnapshot(req.params.id, Buffer.from(png, "base64"), textBoxes, strokeCountFrom(strokeCount)));
 });
 
 api.put("/pages/:id/drawing", express.raw({ type: "*/*", limit: "50mb" }), (req, res) => {
-  try {
-    store.saveDrawing(req.params.id, req.body as Buffer, strokeCountFrom(req.query.strokes === undefined ? undefined : Number(req.query.strokes)));
-    res.json({ ok: true });
-  } catch (e) {
-    res.status(404).json({ error: String(e) });
-  }
+  if (!Buffer.isBuffer(req.body)) return res.status(400).json({ error: "send the raw drawing bytes" });
+  const { clientId, sequence, strokes } = req.query;
+  const order = clientId === undefined && sequence === undefined ? undefined : { clientId, sequence: Number(sequence) };
+  if (order !== undefined && !isClientSequence(order)) return res.status(400).json({ error: "invalid ink upload order" });
+  const count = strokeCountFrom(strokes === undefined ? undefined : Number(strokes));
+  writeInkResponse(req.params.id, res, () => store.saveDrawing(req.params.id, req.body, count, order));
 });
 
-api.get("/pages/:id/drawing", (req, res) => {
+api.get("/pages/:id/drawing", (req, res, next) => {
   if (!store.findPage(req.params.id)) return res.status(404).end();
   const file = store.drawingPath(req.params.id);
-  fs.existsSync(file) ? res.type("application/octet-stream").sendFile(file) : res.status(404).end();
+  let fd: number;
+  try { fd = fs.openSync(file, "r"); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return res.status(404).end();
+    return next(error);
+  }
+  // Open the file before another request can publish a new revision and unlink it.
+  res.type("application/octet-stream").set("Cache-Control", "no-store");
+  pipeline(fs.createReadStream(file, { fd }), res, error => {
+    if (error && !res.destroyed) next(error);
+  });
 });
 
 api.get("/pages/:id/render.png", async (req, res) => {

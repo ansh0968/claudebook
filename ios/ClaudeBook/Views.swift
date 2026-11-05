@@ -150,12 +150,12 @@ struct NotebookEditor: View {
     @State private var sync = "synced"
     @State private var showClaude = true
     @State private var pencilOnly = true
+    @State private var toolPickerVisible = true
     @AppStorage("snapShapes") private var snapShapes = true
     @State private var showPages = false
     @State private var showPaperPicker = false
-    @State private var addingPage = false
-    /// Bumped whenever the editor adds a page locally, so a notebook fetched before that can't remove it again.
-    @State private var localPageEdits = 0
+    @State private var notebookLoadGeneration = 0
+    @State private var pageCreationTask: Task<Void, Never>?
     @State private var testHooksDone = false
     @State private var askingClaude = false
     @State private var notice: String?
@@ -173,7 +173,7 @@ struct NotebookEditor: View {
                 if let notebook, notebook.pages.isEmpty {
                     CrabEmptyState(title: "No pages", message: "Add a page to start writing in this notebook.") {
                         Button("Add a page") { Task { await addPage(after: -1) } }
-                            .buttonStyle(.borderedProminent).disabled(addingPage)
+                            .buttonStyle(.borderedProminent)
                             .accessibilityIdentifier("editor.emptyAdd")
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -244,11 +244,17 @@ struct NotebookEditor: View {
                         .accessibilityIdentifier("editor.pages")
                         .disabled(notebook == nil)
                     Button { Task { await addPage(after: index) } } label: { Image(systemName: "doc.badge.plus") }
-                        .disabled(addingPage || notebook == nil)
+                        .disabled(notebook == nil)
                         .accessibilityLabel("Add a page")
                         .accessibilityIdentifier("editor.addPage")
                 }
                 ToolbarItemGroup(placement: .topBarTrailing) {
+                    Button { controller.toggleToolPicker() } label: {
+                        Image(systemName: toolPickerVisible ? "pencil.tip.crop.circle.fill" : "pencil.tip.crop.circle")
+                    }
+                    .disabled(notebook?.pages.isEmpty != false || askingClaude)
+                    .accessibilityLabel(toolPickerVisible ? "Hide PencilKit tools" : "Show PencilKit tools")
+                    .accessibilityIdentifier("editor.pencilTools")
                     if let notebook, notebook.isScratch {
                         // Scratch pads delete themselves after a week; one tap files this one as a real notebook.
                         Button { controller.flush(); library.ask(.keep(notebook)) } label: {
@@ -334,12 +340,19 @@ struct NotebookEditor: View {
             .onChange(of: showClaude) { _, v in controller.showClaude = v }
             .onChange(of: pencilOnly) { _, v in controller.pencilOnly = v }
             .onChange(of: snapShapes) { _, v in controller.snapShapes = v }
-            .onChange(of: scenePhase) { _, p in if p != .active { controller.flush() } }
+            .onChange(of: scenePhase) { _, phase in
+                controller.setViewReportingEnabled(phase == .active)
+                if phase != .active { controller.flush() }
+            }
             .task { await load() }
             .onAppear {
+                library.activeCanvas = controller
                 library.prepareNotebookDeletion = { id in if id == notebookId { await controller.pauseUploads() } }
                 library.resumeNotebookUploads = { id in if id == notebookId { controller.flush() } }
                 controller.snapShapes = snapShapes
+                controller.onToolPickerVisibilityChange = { visible in toolPickerVisible = visible }
+                toolPickerVisible = controller.toolPicker.isVisible
+                controller.setViewReportingEnabled(scenePhase == .active)
                 controller.onSyncState = { s in sync = s }
                 controller.onPageChange = { i in index = i }
                 controller.onPullToAdd = { Task { await addPage(after: controller.pages.count - 1) } }
@@ -364,8 +377,12 @@ struct NotebookEditor: View {
                 controller.onHintError = { message in notice = "Couldn’t reveal hint: \(message)" }
                 live.onEvent = { e in
                     // (Re)connected: catch up on anything Claude did while we weren't listening.
-                    if e.type == "hello" { Task { await load() }; return }
-                    if let pageId = e.pageId, controller.pages.contains(where: { $0.id == pageId }) {
+                    if e.type == "hello" {
+                        controller.reportView(immediate: true)
+                        Task { await load() }
+                        return
+                    }
+                    if let pageId = e.pageId, controller.knowsPage(pageId) {
                         if e.type == "claudeLayer" {
                             controller.reloadClaudeLayer(pageId: pageId)
                             // Skip the toast for changes made from this iPad (opening a hint, undoing a mark).
@@ -387,11 +404,19 @@ struct NotebookEditor: View {
                 }
             }
             .onReceive(NotificationCenter.default.publisher(for: .claudeOpenPage)) { note in
-                guard note.userInfo?["notebookId"] as? String == notebookId, let pageId = note.userInfo?["pageId"] as? String else { return }
+                guard note.userInfo?["notebookId"] as? String == notebookId,
+                      let pageId = note.userInfo?["pageId"] as? String,
+                      let generation = note.userInfo?["generation"] as? Int else { return }
                 Task {
                     // A page Claude just added may not be loaded yet.
-                    if !controller.pages.contains(where: { $0.id == pageId }) { await load() }
-                    if let i = controller.pages.firstIndex(where: { $0.id == pageId }) { controller.scrollTo(page: i, animated: true) }
+                    if !controller.knowsPage(pageId) { await load() }
+                    guard library.pageCommandGeneration == generation, library.activeCanvas === controller else { return }
+                    controller.performPageCommand { [weak controller, weak library] in
+                        guard let controller, let library, library.activeCanvas === controller,
+                              library.pageCommandGeneration == generation,
+                              let i = controller.pages.firstIndex(where: { $0.id == pageId }) else { return }
+                        controller.scrollTo(page: i, animated: true)
+                    }
                 }
             }
             .onReceive(NotificationCenter.default.publisher(for: .pagesDeleted)) { note in
@@ -399,6 +424,11 @@ struct NotebookEditor: View {
                 controller.discardPages(ids)
             }
             .onDisappear {
+                if library.activeCanvas === controller { library.activeCanvas = nil }
+                controller.cancelDeferredPageCommand()
+                pageCreationTask?.cancel()
+                controller.setViewReportingEnabled(false)
+                controller.onToolPickerVisibilityChange = nil
                 controller.flush(); controller.cancelDoubtSelection()
                 library.prepareNotebookDeletion = nil
                 library.resumeNotebookUploads = nil
@@ -421,26 +451,38 @@ struct NotebookEditor: View {
     }
 
     private func load() async {
+        notebookLoadGeneration += 1
+        let generation = notebookLoadGeneration
+        if notebook == nil, let local = PendingPageCreations.localNotebook(notebookId) {
+            applyNotebook(local)
+            sync = "unsynced"
+        }
         let nb: Notebook
-        let edits = localPageEdits
         do {
             guard let api = API.current else { return }
             nb = try await api.notebook(notebookId)
-            // A page was added while this was in flight; the reload after that add brings the fresh copy.
-            guard edits == localPageEdits, !addingPage else { return }
+            guard !Task.isCancelled, generation == notebookLoadGeneration else { return }
             loadError = nil
         } catch {
+            guard !Task.isCancelled, generation == notebookLoadGeneration else { return }
             if let apiError = error as? APIError, apiError.status == 404 {
-                let ids = controller.pages.map(\.id)
-                controller.discardPages(ids)
-                notebook = nil
-                dismiss()
+                if let local = PendingPageCreations.localNotebook(notebookId) {
+                    applyNotebook(local)
+                    notice = "This notebook is unavailable on the server. Your pending pages are saved on this iPad."
+                } else {
+                    notebook = nil
+                    dismiss()
+                }
                 Task { await library.load() }
-            } else { notice = error.localizedDescription; loadError = error.localizedDescription }
+            } else if notebook == nil {
+                loadError = error.localizedDescription
+            }
+            syncPendingPageCreations()
             return
         }
+        let opening = controller.notebookId != notebookId
         applyNotebook(nb)
-        if !initialJumpDone, let initialPageId, let target = nb.pages.firstIndex(where: { $0.id == initialPageId }) {
+        if !initialJumpDone, let initialPageId, let target = notebook?.pages.firstIndex(where: { $0.id == initialPageId }) {
             initialJumpDone = true
             if let initialRegion {
                 controller.scrollToRegion(pageIndex: target, region: initialRegion)
@@ -448,10 +490,14 @@ struct NotebookEditor: View {
                 controller.scrollTo(page: target, animated: false)
             }
         }
+        if opening { controller.reportView(immediate: true) }
+        controller.resumePendingUploads()
+        syncPendingPageCreations()
         runTestHooks()
     }
 
-    private func applyNotebook(_ updated: Notebook) {
+    private func applyNotebook(_ incoming: Notebook) {
+        let updated = PendingPageCreations.merging(into: incoming)
         let opening = controller.notebookId != updated.id
         let oldIndex = index
         notebook = updated
@@ -505,33 +551,95 @@ struct NotebookEditor: View {
         }
     }
 
-    /// Insert a blank page after page `i` and glide to it. The page shows up straight away and the server
-    /// is told in the background; if it says no, the page is taken back out.
+    /// Insert and persist the local page before the server request so writing can start immediately.
     private func addPage(after i: Int) async {
-        guard !addingPage, var nb = notebook else { return }
+        guard let nb = notebook else { return }
         let after = nb.pages.isEmpty ? -1 : min(max(-1, i), nb.pages.count - 1)
         let page = Page.blank(background: nb.pages.isEmpty ? .lined : nb.pages[max(0, after)].background,
                               paper: nb.pages.isEmpty ? nil : nb.pages[max(0, after)].paper)
-        addingPage = true
-        localPageEdits += 1
-        nb.pages.insert(page, at: after + 1)
-        applyNotebook(nb)
-        controller.endPullToAdd()
-        controller.reveal(pageId: page.id)
+        let anchor = nb.pages.indices.contains(after) ? nb.pages[after].id : nil
         do {
-            guard let api = API.current else { throw URLError(.notConnectedToInternet) }
-            try await api.addPage(page, notebookId: nb.id, afterIndex: after)
+            try PendingPageCreations.add(.init(page: page, afterPageId: anchor, afterIndex: after), to: nb)
+            sync = "unsynced"
+            applyNotebook(nb)
+            controller.reveal(pageId: page.id)
+            syncPendingPageCreations()
         } catch {
-            notice = "Couldn’t add a page: \(error.localizedDescription)"
-            if var current = notebook {
-                current.pages.removeAll { $0.id == page.id }
-                applyNotebook(current)
-            }
-            // If the server did get it after all, the reload below brings it (and any ink) back.
-            PendingUploads.all.remove(page.id)
+            notice = "Couldn’t save a new page on this iPad: \(error.localizedDescription)"
         }
-        addingPage = false
-        await load()
+        controller.endPullToAdd()
+    }
+
+    private func syncPendingPageCreations() {
+        guard pageCreationTask == nil, !PendingPageCreations.pending(notebookId).isEmpty else { return }
+        pageCreationTask = Task {
+            defer { pageCreationTask = nil }
+            await replayPendingPageCreations()
+        }
+    }
+
+    private func replayPendingPageCreations() async {
+        var blocked = Set<String>()
+        var delay: Double = 2
+        while !Task.isCancelled {
+            let queued = PendingPageCreations.pending(notebookId).filter { !blocked.contains($0.page.id) }
+            guard !queued.isEmpty, let api = API.current else { return }
+            var confirmed = false
+            var retry = false
+            do {
+                // A previous request may have succeeded even though its response was lost.
+                // Check all notebooks so a moved page is not recreated at its old location.
+                let list = try await api.notebooks()
+                guard !Task.isCancelled else { return }
+                let livePageIds = Set(list.notebooks.flatMap { $0.pages.map(\.id) })
+                LocalDrawings.reconcileLegacyDeletions(livePageIds: livePageIds)
+                library.confirmDeletedPages(list.deletedPageIds ?? [])
+                let deletedPageIds = Set(list.deletedPageIds ?? [])
+                var serverPages = list.notebooks.first(where: { $0.id == notebookId })?.pages
+                for creation in queued where livePageIds.contains(creation.page.id) && !deletedPageIds.contains(creation.page.id) {
+                    let pageId = creation.page.id
+                    try PendingPageCreations.confirm(pageId, in: notebookId)
+                    notebookLoadGeneration += 1
+                    confirmed = true
+                    if controller.currentPage?.id == pageId, serverPages?.contains(where: { $0.id == pageId }) == true {
+                        controller.reportView(immediate: true)
+                    }
+                }
+                for creation in queued where !livePageIds.contains(creation.page.id) || deletedPageIds.contains(creation.page.id) {
+                    guard !Task.isCancelled else { return }
+                    let page = creation.page
+                    guard let existing = serverPages, !deletedPageIds.contains(page.id) else {
+                        blocked.insert(page.id)
+                        notice = "A pending page is unavailable on the server. Its handwriting is saved on this iPad."
+                        continue
+                    }
+                    let index = creation.insertionIndex(in: existing)
+                    do {
+                        // Keep the local record until a fresh list confirms this ID is live.
+                        try await api.addPage(page, notebookId: notebookId, afterIndex: index - 1)
+                        serverPages?.insert(page, at: index)
+                    } catch let error as APIError where [400, 401, 403, 404, 410, 422].contains(error.status)
+                        && !error.body.contains("already exists") {
+                        blocked.insert(page.id)
+                        notice = "A pending page couldn’t sync. Its handwriting is saved on this iPad."
+                    }
+                }
+            } catch {
+                guard !Task.isCancelled else { return }
+                retry = true
+                sync = "offline"
+            }
+            if confirmed {
+                controller.resumePendingUploads()
+                await load()
+            }
+            if retry {
+                try? await Task.sleep(for: .seconds(delay))
+                delay = min(30, delay * 2)
+            } else {
+                delay = 2
+            }
+        }
     }
 
     private func showClaudeWriting(page: Int) {

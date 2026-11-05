@@ -54,6 +54,7 @@ final class ShapeSnapper: NSObject {
     private static let holdSlop: CGFloat = 6
 
     var enabled = true
+    var onDragEnded: (() -> Void)?
     private weak var canvas: PKCanvasView?
     private let previewView = UIView()
     private let previewLayer = CAShapeLayer()
@@ -284,8 +285,10 @@ final class ShapeSnapper: NSObject {
     }
 
     func endDrag() {
-        guard let start = dragStart, var editing, let canvas else { dragStart = nil; return }
+        guard let start = dragStart else { return }
         dragStart = nil
+        defer { onDragEnded?() }
+        guard var editing, let canvas else { return }
         let made = editing.template.strokes(for: editing.shape)
         var drawing = canvas.drawing
         drawing.strokes.append(contentsOf: made)

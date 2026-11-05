@@ -10,6 +10,21 @@ final class StudyFlowTests: XCTestCase {
     }
 
     @MainActor
+    func testPencilKitPaletteCanBeHiddenAndRestored() async throws {
+        let notebook = try await fixture()
+        try await api.setView(notebook: notebook.id, page: try XCTUnwrap(notebook.pages.first).id)
+        let app = launch()
+        defer { app.terminate() }
+        let palette = app.buttons["editor.pencilTools"]
+        try requireReady(palette)
+        for (index, label) in ["Hide PencilKit tools", "Show PencilKit tools", "Hide PencilKit tools"].enumerated() {
+            let matches = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label == %@", label), object: palette)
+            await fulfillment(of: [matches], timeout: 5)
+            if index < 2 { palette.tap() }
+        }
+    }
+
+    @MainActor
     func testAddingAPageShowsItRightAwayAndSavesItInPlace() async throws {
         let notebook: SmokeNotebook = try await api.request("notebooks", method: "POST", body: ["title": "Add page flow", "pages": 2])
         try await api.setView(notebook: notebook.id, page: notebook.pages[0].id)

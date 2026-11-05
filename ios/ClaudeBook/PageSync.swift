@@ -12,15 +12,28 @@ enum LocalDrawings {
 
     static func url(_ pageId: String) -> URL { dir.appending(path: "\(pageId).pkdrawing") }
 
-    private static let deletedKey = "deletedPageIds"
-    static func isDeleted(_ id: String) -> Bool { Set(UserDefaults.standard.stringArray(forKey: deletedKey) ?? []).contains(id) }
+    private static let legacyDeletedKey = "deletedPageIds"
+    private static let confirmedDeletedKey = "confirmedDeletedPageIds"
+    private static var legacyDeletedIds = Set(UserDefaults.standard.stringArray(forKey: legacyDeletedKey) ?? [])
+    private(set) static var confirmedDeletedIds = Set(UserDefaults.standard.stringArray(forKey: confirmedDeletedKey) ?? [])
+
+    static func isDeleted(_ id: String) -> Bool { confirmedDeletedIds.contains(id) || legacyDeletedIds.contains(id) }
+
+    /// Older builds also marked a page deleted on upload 404. A server-listed page
+    /// can be written to again, while new authoritative tombstones stay in force.
+    static func reconcileLegacyDeletions(livePageIds: Set<String>) {
+        let previous = legacyDeletedIds
+        legacyDeletedIds.subtract(livePageIds)
+        if legacyDeletedIds != previous {
+            UserDefaults.standard.set(Array(legacyDeletedIds), forKey: legacyDeletedKey)
+        }
+    }
 
     /// Only called after the server confirms deletion. Late saves and upload retries
     /// must not recreate a drawing when an editor disappears during that deletion.
     static func remove(_ ids: [String]) {
-        var deleted = Set(UserDefaults.standard.stringArray(forKey: deletedKey) ?? [])
-        deleted.formUnion(ids)
-        UserDefaults.standard.set(Array(deleted), forKey: deletedKey)
+        confirmedDeletedIds.formUnion(ids)
+        UserDefaults.standard.set(Array(confirmedDeletedIds), forKey: confirmedDeletedKey)
         PendingUploads.all.subtract(ids)
         for id in ids { try? FileManager.default.removeItem(at: url(id)) }
     }
@@ -32,21 +45,164 @@ enum LocalDrawings {
         return try? PKDrawing(data: data)
     }
 
-    static func save(_ drawing: PKDrawing, pageId: String) {
-        guard !isDeleted(pageId) else { return }
-        try? drawing.dataRepresentation().write(to: url(pageId), options: .atomic)
-        NotificationCenter.default.post(name: .localDrawingChanged, object: nil, userInfo: ["pageId": pageId])
+    @discardableResult
+    static func save(_ drawing: PKDrawing, pageId: String) -> Bool {
+        guard !isDeleted(pageId) else { return false }
+        do {
+            try drawing.dataRepresentation().write(to: url(pageId), options: .atomic)
+            NotificationCenter.default.post(name: .localDrawingChanged, object: nil, userInfo: ["pageId": pageId])
+            return true
+        } catch { return false }
     }
 }
 
-/// Pages whose ink changed but hasn't reached the server yet. Kept on disk so a page drawn on just
-/// before the app was killed still uploads next time its notebook opens.
-enum PendingUploads {
-    private static let key = "pendingUploads"
+private enum SyncQueueFile {
+    private static let directory = URL.applicationSupportDirectory.appending(path: "sync", directoryHint: .isDirectory)
 
+    static func read<T: Decodable>(_ type: T.Type, _ name: String) -> T? {
+        guard let data = try? Data(contentsOf: directory.appending(path: name)) else { return nil }
+        return try? JSONDecoder().decode(type, from: data)
+    }
+
+    static func write<T: Encodable>(_ value: T, _ name: String) throws {
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try JSONEncoder().encode(value).write(to: directory.appending(path: name), options: .atomic)
+    }
+}
+
+struct ClientSequence: Codable {
+    let clientId: String
+    private(set) var sequence: Int
+
+    private static let file = "client-sequence.json"
+    @MainActor private static var last = SyncQueueFile.read(ClientSequence.self, file)
+        ?? ClientSequence(clientId: UUID().uuidString, sequence: 0)
+
+    @MainActor static func next() throws -> ClientSequence {
+        var next = last
+        next.sequence += 1
+        try SyncQueueFile.write(next, file)
+        last = next
+        return next
+    }
+}
+
+/// Pending generations stay on disk through rendering, upload, and app termination.
+enum PendingUploads {
+    struct Revision: Codable, Equatable {
+        var id = UUID()
+        var vectorBackedUp = false
+    }
+
+    private static let file = "ink.json"
+    private static let legacyKey = "pendingUploads"
+    private static var revisions = SyncQueueFile.read([String: Revision].self, file)
+        ?? Dictionary(uniqueKeysWithValues: Set(UserDefaults.standard.stringArray(forKey: legacyKey) ?? []).map { ($0, Revision()) })
+    private static var inFlight = Set<String>()
+
+    @discardableResult
+    private static func store(_ updated: [String: Revision]) -> Bool {
+        do {
+            try SyncQueueFile.write(updated, file)
+            revisions = updated
+            UserDefaults.standard.removeObject(forKey: legacyKey)
+            return true
+        } catch { return false }
+    }
+
+    /// The setter is used by confirmed deletions. Adding an already queued page leaves its revision alone.
     static var all: Set<String> {
-        get { Set(UserDefaults.standard.stringArray(forKey: key) ?? []) }
-        set { UserDefaults.standard.set(Array(newValue.filter { !LocalDrawings.isDeleted($0) }), forKey: key) }
+        get { Set(revisions.keys.filter { !LocalDrawings.isDeleted($0) }) }
+        set {
+            var updated = revisions.filter { newValue.contains($0.key) && !LocalDrawings.isDeleted($0.key) }
+            for id in newValue where updated[id] == nil && !LocalDrawings.isDeleted(id) { updated[id] = Revision() }
+            if updated != revisions { store(updated) }
+        }
+    }
+
+    @discardableResult
+    static func mark(_ ids: [String], replacing: Bool = true) -> Bool {
+        var updated = revisions
+        for id in ids where !LocalDrawings.isDeleted(id) && (replacing || updated[id] == nil) {
+            updated[id] = Revision()
+        }
+        return updated == revisions || store(updated)
+    }
+
+    static func revision(_ id: String) -> Revision? {
+        LocalDrawings.isDeleted(id) ? nil : revisions[id]
+    }
+
+    static func begin(_ id: String) -> Bool { inFlight.insert(id).inserted }
+    static func end(_ id: String) { inFlight.remove(id) }
+
+    static func acknowledge(_ id: String, revision: Revision, vectorOnly: Bool) {
+        guard self.revision(id) == revision else { return }
+        var updated = revisions
+        if vectorOnly { updated[id]?.vectorBackedUp = true } else { updated.removeValue(forKey: id) }
+        store(updated)
+    }
+}
+
+/// A locally writable page whose server creation may still need to be retried.
+enum PendingPageCreations {
+    struct Creation: Codable {
+        var page: Page
+        var afterPageId: String?
+        var afterIndex: Int
+
+        func insertionIndex(in pages: [Page]) -> Int {
+            if let afterPageId, let index = pages.firstIndex(where: { $0.id == afterPageId }) { return index + 1 }
+            return min(pages.count, max(0, afterIndex + 1))
+        }
+    }
+
+    private struct Draft: Codable {
+        var notebook: Notebook
+        var creations: [Creation]
+    }
+
+    private static let file = "page-creations.json"
+    private static var drafts = SyncQueueFile.read([String: Draft].self, file) ?? [:]
+
+    static func contains(_ pageId: String) -> Bool {
+        drafts.values.contains { $0.creations.contains { $0.page.id == pageId } }
+    }
+
+    static func pending(_ notebookId: String) -> [Creation] { drafts[notebookId]?.creations ?? [] }
+
+    /// Exposes only unsynced pages if a notebook is unavailable, including after a relaunch.
+    static var localNotebooks: [Notebook] { drafts.values.map { merging(into: $0.notebook) } }
+
+    static func localNotebook(_ id: String) -> Notebook? { drafts[id].map { merging(into: $0.notebook) } }
+
+    static func add(_ creation: Creation, to notebook: Notebook) throws {
+        var updated = drafts
+        var shell = notebook
+        shell.pages = []
+        shell.folderId = nil
+        shell.deleteRequestedAt = nil
+        if updated[notebook.id] == nil { updated[notebook.id] = Draft(notebook: shell, creations: []) }
+        updated[notebook.id]?.creations.append(creation)
+        try SyncQueueFile.write(updated, file)
+        drafts = updated
+    }
+
+    static func confirm(_ pageId: String, in notebookId: String) throws {
+        guard pending(notebookId).contains(where: { $0.page.id == pageId }) else { return }
+        var updated = drafts
+        updated[notebookId]?.creations.removeAll { $0.page.id == pageId }
+        if updated[notebookId]?.creations.isEmpty == true { updated.removeValue(forKey: notebookId) }
+        try SyncQueueFile.write(updated, file)
+        drafts = updated
+    }
+
+    static func merging(into notebook: Notebook) -> Notebook {
+        var result = notebook
+        for creation in pending(notebook.id) where !result.pages.contains(where: { $0.id == creation.page.id }) {
+            result.pages.insert(creation.page, at: creation.insertionIndex(in: result.pages))
+        }
+        return result
     }
 }
 

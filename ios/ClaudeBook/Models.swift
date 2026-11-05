@@ -309,6 +309,7 @@ struct NotebookList: Codable {
     /// Missing from servers older than folders.
     var folders: [Folder]?
     var view: ViewState
+    var deletedPageIds: [String]?
 }
 
 /// Messages pushed over the /live websocket.
@@ -316,4 +317,5 @@ struct LiveEvent: Codable {
     var type: String
     var notebookId: String?
     var pageId: String?
+    var deletedPageIds: [String]?
 }

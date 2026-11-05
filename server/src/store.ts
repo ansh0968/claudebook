@@ -59,6 +59,11 @@ export interface Page {
   pdf?: { file: string; page: number };
   /** Bumped every time the app uploads a fresh snapshot of the user's ink. */
   snapshotVersion: number;
+  /** Immutable payload revisions selected by the committed metadata. Legacy files have no revision. */
+  inkSnapshotRevision?: string;
+  inkDrawingRevision?: string;
+  /** Last committed upload order for each client that has edited this page. */
+  inkUploadSequences?: Record<string, number>;
   /** When the app last uploaded this page's ink (snapshot or drawing), and how many strokes it had. */
   inkSyncedAt?: string;
   strokeCount?: number;
@@ -102,14 +107,32 @@ export interface ViewState {
   updatedAt: string | null;
 }
 
+export interface ClientSequence {
+  clientId: string;
+  sequence: number;
+}
+
 interface DB {
   notebooks: Notebook[];
   folders: Folder[];
   view: ViewState;
+  viewReportSequences?: Record<string, number>;
+  deletedPageIds?: string[];
 }
 
 const now = () => new Date().toISOString();
 const CLIENT_PAGE_ID = /^[A-Za-z0-9_-]{8,40}$/;
+const INK_REVISION_FILE = /^[A-Za-z0-9_-]{8,40}\.[A-Za-z0-9_-]{12}\.(png|pkdrawing)$/;
+
+export class DeletedPageError extends Error {}
+
+function syncDirectory(directory: string) {
+  // The deployment is Linux. Windows doesn't expose directory handles through fs.openSync.
+  if (process.platform === "win32") return;
+  const fd = fs.openSync(directory, "r");
+  try { fs.fsyncSync(fd); }
+  finally { fs.closeSync(fd); }
+}
 
 export class Store {
   private db: DB;
@@ -138,6 +161,7 @@ export class Store {
       page.transcripts ??= [];
     }
     if (!existingDatabase) this.seed();
+    this.sweepInkRevisions();
     sweepImages(this);
     this.sweepBlocks();
   }
@@ -149,10 +173,15 @@ export class Store {
 
   private save() {
     const tmp = this.file + ".tmp";
-    fs.writeFileSync(tmp, JSON.stringify(this.db, null, 1));
+    fs.writeFileSync(tmp, JSON.stringify(this.db, null, 1), { flush: true });
     fs.renameSync(tmp, this.file);
-    sweepImages(this);
-    this.sweepBlocks();
+    // Once the manifest is published, maintenance must not turn a commit into a failure.
+    try {
+      sweepImages(this);
+      this.sweepBlocks();
+    } catch (error) {
+      console.warn(`Could not sweep unused assets: ${(error as Error).message}`);
+    }
   }
 
   on(fn: (e: StoreEvent) => void) {
@@ -169,6 +198,10 @@ export class Store {
 
   listNotebooks() {
     return this.db.notebooks;
+  }
+
+  deletedPageIds(): readonly string[] {
+    return this.db.deletedPageIds ?? [];
   }
 
   /** Rename a notebook. Returns undefined if it doesn't exist. */
@@ -205,11 +238,13 @@ export class Store {
     const nb = this.getNotebook(id);
     if (!nb) return false;
     const previous = this.pageCheckpoint();
+    const deletedPageIds = nb.pages.map(page => page.id);
+    this.recordPageDeletions(deletedPageIds);
     this.db.notebooks = this.db.notebooks.filter((n) => n.id !== id);
     if (this.db.view.notebookId === id) this.db.view = { notebookId: null, pageId: null, updatedAt: now() };
     this.savePageChange(previous);
-    for (const page of nb.pages) this.removePageFiles(page.id);
-    this.emit({ type: "notebook", notebookId: id });
+    this.removePageFiles(nb.pages);
+    this.emit({ type: "notebook", notebookId: id, deletedPageIds });
     return true;
   }
 
@@ -332,13 +367,33 @@ export class Store {
     });
   }
 
-  private removePageFiles(id: string) {
-    // Metadata is authoritative. A locked cache file must not turn a completed
-    // deletion into a reported failure or make the notebook reappear on restart.
-    for (const file of [this.snapshotPath(id), this.drawingPath(id)]) {
+  private removeInkFiles(files: Iterable<string>) {
+    for (const file of files) {
       try { fs.rmSync(file, { force: true }); }
-      catch (e) { console.warn(`Could not remove deleted page cache ${id}: ${(e as Error).message}`); }
+      catch (error) { console.warn(`Could not remove unused ink file ${file}: ${(error as Error).message}`); }
     }
+  }
+
+  private removePageFiles(pages: Page[]) {
+    this.removeCommittedInkFiles(new Set(pages.flatMap(page => [
+      this.snapshotFile(page.id), this.drawingFile(page.id),
+      this.snapshotFile(page.id, page.inkSnapshotRevision), this.drawingFile(page.id, page.inkDrawingRevision),
+    ])));
+  }
+
+  private removeCommittedInkFiles(files: Iterable<string>) {
+    // Retain previous payloads if the manifest rename could still be lost after a power failure.
+    try {
+      syncDirectory(this.dataDir);
+      this.removeInkFiles(files);
+    } catch (error) {
+      console.warn(`Could not flush the ink manifest directory: ${(error as Error).message}`);
+    }
+  }
+
+  private recordPageDeletions(ids: string[]) {
+    // Keep IDs across restarts so a late optimistic create retry cannot resurrect a deleted page.
+    if (ids.length) this.db.deletedPageIds = [...this.deletedPageIds(), ...ids];
   }
 
   private insertionCount(afterPage: number | undefined, count: number) {
@@ -358,7 +413,7 @@ export class Store {
   }
 
   /** Preserve the selected page by id through reorders and cross-notebook moves. */
-  private finishPageChange(notebooks: Notebook[], previousDatabase: DB, fallbackIndex = 0) {
+  private finishPageChange(notebooks: Notebook[], previousDatabase: DB, fallbackIndex = 0, deletedPageIds?: string[]) {
     const previous = this.db.view;
     const current = previous.pageId ? this.findPage(previous.pageId) : undefined;
     const nb = current?.notebook ?? (previous.notebookId ? this.getNotebook(previous.notebookId) : undefined);
@@ -368,7 +423,7 @@ export class Store {
     if (changed) this.db.view = { notebookId, pageId, updatedAt: now() };
     for (const notebook of notebooks) notebook.updatedAt = now();
     this.savePageChange(previousDatabase);
-    for (const notebook of notebooks) this.emit({ type: "notebook", notebookId: notebook.id });
+    for (const notebook of notebooks) this.emit({ type: "notebook", notebookId: notebook.id, deletedPageIds });
     if (changed && notebookId && pageId) this.openPage(notebookId, pageId);
   }
 
@@ -382,8 +437,9 @@ export class Store {
     const currentIndex = nb.pages.findIndex(p => p.id === this.db.view.pageId), chosen = new Set(ids);
     const survivingBefore = nb.pages.slice(0, Math.max(0, currentIndex)).filter(p => !chosen.has(p.id)).length;
     nb.pages = nb.pages.filter(p => !chosen.has(p.id));
-    this.finishPageChange([nb], previous, survivingBefore);
-    for (const { page } of selected) this.removePageFiles(page.id);
+    this.recordPageDeletions(ids);
+    this.finishPageChange([nb], previous, survivingBefore, ids);
+    this.removePageFiles(selected.map(({ page }) => page));
     return nb;
   }
 
@@ -422,6 +478,9 @@ export class Store {
       pages = selected.map(({ page }) => {
         const copy = structuredClone(page);
         copy.id = nanoid(10); copy.updatedAt = now();
+        delete copy.inkSnapshotRevision;
+        delete copy.inkDrawingRevision;
+        delete copy.inkUploadSequences;
         const itemIds = new Map(copy.claudeLayer.map(i => [i.id, nanoid(8)]));
         for (const item of copy.claudeLayer) {
           item.id = itemIds.get(item.id)!; item.createdAt = now();
@@ -560,7 +619,7 @@ export class Store {
     return item;
   }
 
-  createNotebook(title: string, pageCount = 1, background: Background = "blank", options: { folderId?: string; scratch?: boolean; paper?: Paper } = {}): Notebook {
+  createNotebook(title: string, pageCount = 1, background: Background = "blank", options: { folderId?: string; scratch?: boolean; paper?: Paper; activateView?: ClientSequence } = {}): Notebook {
     if (options.folderId && !this.getFolder(options.folderId)) throw new RangeError(`No folder ${options.folderId}`);
     const nb: Notebook = {
       id: nanoid(10),
@@ -571,8 +630,11 @@ export class Store {
       ...(options.folderId ? { folderId: options.folderId } : {}),
       ...(options.scratch ? { scratch: true } : {}),
     };
+    const previous = options.activateView ? this.pageCheckpoint() : undefined;
     this.db.notebooks.push(nb);
-    this.save();
+    if (options.activateView) this.applyView(nb.id, nb.pages[0].id, options.activateView);
+    if (previous) this.savePageChange(previous);
+    else this.save();
     this.emit({ type: "notebook", notebookId: nb.id });
     return nb;
   }
@@ -595,11 +657,12 @@ export class Store {
   insertPages(notebookId: string, pages: Page[], afterIndex?: number) {
     const nb = this.getNotebook(notebookId);
     if (!nb) throw new Error(`No notebook ${notebookId}`);
-    if (afterIndex !== undefined && (!Number.isInteger(afterIndex) || afterIndex < -1 || afterIndex >= nb.pages.length)) throw new Error(`afterIndex must be from -1 to ${nb.pages.length - 1}`);
+    if (afterIndex !== undefined && (!Number.isInteger(afterIndex) || afterIndex < -1 || afterIndex >= nb.pages.length)) throw new RangeError(`afterIndex must be from -1 to ${nb.pages.length - 1}`);
     const at = afterIndex === undefined ? nb.pages.length : afterIndex + 1;
+    const previous = this.pageCheckpoint();
     nb.pages.splice(at, 0, ...pages);
     nb.updatedAt = now();
-    this.save();
+    this.savePageChange(previous);
     this.emit({ type: "notebook", notebookId });
     return at;
   }
@@ -611,11 +674,13 @@ export class Store {
   insertClientPages(notebookId: string, ids: string[], background: Background, afterIndex?: number, paper?: Paper): Page[] {
     if (!this.getNotebook(notebookId)) throw new Error(`No notebook ${notebookId}`);
     if (ids.length < 1 || ids.length > 100 || new Set(ids).size !== ids.length || !ids.every(id => typeof id === "string" && CLIENT_PAGE_ID.test(id))) {
-      throw new Error("pageIds must be 1 to 100 unique ids of 8 to 40 letters, digits, _ or -");
+      throw new RangeError("pageIds must be 1 to 100 unique ids of 8 to 40 letters, digits, _ or -");
     }
+    const deleted = new Set(this.deletedPageIds());
+    if (ids.some(id => deleted.has(id))) throw new DeletedPageError("A page with one of these ids has been deleted");
     const found = ids.map(id => this.findPage(id));
     if (found.every(f => f?.notebook.id === notebookId)) return found.map(f => f!.page);
-    if (found.some(Boolean)) throw new Error("A page with one of these ids already exists");
+    if (found.some(Boolean)) throw new RangeError("A page with one of these ids already exists");
     const pages = ids.map(id => ({ ...this.newPage(background, paper), id }));
     this.insertPages(notebookId, pages, afterIndex);
     return pages;
@@ -625,43 +690,118 @@ export class Store {
     return this.db.view;
   }
 
-  setView(notebookId: string, pageId: string) {
+  setView(notebookId: string, pageId: string, report?: ClientSequence) {
     if (this.findPage(pageId)?.notebook.id !== notebookId) throw new Error("Page does not belong to this notebook");
+    const previous = this.db;
+    this.db = { ...previous };
+    if (this.applyView(notebookId, pageId, report)) this.savePageChange(previous);
+  }
+
+  private applyView(notebookId: string, pageId: string, report?: ClientSequence): boolean {
+    if (report) {
+      const clientId = report.clientId.toLowerCase();
+      const sequences = this.db.viewReportSequences ?? {};
+      // A timed-out report can arrive after a newer selection, even from a different editor.
+      if (report.sequence <= (sequences[clientId] ?? 0)) return false;
+      this.db.viewReportSequences = { ...sequences, [clientId]: report.sequence };
+    }
     this.db.view = { notebookId, pageId, updatedAt: now() };
-    this.save();
+    return true;
   }
 
   snapshotPath(pageId: string) {
-    return path.join(this.snapshotsDir, `${pageId}.png`);
+    return this.snapshotFile(pageId, this.findPage(pageId)?.page.inkSnapshotRevision);
   }
 
-  saveSnapshot(pageId: string, png: Buffer, textBoxes?: TextBox[], strokeCount?: number) {
-    const found = this.findPage(pageId);
-    if (!found) throw new Error(`No page ${pageId}`);
-    fs.writeFileSync(this.snapshotPath(pageId), png);
-    delete found.page.paperSnapshotStale;
-    this.invalidateTranscripts(found.page, strokeCount);
-    found.page.snapshotVersion++;
-    found.page.inkSyncedAt = now();
-    if (strokeCount !== undefined) found.page.strokeCount = strokeCount;
-    if (textBoxes) found.page.textBoxes = textBoxes;
-    found.page.updatedAt = now();
-    this.save();
+  private snapshotFile(pageId: string, revision?: string) {
+    return path.join(this.snapshotsDir, `${pageId}${revision ? `.${revision}` : ""}.png`);
   }
 
   /** Raw PKDrawing bytes from the app, kept as a backup so ink survives an app reinstall. */
   drawingPath(pageId: string) {
-    return path.join(this.drawingsDir, `${pageId}.pkdrawing`);
+    return this.drawingFile(pageId, this.findPage(pageId)?.page.inkDrawingRevision);
   }
 
-  saveDrawing(pageId: string, data: Buffer, strokeCount?: number) {
+  private drawingFile(pageId: string, revision?: string) {
+    return path.join(this.drawingsDir, `${pageId}${revision ? `.${revision}` : ""}.pkdrawing`);
+  }
+
+  private sweepInkRevisions() {
+    const pages = this.db.notebooks.flatMap(notebook => notebook.pages);
+    const active = new Set(pages.flatMap(page => [
+      this.snapshotFile(page.id, page.inkSnapshotRevision), this.drawingFile(page.id, page.inkDrawingRevision),
+    ]));
+    for (const directory of [this.snapshotsDir, this.drawingsDir]) {
+      const files = fs.readdirSync(directory).filter(file => INK_REVISION_FILE.test(file)).map(file => path.join(directory, file));
+      this.removeInkFiles(files.filter(file => !active.has(file)));
+    }
+  }
+
+  saveSnapshot(pageId: string, png: Buffer, textBoxes?: TextBox[], strokeCount?: number) {
+    this.saveInkParts(pageId, { png, textBoxes, strokeCount });
+  }
+
+  saveDrawing(pageId: string, drawing: Buffer, strokeCount?: number, order?: ClientSequence) {
+    this.saveInkParts(pageId, { drawing, strokeCount, order });
+  }
+
+  saveInk(pageId: string, png: Buffer, drawing: Buffer, textBoxes: TextBox[], strokeCount: number, order?: ClientSequence) {
+    this.saveInkParts(pageId, { png, drawing, textBoxes, strokeCount, order });
+  }
+
+  private saveInkParts(pageId: string, { png, drawing, textBoxes, strokeCount, order }: {
+    png?: Buffer; drawing?: Buffer; textBoxes?: TextBox[]; strokeCount?: number; order?: ClientSequence;
+  }) {
     const found = this.findPage(pageId);
     if (!found) throw new Error(`No page ${pageId}`);
-    fs.writeFileSync(this.drawingPath(pageId), data);
-    this.invalidateTranscripts(found.page, strokeCount);
-    found.page.inkSyncedAt = now();
-    if (strokeCount !== undefined) found.page.strokeCount = strokeCount;
-    this.save();
+    const { page, notebook, index } = found;
+    const clientId = order?.clientId.toLowerCase();
+    if (order && clientId && order.sequence <= (page.inkUploadSequences?.[clientId] ?? 0)) return;
+    const revision = nanoid(12);
+    const time = now();
+    const next: Page = { ...page, inkSyncedAt: time, transcripts: page.transcripts.map(t => ({ ...t })) };
+    if (order && clientId) next.inkUploadSequences = { ...page.inkUploadSequences, [clientId]: order.sequence };
+    const files = new Map<string, Buffer>();
+    const replaced: string[] = [];
+    if (png) {
+      files.set(this.snapshotFile(pageId, revision), png);
+      replaced.push(this.snapshotFile(pageId, page.inkSnapshotRevision));
+      next.inkSnapshotRevision = revision;
+      next.snapshotVersion++;
+      next.updatedAt = time;
+      delete next.paperSnapshotStale;
+      if (textBoxes) next.textBoxes = textBoxes;
+    }
+    if (drawing) {
+      files.set(this.drawingFile(pageId, revision), drawing);
+      replaced.push(this.drawingFile(pageId, page.inkDrawingRevision));
+      next.inkDrawingRevision = revision;
+    }
+    if (strokeCount !== undefined) next.strokeCount = strokeCount;
+    this.invalidateTranscripts(next, strokeCount);
+
+    // Stage immutable files first. A single manifest rename publishes both paths and their metadata.
+    const written: string[] = [];
+    try {
+      for (const [file, bytes] of files) {
+        const fd = fs.openSync(file, "wx");
+        written.push(file);
+        try { fs.writeFileSync(fd, bytes, { flush: true }); }
+        finally { fs.closeSync(fd); }
+      }
+      if (png) syncDirectory(this.snapshotsDir);
+      if (drawing) syncDirectory(this.drawingsDir);
+      notebook.pages[index] = next;
+      this.save();
+    } catch (error) {
+      notebook.pages[index] = page;
+      this.removeInkFiles(written);
+      throw error;
+    }
+    Object.assign(page, next);
+    if (png) delete page.paperSnapshotStale;
+    notebook.pages[index] = page;
+    this.removeCommittedInkFiles(replaced);
   }
 
   /** Rewrite stored Claude items in place (one-off upgrades at startup). Returns how many changed. */
@@ -775,7 +915,7 @@ export class Store {
 }
 
 export type StoreEvent =
-  | { type: "notebook"; notebookId: string }
+  | { type: "notebook"; notebookId: string; deletedPageIds?: string[] }
   | { type: "deleteRequest"; notebookId: string }
   | { type: "openPage"; notebookId: string; pageId: string }
   | { type: "folders" }
