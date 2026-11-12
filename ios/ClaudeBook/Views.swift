@@ -147,6 +147,7 @@ struct NotebookEditor: View {
     @State private var notebook: Notebook?
     @State private var index = 0
     @State private var controller = NotebookCanvasController()
+    @StateObject private var rough = RoughModel()
     @State private var sync = "synced"
     @State private var showClaude = true
     @State private var pencilOnly = true
@@ -193,6 +194,12 @@ struct NotebookEditor: View {
                         .padding(.horizontal, 20).padding(.vertical, 16)
                         .themedCard(radius: 16)
                     }
+                }
+            }
+            .overlay(alignment: .trailing) {
+                // Rough work for the page in the middle of the screen, docked at the right edge.
+                if let notebook, !notebook.pages.isEmpty, !askingClaude {
+                    RoughDrawer(model: rough, controller: controller, pageNumber: index + 1)
                 }
             }
             .overlay(alignment: .top) {
@@ -247,6 +254,13 @@ struct NotebookEditor: View {
                         .disabled(notebook == nil)
                         .accessibilityLabel("Add a page")
                         .accessibilityIdentifier("editor.addPage")
+                    Button { rough.isOpen.toggle() } label: {
+                        Image(systemName: "pencil.and.scribble")
+                            .symbolVariant(rough.isOpen ? .fill : .none)
+                    }
+                    .disabled(notebook?.pages.isEmpty != false || askingClaude)
+                    .accessibilityLabel(rough.isOpen ? "Hide rough work" : "Rough work for this page")
+                    .accessibilityIdentifier("editor.rough")
                 }
                 ToolbarItemGroup(placement: .topBarTrailing) {
                     Button { controller.toggleToolPicker() } label: {
@@ -275,6 +289,7 @@ struct NotebookEditor: View {
                     Button {
                         askingClaude.toggle()
                         notice = nil
+                        if askingClaude { rough.isOpen = false }
                         if askingClaude { controller.beginDoubtSelection() } else { controller.cancelDoubtSelection() }
                     } label: {
                         // Toolbars drop a Label's title; spell it out so the main Claude action reads as one.
@@ -342,7 +357,7 @@ struct NotebookEditor: View {
             .onChange(of: snapShapes) { _, v in controller.snapShapes = v }
             .onChange(of: scenePhase) { _, phase in
                 controller.setViewReportingEnabled(phase == .active)
-                if phase != .active { controller.flush() }
+                if phase != .active { controller.flush(); rough.flush() }
             }
             .task { await load() }
             .onAppear {
@@ -354,7 +369,10 @@ struct NotebookEditor: View {
                 toolPickerVisible = controller.toolPicker.isVisible
                 controller.setViewReportingEnabled(scenePhase == .active)
                 controller.onSyncState = { s in sync = s }
-                controller.onPageChange = { i in index = i }
+                controller.onPageChange = { i in
+                    index = i
+                    rough.show(pageId: controller.currentPage?.id)
+                }
                 controller.onPullToAdd = { Task { await addPage(after: controller.pages.count - 1) } }
                 controller.onDoubtRegion = { pageId, region in
                     askingClaude = false
@@ -422,6 +440,7 @@ struct NotebookEditor: View {
             .onReceive(NotificationCenter.default.publisher(for: .pagesDeleted)) { note in
                 guard let ids = note.userInfo?["pageIds"] as? [String] else { return }
                 controller.discardPages(ids)
+                RoughStore.remove(ids)
             }
             .onDisappear {
                 if library.activeCanvas === controller { library.activeCanvas = nil }
@@ -430,6 +449,7 @@ struct NotebookEditor: View {
                 controller.setViewReportingEnabled(false)
                 controller.onToolPickerVisibilityChange = nil
                 controller.flush(); controller.cancelDoubtSelection()
+                rough.isOpen = false; rough.flush()
                 library.prepareNotebookDeletion = nil
                 library.resumeNotebookUploads = nil
             }
@@ -503,6 +523,7 @@ struct NotebookEditor: View {
         notebook = updated
         controller.setNotebook(updated)
         index = controller.currentIndex
+        rough.show(pageId: controller.currentPage?.id)
         // Once open, the controller keeps whatever is on screen in place when pages come or go.
         // Snapping to the top of the current page here is what made the view jump after adding a page.
         if opening, !updated.pages.isEmpty {

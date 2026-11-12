@@ -268,10 +268,26 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate, PK
         applyToolPickerVisibility()
     }
 
+    /// The rough-work drawer's canvas while it's on screen. The PencilKit palette and the
+    /// Pencil-only setting follow it, and the notebook canvas gets the palette back when it goes.
+    weak var roughCanvas: PKCanvasView? {
+        didSet {
+            guard oldValue !== roughCanvas else { return }
+            if let oldValue { toolPicker.removeObserver(oldValue) }
+            if let rough = roughCanvas {
+                rough.drawingPolicy = canvas.drawingPolicy
+                rough.tool = canvas.tool
+                toolPicker.addObserver(rough)
+            }
+            applyToolPickerVisibility()
+        }
+    }
+
     private func applyToolPickerVisibility() {
         let visible = wantsToolPicker && selectionOverlay == nil
-        toolPicker.setVisible(visible, forFirstResponder: canvas)
-        if selectionOverlay == nil { canvas.becomeFirstResponder() }
+        let target: PKCanvasView = roughCanvas ?? canvas
+        toolPicker.setVisible(visible, forFirstResponder: target)
+        if selectionOverlay == nil { target.becomeFirstResponder() }
         onToolPickerVisibilityChange?(toolPicker.isVisible)
     }
 
@@ -520,7 +536,10 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate, PK
 
     var pencilOnly: Bool {
         get { canvas.drawingPolicy == .pencilOnly }
-        set { canvas.drawingPolicy = newValue ? .pencilOnly : .anyInput }
+        set {
+            canvas.drawingPolicy = newValue ? .pencilOnly : .anyInput
+            roughCanvas?.drawingPolicy = canvas.drawingPolicy
+        }
     }
 
     var snapShapes: Bool {
