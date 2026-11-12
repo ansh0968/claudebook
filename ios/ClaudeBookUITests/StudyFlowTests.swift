@@ -123,6 +123,56 @@ final class StudyFlowTests: XCTestCase {
     }
 
     @MainActor
+    func testRoughWorkDrawerAddsSheetsTucksAwayAndDeletes() async throws {
+        let notebook: SmokeNotebook = try await api.request("notebooks", method: "POST", body: ["title": "Rough work", "pages": 1])
+        let page = try XCTUnwrap(notebook.pages.first)
+        try await api.setView(notebook: notebook.id, page: page.id)
+        let app = launch(extra: ["CLAUDEBOOK_TEST_FINGER_INK": "1"])
+        defer { app.terminate() }
+        try requireReady(app.buttons["editor.askClaude"])
+        let open = app.buttons["editor.rough"]
+        try requireReady(open)
+        open.tap()
+        let panel = app.otherElements["rough.panel"]
+        XCTAssertTrue(panel.waitForExistence(timeout: 5), "The rough drawer should slide in")
+        try await Task.sleep(for: .seconds(1))
+        // Scribble on sheet 1 with a finger (the test turns off Pencil-only).
+        let start = panel.coordinate(withNormalizedOffset: CGVector(dx: 0.25, dy: 0.4))
+        start.press(forDuration: 0.05, thenDragTo: panel.coordinate(withNormalizedOffset: CGVector(dx: 0.75, dy: 0.55)))
+        let add = app.buttons["rough.add"]
+        try requireReady(add, timeout: 3)
+        add.tap()
+        XCTAssertTrue(app.buttons["rough.sheet.2"].waitForExistence(timeout: 3))
+        app.buttons["rough.sheet.1"].tap()
+        saveScreenshot("22-rough-drawer")
+
+        // Tucked away, the page keeps a tab at the right edge; swiping it brings the drawer back.
+        app.buttons["rough.close"].tap()
+        let peek = app.buttons["rough.peek"]
+        XCTAssertTrue(peek.waitForExistence(timeout: 5), "A page with rough work should keep a peek tab")
+        XCTAssertEqual(peek.label, "Rough work for this page, 1 sheet")
+        saveScreenshot("23-rough-peek")
+        peek.swipeLeft()
+        XCTAssertTrue(panel.waitForExistence(timeout: 5), "Swiping the tab should reopen the drawer")
+
+        // Delete the inked sheet (asks first) and the blank one (doesn't): the drawer goes away with them.
+        let delete = app.buttons["rough.delete"]
+        try requireReady(delete, timeout: 3)
+        delete.tap()
+        let confirm = app.buttons["Delete sheet"]
+        try requireReady(confirm, timeout: 3)
+        confirm.tap()
+        let remaining = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: app.buttons["rough.sheet.2"])
+        await fulfillment(of: [remaining], timeout: 5)
+        try requireReady(delete, timeout: 3)
+        delete.tap()
+        let gone = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: panel)
+        await fulfillment(of: [gone], timeout: 5)
+        XCTAssertFalse(peek.exists, "No rough work left, so no tab")
+        let _: SmokeOK = try await api.request("notebooks/\(notebook.id)", method: "DELETE")
+    }
+
+    @MainActor
     func testHintChipOpensAPadThatHidesAgain() async throws {
         let notebook = try await fixture()
         let page = try XCTUnwrap(notebook.pages.first)
