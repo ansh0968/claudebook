@@ -205,6 +205,7 @@ struct RoughDrawer: View {
         HStack(spacing: 8) {
             VStack(alignment: .leading, spacing: 1) {
                 Text("Rough work").font(Theme.title(.headline)).foregroundStyle(Theme.ink)
+                    .lineLimit(1).fixedSize()
                 Text("Page \(pageNumber)").font(Theme.rounded(.caption, weight: .medium)).foregroundStyle(Theme.secondaryInk)
             }
             .contentShape(Rectangle())
