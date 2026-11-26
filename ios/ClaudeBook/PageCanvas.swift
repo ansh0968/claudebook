@@ -126,6 +126,8 @@ final class RegionSelectionView: UIView {
 final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate, PKToolPickerObserver {
     let canvas = PKCanvasView()
     let toolPicker = PKToolPicker()
+    private let canvasUndoManager = UndoManager()
+    override var undoManager: UndoManager? { canvasUndoManager }
     private let paperContainer = UIView()
     private let claudeContainer = UIView()
     private let hintOverlay = ControlOverlay()
@@ -180,6 +182,7 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate, PK
     var onDoubtRegion: ((String, PageRegion) -> Void)?
     var onHintError: ((String) -> Void)?
     var onSelectionError: (() -> Void)?
+    var backupDrawingLoader: (@Sendable (String) async throws -> Data?)?
 
     private static let footerInset: CGFloat = 140
     private static let pullDistance: CGFloat = 70
@@ -919,6 +922,7 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate, PK
         loading = true
         canvas.drawing = combined
         loading = false
+        canvas.undoManager?.removeAllActions()
     }
 
     /// Fresh install or new device: pull each page's ink backup from the server.
@@ -942,14 +946,22 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate, PK
                 && !PendingPageCreations.contains(id)
                 && PendingUploads.revision(id) == nil
         }
-        guard !missing.isEmpty, let api = API.current else { return }
+        guard !missing.isEmpty else { return }
+        let loadDrawing: @Sendable (String) async throws -> Data?
+        if let backupDrawingLoader {
+            loadDrawing = backupDrawingLoader
+        } else if let api = API.current {
+            loadDrawing = { try await api.drawing(pageId: $0) }
+        } else {
+            return
+        }
         restoringPageIds.formUnion(missing)
         Task {
             let results = await withTaskGroup(of: (String, Data?, Bool).self) { group -> [(String, Data?, Bool)] in
                 for id in missing {
                     group.addTask {
                         do {
-                            return (id, try await api.drawing(pageId: id), true)
+                            return (id, try await loadDrawing(id), true)
                         } catch {
                             return (id, nil, false)
                         }

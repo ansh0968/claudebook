@@ -44,6 +44,212 @@ final class NotebookLayoutTests: XCTestCase {
         XCTAssertEqual(LocalDrawings.load(second.id)?.strokes.count, 1)
     }
 
+    private static func testStroke(at origin: CGPoint) -> PKStroke {
+        let points = [origin, CGPoint(x: origin.x + 80, y: origin.y + 24)].enumerated().map { index, point in
+            PKStrokePoint(location: point, timeOffset: Double(index) * 0.01, size: CGSize(width: 5, height: 5),
+                          opacity: 1, force: 1, azimuth: 0, altitude: .pi / 2)
+        }
+        return PKStroke(ink: PKInk(.pen, color: .systemBlue), path: PKStrokePath(controlPoints: points, creationDate: Date()))
+    }
+
+    @MainActor
+    private static func applyUndoableDrawing(_ next: PKDrawing, to canvas: PKCanvasView) {
+        let previous = canvas.drawing
+        canvas.undoManager?.registerUndo(withTarget: canvas) { target in
+            MainActor.assumeIsolated {
+                Self.applyUndoableDrawing(previous, to: target)
+            }
+        }
+        canvas.drawing = next
+    }
+
+    @MainActor
+    private func recordUndoableStroke(at origin: CGPoint, on canvas: PKCanvasView) {
+        let stroke = Self.testStroke(at: origin)
+        Self.applyUndoableDrawing(PKDrawing(strokes: canvas.drawing.strokes + [stroke]), to: canvas)
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.01))
+    }
+
+    @MainActor
+    func testDedicatedUndoManagerWorksWithoutWindowAndStaysIsolatedFromRoughCanvas() async throws {
+        let page = Page.blank(background: .lined)
+        let added = Page.blank(background: .lined)
+        defer { LocalDrawings.remove([page.id, added.id]) }
+        for id in [page.id, added.id] { LocalDrawings.save(PKDrawing(), pageId: id) }
+
+        var notebook = Notebook(id: UUID().uuidString, title: "Undo isolation", pages: [page],
+                                createdAt: page.updatedAt, updatedAt: page.updatedAt)
+        let controller = NotebookCanvasController()
+        controller.loadViewIfNeeded()
+        await controller.pauseUploads()
+        XCTAssertNil(controller.view.window)
+        let notebookUndo = try XCTUnwrap(controller.canvas.undoManager)
+        XCTAssertTrue(notebookUndo === controller.undoManager)
+
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 1000, height: 1000))
+        let container = UIView(frame: window.bounds)
+        window.addSubview(container)
+        container.addSubview(controller.view)
+        let roughHost = RoughCanvasHost(controller: controller)
+        container.addSubview(roughHost)
+        defer {
+            roughHost.detach()
+            container.removeFromSuperview()
+        }
+
+        let roughUndo = try XCTUnwrap(roughHost.canvas.undoManager)
+        XCTAssertFalse(roughUndo === notebookUndo)
+
+        controller.setNotebook(notebook)
+        recordUndoableStroke(at: CGPoint(x: 120, y: 200), on: controller.canvas)
+        roughHost.show(RoughSheet())
+        recordUndoableStroke(at: CGPoint(x: 80, y: 120), on: roughHost.canvas)
+        XCTAssertTrue(notebookUndo.canUndo)
+        XCTAssertTrue(roughUndo.canUndo)
+
+        // Switching rough sheets clears the rough canvas undo stack without touching the notebook's.
+        roughHost.show(RoughSheet())
+        XCTAssertFalse(roughUndo.canUndo)
+        XCTAssertTrue(notebookUndo.canUndo)
+
+        // Rebuilding the notebook canvas clears the notebook undo stack without touching rough work.
+        recordUndoableStroke(at: CGPoint(x: 80, y: 180), on: roughHost.canvas)
+        XCTAssertTrue(roughUndo.canUndo)
+        notebook.pages.append(added)
+        controller.setNotebook(notebook)
+        XCTAssertFalse(notebookUndo.canUndo)
+        XCTAssertTrue(roughUndo.canUndo)
+    }
+
+    @MainActor
+    func testPageEditsAndNonEmptyBackupsClearUndoAndRedoWhileSameLayoutRefreshesKeepThem() async throws {
+        let first = Page.blank(background: .lined)
+        let emptyBackup = Page.blank(background: .grid)
+        let inkBackup = Page.blank(background: .dotted)
+        let inserted = Page.blank(background: .blank)
+        let allIds = [first.id, emptyBackup.id, inkBackup.id, inserted.id]
+        defer { LocalDrawings.remove(allIds) }
+        for id in allIds { LocalDrawings.save(PKDrawing(), pageId: id) }
+
+        let emptyPageId = emptyBackup.id
+        let inkPageId = inkBackup.id
+        let emptyData = PKDrawing().dataRepresentation()
+        let inkData = PKDrawing(strokes: [Self.testStroke(at: CGPoint(x: 240, y: 320))]).dataRepresentation()
+
+        var notebook = Notebook(id: UUID().uuidString, title: "Undo rebuild test", pages: [first, emptyBackup, inkBackup],
+                                createdAt: first.updatedAt, updatedAt: first.updatedAt)
+        let controller = NotebookCanvasController()
+        controller.loadViewIfNeeded()
+        await controller.pauseUploads()
+        controller.backupDrawingLoader = { id in
+            if id == emptyPageId { return emptyData }
+            if id == inkPageId { return inkData }
+            return nil
+        }
+        let undo = try XCTUnwrap(controller.canvas.undoManager)
+        controller.setNotebook(notebook)
+
+        recordUndoableStroke(at: CGPoint(x: 160, y: 220), on: controller.canvas)
+        recordUndoableStroke(at: CGPoint(x: 160, y: 420), on: controller.canvas)
+        undo.undo()
+        XCTAssertEqual(controller.canvas.drawing.strokes.count, 1)
+        XCTAssertTrue(undo.canUndo)
+        XCTAssertTrue(undo.canRedo)
+
+        // Same-layout refreshes (paper and Claude layer updates) keep undo and redo intact.
+        notebook.pages[0].paper = .cream
+        let claudeItem = try JSONDecoder().decode(ClaudeItem.self, from: Data(#"{"id":"note","type":"text","x":100,"y":100,"text":"ok"}"#.utf8))
+        notebook.pages[0].claudeLayer = [claudeItem]
+        controller.setNotebook(notebook)
+        XCTAssertTrue(undo.canUndo)
+        XCTAssertTrue(undo.canRedo)
+        undo.redo()
+        XCTAssertEqual(controller.canvas.drawing.strokes.count, 2)
+        undo.undo()
+        XCTAssertEqual(controller.canvas.drawing.strokes.count, 1)
+        XCTAssertTrue(undo.canUndo)
+        XCTAssertTrue(undo.canRedo)
+
+        // Downloading an empty backup does not rebuild the canvas, so undo and redo stay intact.
+        try FileManager.default.removeItem(at: LocalDrawings.url(emptyBackup.id))
+        XCTAssertFalse(LocalDrawings.exists(emptyBackup.id))
+        controller.setNotebook(notebook)
+        for _ in 0..<40 {
+            if LocalDrawings.exists(emptyBackup.id) { break }
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        XCTAssertTrue(LocalDrawings.exists(emptyBackup.id))
+        XCTAssertEqual(LocalDrawings.load(emptyBackup.id)?.strokes.count, 0)
+        XCTAssertTrue(undo.canUndo)
+        XCTAssertTrue(undo.canRedo)
+
+        // Downloading a non-empty backup rebuilds the canvas and clears both undo and redo.
+        try FileManager.default.removeItem(at: LocalDrawings.url(inkBackup.id))
+        XCTAssertFalse(LocalDrawings.exists(inkBackup.id))
+        controller.setNotebook(notebook)
+        for _ in 0..<40 {
+            if LocalDrawings.load(inkBackup.id)?.strokes.count == 1 { break }
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        XCTAssertEqual(LocalDrawings.load(inkBackup.id)?.strokes.count, 1)
+        XCTAssertEqual(controller.canvas.drawing.strokes.count, 2)
+        XCTAssertFalse(undo.canUndo)
+        XCTAssertFalse(undo.canRedo)
+        undo.undo()
+        await controller.pauseUploads()
+        XCTAssertEqual(LocalDrawings.load(first.id)?.strokes.count, 1)
+        XCTAssertEqual(LocalDrawings.load(inkBackup.id)?.strokes.count, 1)
+
+        // Inserting or reordering pages clears undo and redo so shifted pages keep their ink.
+        recordUndoableStroke(at: CGPoint(x: 160, y: 620), on: controller.canvas)
+        recordUndoableStroke(at: CGPoint(x: 160, y: 820), on: controller.canvas)
+        undo.undo()
+        XCTAssertTrue(undo.canUndo)
+        XCTAssertTrue(undo.canRedo)
+        notebook.pages.insert(inserted, at: 0)
+        controller.setNotebook(notebook)
+        XCTAssertFalse(undo.canUndo)
+        XCTAssertFalse(undo.canRedo)
+        undo.undo()
+        await controller.pauseUploads()
+        XCTAssertEqual(LocalDrawings.load(inserted.id)?.strokes.count, 0)
+        XCTAssertEqual(LocalDrawings.load(first.id)?.strokes.count, 2)
+        XCTAssertEqual(LocalDrawings.load(inkBackup.id)?.strokes.count, 1)
+
+        // Deleting pages also rebuilds the canvas and clears undo and redo.
+        recordUndoableStroke(at: CGPoint(x: 180, y: 200), on: controller.canvas)
+        recordUndoableStroke(at: CGPoint(x: 180, y: 360), on: controller.canvas)
+        undo.undo()
+        XCTAssertTrue(undo.canUndo)
+        XCTAssertTrue(undo.canRedo)
+        controller.discardPages([inserted.id])
+        notebook.pages.removeAll { $0.id == inserted.id }
+        XCTAssertFalse(undo.canUndo)
+        XCTAssertFalse(undo.canRedo)
+        undo.undo()
+        await controller.pauseUploads()
+        XCTAssertEqual(LocalDrawings.load(first.id)?.strokes.count, 2)
+        XCTAssertEqual(LocalDrawings.load(inkBackup.id)?.strokes.count, 1)
+
+        // A layout edit deferred during active drawing commits the stroke first, then clears undo on rebuild.
+        controller.canvasViewDidBeginUsingTool(controller.canvas)
+        notebook.pages.reverse()
+        controller.setNotebook(notebook)
+        recordUndoableStroke(at: CGPoint(x: 160, y: 980), on: controller.canvas)
+        XCTAssertTrue(undo.canUndo)
+        controller.canvasViewDidEndUsingTool(controller.canvas)
+        let reversedIds = notebook.pages.map(\.id)
+        for _ in 0..<40 {
+            if controller.pages.map(\.id) == reversedIds { break }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        XCTAssertEqual(controller.pages.map(\.id), reversedIds)
+        XCTAssertFalse(undo.canUndo)
+        XCTAssertFalse(undo.canRedo)
+        XCTAssertEqual(LocalDrawings.load(first.id)?.strokes.count, 3)
+        XCTAssertEqual(LocalDrawings.load(inkBackup.id)?.strokes.count, 1)
+    }
+
     @MainActor
     func testConfirmedDeletionStopsLateDrawingSavesAndPendingUploads() {
         let id = "deleted-test-" + UUID().uuidString
