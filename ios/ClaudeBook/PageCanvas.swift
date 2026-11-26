@@ -140,7 +140,12 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate, PK
     private var selectionOverlay: RegionSelectionView?
     private let footer = UILabel()
     /// Hold-to-snap shapes and their edit handles.
-    private let shapes = ShapeSnapper()
+    let shapes = ShapeSnapper()
+    let scribbleEraser = ScribbleEraser()
+    let pencilDoubleTap = PencilDoubleTapInteraction()
+    private let canvasUndoManager = UndoManager()
+
+    override var undoManager: UndoManager? { canvasUndoManager }
 
     private(set) var notebookId: String?
     private(set) var pages: [Page] = []
@@ -184,6 +189,14 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate, PK
     private static let footerInset: CGFloat = 140
     private static let pullDistance: CGFloat = 70
     private static let inkCommitDelay: Duration = .milliseconds(350)
+    private static let doubleTapToolGuardWindow: TimeInterval = 0.08
+
+    private lazy var trackedTool: PKTool = canvas.tool
+    private var toolBeforeLastChange: PKTool?
+    private var lastToolChangeUptime: TimeInterval?
+    private var lastDoubleTapUptime: TimeInterval?
+    private var toolAtLastDoubleTap: PKTool?
+    private var restoringTool = false
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -194,7 +207,10 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate, PK
         canvas.isOpaque = false
         canvas.drawingPolicy = .pencilOnly
         canvas.delegate = self
-        canvas.tool = PKInkingTool(.pen, color: .black, width: 3)
+        let initialTool = PKInkingTool(.pen, color: .black, width: 3)
+        canvas.tool = initialTool
+        toolPicker.selectedTool = initialTool
+        trackedTool = initialTool
         canvas.showsHorizontalScrollIndicator = false
         canvas.contentInsetAdjustmentBehavior = .never
         canvas.alwaysBounceVertical = true
@@ -229,6 +245,10 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate, PK
         ])
         shapes.attach(to: canvas, in: view)
         shapes.onDragEnded = { [weak self] in self?.canvasInputEnded() }
+        scribbleEraser.shouldSuppress = { [weak self] in self?.shapes.hasActiveOrPendingSnap == true }
+        scribbleEraser.attach(to: canvas)
+        pencilDoubleTap.onDoubleTap = { [weak self] in self?.performPencilDoubleTapUndo() }
+        pencilDoubleTap.attach(to: canvas)
         canvas.drawingGestureRecognizer.addTarget(self, action: #selector(canvasDrawingGestureChanged(_:)))
 
         webBlocks.translatesAutoresizingMaskIntoConstraints = false
@@ -293,6 +313,55 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate, PK
 
     func toolPickerVisibilityDidChange(_ toolPicker: PKToolPicker) {
         onToolPickerVisibilityChange?(toolPicker.isVisible)
+    }
+
+    func toolPickerSelectedToolDidChange(_ toolPicker: PKToolPicker) {
+        guard !restoringTool else { return }
+        let now = ProcessInfo.processInfo.systemUptime
+        if pencilDoubleTapUndo,
+           let tapTime = lastDoubleTapUptime,
+           now - tapTime <= Self.doubleTapToolGuardWindow {
+            restoreSelectedTool(toolAtLastDoubleTap ?? trackedTool)
+            return
+        }
+        toolBeforeLastChange = trackedTool
+        lastToolChangeUptime = now
+        trackedTool = toolPicker.selectedTool
+        canvas.tool = toolPicker.selectedTool
+        roughCanvas?.tool = toolPicker.selectedTool
+    }
+
+    private func restoreSelectedTool(_ tool: PKTool) {
+        restoringTool = true
+        defer { restoringTool = false }
+        toolPicker.selectedTool = tool
+        canvas.tool = tool
+        roughCanvas?.tool = tool
+        trackedTool = tool
+        toolBeforeLastChange = nil
+        lastToolChangeUptime = nil
+        toolAtLastDoubleTap = tool
+    }
+
+    func noteCanvasInkActivity(activeTool: PKTool? = nil) {
+        if let activeTool { trackedTool = activeTool }
+        toolBeforeLastChange = nil
+        lastToolChangeUptime = nil
+    }
+
+    func performPencilDoubleTapUndo(on targetOverride: PKCanvasView? = nil) {
+        guard pencilDoubleTapUndo else { return }
+        let now = ProcessInfo.processInfo.systemUptime
+        if let changeTime = lastToolChangeUptime,
+           now - changeTime <= Self.doubleTapToolGuardWindow,
+           let previous = toolBeforeLastChange {
+            restoreSelectedTool(previous)
+        } else {
+            toolAtLastDoubleTap = trackedTool
+        }
+        lastDoubleTapUptime = now
+        let target = targetOverride ?? roughCanvas ?? canvas
+        target.undoManager?.undo()
     }
 
     override func viewDidLayoutSubviews() {
@@ -547,6 +616,14 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate, PK
         set {
             shapes.enabled = newValue
             if !newValue { shapes.endEditing() }
+        }
+    }
+
+    var pencilDoubleTapUndo: Bool {
+        get { pencilDoubleTap.isEnabled }
+        set {
+            PencilSettings.isDoubleTapUndoEnabled = newValue
+            pencilDoubleTap.isEnabled = newValue
         }
     }
 
@@ -916,9 +993,11 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate, PK
             combined.append(drawing.transformed(using: CGAffineTransform(translationX: 0, y: NotebookLayout.offset(i))))
         }
         shapes.reset()
+        scribbleEraser.reset()
         loading = true
         canvas.drawing = combined
         loading = false
+        canvas.undoManager?.removeAllActions()
     }
 
     /// Fresh install or new device: pull each page's ink backup from the server.
@@ -1144,6 +1223,7 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate, PK
 
     func canvasViewDidBeginUsingTool(_ canvasView: PKCanvasView) {
         usingCanvasTool = true
+        noteCanvasInkActivity(activeTool: canvasView.tool)
         closeHintPad()
     }
 
@@ -1161,6 +1241,10 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate, PK
     func canvasViewDrawingDidChange(_ canvasView: PKCanvasView) {
         guard !loading, !pages.isEmpty else { return }
         shapes.drawingDidChange()
+        if scribbleEraser.drawingDidChange() { return }
+        if canvasView.undoManager?.isUndoing != true && canvasView.undoManager?.isRedoing != true {
+            noteCanvasInkActivity(activeTool: canvasView.tool)
+        }
         // A dragged shape is lifted out of the ink until it's dropped; that drop saves it.
         guard !shapes.isDragging else { return }
         if canvasSettledTask != nil { canvasInputEnded() }
@@ -1284,6 +1368,10 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate, PK
         updateHintButtons()
         updateCurrentPage(force: true)
         if !pendingIds.isEmpty { scheduleUpload(delay: 0.2) }
+    }
+
+    func applyUserStroke(_ stroke: PKStroke) {
+        scribbleEraser.applyUserStroke(stroke)
     }
 
     /// Upload right away (used when leaving the notebook or the app going to background).

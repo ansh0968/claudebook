@@ -284,11 +284,24 @@ final class RoughCanvasHost: UIView, PKCanvasViewDelegate {
     static let sheetSize = CGSize(width: 500, height: 1600)
 
     let canvas = PKCanvasView()
+    let scribbleEraser = ScribbleEraser()
+    let pencilDoubleTap = PencilDoubleTapInteraction()
+    private let canvasUndoManager = UndoManager()
     private let paper = RoughPaperView()
     private weak var controller: NotebookCanvasController?
     private var sheetId: String?
     private var loading = false
     var onChange: ((PKDrawing, String) -> Void)?
+
+    override var undoManager: UndoManager? { canvasUndoManager }
+
+    var pencilDoubleTapUndo: Bool {
+        get { pencilDoubleTap.isEnabled }
+        set {
+            PencilSettings.isDoubleTapUndoEnabled = newValue
+            pencilDoubleTap.isEnabled = newValue
+        }
+    }
 
     init(controller: NotebookCanvasController) {
         self.controller = controller
@@ -297,6 +310,8 @@ final class RoughCanvasHost: UIView, PKCanvasViewDelegate {
         canvas.backgroundColor = .clear
         canvas.isOpaque = false
         canvas.delegate = self
+        canvas.drawingPolicy = controller.canvas.drawingPolicy
+        canvas.tool = controller.canvas.tool
         canvas.showsHorizontalScrollIndicator = false
         canvas.alwaysBounceVertical = true
         canvas.bouncesZoom = false
@@ -304,6 +319,16 @@ final class RoughCanvasHost: UIView, PKCanvasViewDelegate {
         paper.isUserInteractionEnabled = false
         canvas.insertSubview(paper, at: 0)
         addSubview(canvas)
+        scribbleEraser.attach(to: canvas)
+        pencilDoubleTap.onDoubleTap = { [weak self] in
+            guard let self else { return }
+            if let controller = self.controller {
+                controller.performPencilDoubleTapUndo(on: self.canvas)
+            } else {
+                self.canvas.undoManager?.undo()
+            }
+        }
+        pencilDoubleTap.attach(to: canvas)
         canvas.accessibilityIdentifier = "rough.canvas"
     }
 
@@ -330,6 +355,7 @@ final class RoughCanvasHost: UIView, PKCanvasViewDelegate {
     func show(_ sheet: RoughSheet) {
         guard sheet.id != sheetId else { return }
         sheetId = sheet.id
+        scribbleEraser.reset()
         loading = true
         canvas.drawing = (try? PKDrawing(data: sheet.ink)) ?? PKDrawing()
         loading = false
@@ -337,8 +363,17 @@ final class RoughCanvasHost: UIView, PKCanvasViewDelegate {
         canvas.setContentOffset(.zero, animated: false)
     }
 
+    func applyUserStroke(_ stroke: PKStroke) {
+        scribbleEraser.applyUserStroke(stroke)
+    }
+
     func canvasViewDrawingDidChange(_ canvasView: PKCanvasView) {
-        guard !loading, let sheetId else { return }
+        guard !loading else { return }
+        if scribbleEraser.drawingDidChange() { return }
+        if canvasView.undoManager?.isUndoing != true && canvasView.undoManager?.isRedoing != true {
+            controller?.noteCanvasInkActivity(activeTool: canvasView.tool)
+        }
+        guard let sheetId else { return }
         onChange?(canvasView.drawing, sheetId)
     }
 

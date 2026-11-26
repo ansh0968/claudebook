@@ -83,6 +83,7 @@ final class ShapeSnapper: NSObject {
 
     var isDragging: Bool { dragStart != nil }
     var editingShape: SnapShape? { editing?.shape }
+    var hasActiveOrPendingSnap: Bool { heldShape != nil || pending != nil || editing != nil }
 
     func attach(to canvas: PKCanvasView, in host: UIView) {
         self.canvas = canvas
