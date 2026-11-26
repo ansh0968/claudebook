@@ -153,6 +153,7 @@ struct NotebookEditor: View {
     @State private var pencilOnly = true
     @State private var toolPickerVisible = true
     @AppStorage("snapShapes") private var snapShapes = true
+    @AppStorage(PencilSettings.doubleTapUndoKey) private var pencilDoubleTapUndo = true
     @State private var showPages = false
     @State private var showPaperPicker = false
     @State private var notebookLoadGeneration = 0
@@ -316,6 +317,8 @@ struct NotebookEditor: View {
                         }
                         Section {
                             Toggle(isOn: $pencilOnly) { Label("Draw with Apple Pencil only", systemImage: "applepencil") }
+                            Toggle(isOn: $pencilDoubleTapUndo) { Label("Apple Pencil double-tap to undo", systemImage: "arrow.uturn.backward.circle") }
+                                .accessibilityIdentifier("editor.pencilDoubleTapUndo")
                             Toggle(isOn: $snapShapes) { Label("Hold to snap shapes", systemImage: "circle.square") }
                                 .accessibilityIdentifier("editor.snapShapes")
                         }
@@ -355,6 +358,7 @@ struct NotebookEditor: View {
             .onChange(of: showClaude) { _, v in controller.showClaude = v }
             .onChange(of: pencilOnly) { _, v in controller.pencilOnly = v }
             .onChange(of: snapShapes) { _, v in controller.snapShapes = v }
+            .onChange(of: pencilDoubleTapUndo) { _, v in controller.pencilDoubleTapUndo = v }
             .onChange(of: scenePhase) { _, phase in
                 controller.setViewReportingEnabled(phase == .active)
                 if phase != .active { controller.flush(); rough.flush() }
@@ -365,6 +369,7 @@ struct NotebookEditor: View {
                 library.prepareNotebookDeletion = { id in if id == notebookId { await controller.pauseUploads() } }
                 library.resumeNotebookUploads = { id in if id == notebookId { controller.flush() } }
                 controller.snapShapes = snapShapes
+                controller.pencilDoubleTapUndo = pencilDoubleTapUndo
                 controller.onToolPickerVisibilityChange = { visible in toolPickerVisible = visible }
                 toolPickerVisible = controller.toolPicker.isVisible
                 controller.setViewReportingEnabled(scenePhase == .active)
@@ -729,8 +734,18 @@ enum Appearance: String, CaseIterable, Identifiable {
 }
 
 struct AppearanceMenu: View {
+    @AppStorage(PencilSettings.doubleTapUndoKey) private var pencilDoubleTapUndo = true
+
     var body: some View {
-        Menu { Options() } label: { Image(systemName: "circle.lefthalf.filled") }
+        Menu {
+            Options()
+            Section("Apple Pencil") {
+                Toggle(isOn: $pencilDoubleTapUndo) {
+                    Label("Apple Pencil double-tap to undo", systemImage: "arrow.uturn.backward.circle")
+                }
+                .accessibilityIdentifier("library.pencilDoubleTapUndo")
+            }
+        } label: { Image(systemName: "circle.lefthalf.filled") }
             .accessibilityLabel("Appearance")
     }
 
