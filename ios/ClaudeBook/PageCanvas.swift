@@ -1293,6 +1293,12 @@ final class NotebookCanvasController: UIViewController, PKCanvasViewDelegate, PK
         resumePendingUploads()
     }
 
+    /// Flush any in-progress canvas strokes into per-page coordinates and return the live drawings.
+    func currentDrawings() -> [String: PKDrawing] {
+        commitNow()
+        return drawings
+    }
+
     func resumePendingUploads() {
         if !readyUploadIds.isEmpty {
             scheduleUpload(delay: 0)

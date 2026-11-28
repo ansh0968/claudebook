@@ -1,10 +1,13 @@
+import PencilKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// Page operations use stable page ids; positions are only insertion counts for the API.
 struct PageGrid: View {
     @State private var notebook: Notebook
     let latestNotebook: Notebook
     let currentPageId: String?
+    var drawingOverrides: () -> [String: PKDrawing]
     var beforeMutation: (_ discardingInk: Bool) async throws -> Void
     var onChanged: (Notebook) -> Void
     var onFailure: () -> Void
@@ -16,16 +19,24 @@ struct PageGrid: View {
     @State private var moving: [String]?
     @State private var selection = Set<String>()
     @State private var editMode: EditMode = .inactive
+    @State private var selectionExport: PDFExportRequest?
+    @State private var rowExport: (pageId: String, request: PDFExportRequest)?
+    @State private var showPDFImport = false
+    @State private var pdfInsertAfterPage: Int?
 
     private var selecting: Bool { editMode.isEditing }
     /// The selection in page order, which the API and the confirmation count rely on.
     private var selectedIds: [String] { notebook.pages.map(\.id).filter { selection.contains($0) } }
+    private var selectedPages: [Page] { notebook.pages.filter { selection.contains($0.id) } }
 
-    init(notebook: Notebook, currentPageId: String?, beforeMutation: @escaping (Bool) async throws -> Void,
+    init(notebook: Notebook, currentPageId: String?,
+         drawingOverrides: @escaping () -> [String: PKDrawing] = { [:] },
+         beforeMutation: @escaping (Bool) async throws -> Void,
          onChanged: @escaping (Notebook) -> Void, onFailure: @escaping () -> Void, onPick: @escaping (String) -> Void) {
         _notebook = State(initialValue: notebook)
         latestNotebook = notebook
         self.currentPageId = currentPageId
+        self.drawingOverrides = drawingOverrides
         self.beforeMutation = beforeMutation
         self.onChanged = onChanged
         self.onFailure = onFailure
@@ -39,7 +50,7 @@ struct PageGrid: View {
                     Text(error).foregroundStyle(.red).accessibilityIdentifier("pages.error")
                 }
                 if notebook.pages.isEmpty {
-                    ContentUnavailableView("No pages", systemImage: "doc", description: Text("Add a page to start writing."))
+                    ContentUnavailableView("No pages", systemImage: "doc", description: Text("Add a page or import a PDF to start writing."))
                 }
                 ForEach(Array(notebook.pages.enumerated()), id: \.element.id) { index, page in
                     HStack(spacing: 14) {
@@ -57,6 +68,14 @@ struct PageGrid: View {
                                 .buttonStyle(.borderless)
                                 .accessibilityLabel("Actions for page \(index + 1)")
                                 .accessibilityIdentifier("pages.actions.\(page.id)")
+                                .popover(isPresented: Binding(
+                                    get: { rowExport?.pageId == page.id },
+                                    set: { if !$0 && rowExport?.pageId == page.id { rowExport = nil } }
+                                )) {
+                                    if let req = rowExport?.request {
+                                        ExportPDFPopover(request: req)
+                                    }
+                                }
                         }
                     }
                     .tag(page.id)
@@ -74,6 +93,12 @@ struct PageGrid: View {
                 if !selecting {
                     Button { insert(at: notebook.pages.count) } label: { Label("Add a page", systemImage: "doc.badge.plus") }
                         .accessibilityIdentifier("pages.add")
+                        .listRowBackground(Theme.surface)
+                    Button {
+                        pdfInsertAfterPage = syncedPageCount(upTo: notebook.pages.count)
+                        showPDFImport = true
+                    } label: { Label("Import PDF pages…", systemImage: "arrow.down.doc") }
+                        .accessibilityIdentifier("pages.importPDFBottom")
                         .listRowBackground(Theme.surface)
                 }
             }
@@ -99,7 +124,24 @@ struct PageGrid: View {
                         .accessibilityIdentifier("pages.selectAll")
                     }
                 } else {
-                    ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() }.disabled(busy) }
+                    ToolbarItemGroup(placement: .topBarTrailing) {
+                        Button {
+                            pdfInsertAfterPage = syncedPageCount(upTo: notebook.pages.count)
+                            showPDFImport = true
+                        } label: {
+                            HStack(spacing: 5) {
+                                Image(systemName: "arrow.down.doc")
+                                Text("Import PDF pages…")
+                            }
+                            .font(.subheadline.weight(.semibold))
+                        }
+                        .buttonStyle(.bordered)
+                        .buttonBorderShape(.capsule)
+                        .tint(Theme.accent)
+                        .disabled(busy)
+                        .accessibilityIdentifier("pages.importPDF")
+                        Button("Done") { dismiss() }.disabled(busy)
+                    }
                 }
                 if busy {
                     ToolbarItem(placement: .status) {
@@ -111,6 +153,11 @@ struct PageGrid: View {
                 if selecting { selectionBar.transition(.move(edge: .bottom).combined(with: .opacity)) }
             }
             .animation(Theme.Motion.pop, value: selecting)
+            .fileImporter(isPresented: $showPDFImport, allowedContentTypes: [.pdf]) { result in
+                if case .success(let url) = result {
+                    importPDF(url, afterPage: pdfInsertAfterPage)
+                }
+            }
             .alert("Delete \(deleting.count == 1 ? "page" : "\(deleting.count) pages")?",
                    isPresented: Binding(get: { !deleting.isEmpty }, set: { if !$0 { deleting = [] } }),
                    presenting: deleting) { ids in
@@ -162,7 +209,7 @@ struct PageGrid: View {
         .contentShape(Rectangle())
     }
 
-    /// Bulk actions for the selected pages: one delete for any number of them.
+    /// Bulk actions for the selected pages: export, duplicate, move, or delete together.
     private var selectionBar: some View {
         let count = selection.count
         return HStack(spacing: 12) {
@@ -170,6 +217,21 @@ struct PageGrid: View {
                 .font(.subheadline.weight(.medium)).foregroundStyle(Theme.secondaryInk)
                 .contentTransition(.numericText())
             Spacer()
+            Button {
+                selectionExport = PDFExportRequest(
+                    title: notebook.title,
+                    pages: selectedPages,
+                    drawingOverrides: drawingOverrides()
+                )
+            } label: {
+                Label(count > 0 ? "Export \(count)" : "Export", systemImage: "square.and.arrow.up")
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(Theme.orange)
+            .accessibilityIdentifier("pages.exportSelected")
+            .popover(item: $selectionExport) { req in
+                ExportPDFPopover(request: req)
+            }
             Button {
                 let ids = selectedIds
                 let after = (notebook.pages.lastIndex { selection.contains($0.id) } ?? notebook.pages.count - 1) + 1
@@ -212,6 +274,22 @@ struct PageGrid: View {
         Button { insert(at: index) } label: { Label("Insert page before", systemImage: "doc.badge.plus") }
         Button { insert(at: index + 1) } label: { Label("Insert page after", systemImage: "doc.badge.plus") }
         Button {
+            requestPDFImportFromMenu(afterPage: syncedPageCount(upTo: index))
+        } label: { Label("Insert PDF before…", systemImage: "arrow.down.doc") }
+        .accessibilityIdentifier("pages.importBefore.\(page.id)")
+        Button {
+            requestPDFImportFromMenu(afterPage: syncedPageCount(upTo: index + 1))
+        } label: { Label("Insert PDF after…", systemImage: "arrow.down.doc") }
+        .accessibilityIdentifier("pages.importAfter.\(page.id)")
+        Button {
+            let overrides = drawingOverrides()
+            Task { @MainActor in
+                try? await Task.sleep(for: .milliseconds(180))
+                rowExport = (page.id, PDFExportRequest(title: notebook.title, pages: [page], drawingOverrides: overrides))
+            }
+        } label: { Label("Export page…", systemImage: "square.and.arrow.up") }
+        .accessibilityIdentifier("pages.export.\(page.id)")
+        Button {
             mutate { api in try await api.duplicatePages([page.id], into: notebook.id, afterPage: index + 1).notebook }
         } label: { Label("Duplicate page", systemImage: "plus.square.on.square") }
         .accessibilityIdentifier("pages.duplicate.\(page.id)")
@@ -226,6 +304,54 @@ struct PageGrid: View {
         }
         Button(role: .destructive) { deleting = [page.id] } label: { Label("Delete page", systemImage: "trash") }
             .accessibilityIdentifier("pages.delete.\(page.id)")
+    }
+
+    private func syncedPageCount(upTo count: Int) -> Int {
+        let clamped = min(max(0, count), notebook.pages.count)
+        return notebook.pages.prefix(clamped).filter { !PendingPageCreations.contains($0.id) }.count
+    }
+
+    private func requestPDFImportFromMenu(afterPage: Int) {
+        pdfInsertAfterPage = afterPage
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(180))
+            showPDFImport = true
+        }
+    }
+
+    private func importPDF(_ url: URL, afterPage: Int?) {
+        guard !busy else { return }
+        busy = true; error = nil
+        Task { @MainActor in
+            defer { busy = false }
+            let scoped = url.startAccessingSecurityScopedResource()
+            defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+            do {
+                let data = try Data(contentsOf: url)
+                guard let api = API.current else { return }
+                try? await beforeMutation(false)
+                let previousIds = Set(notebook.pages.map(\.id))
+                let updated = try await api.importPDF(
+                    data,
+                    title: url.deletingPathExtension().lastPathComponent,
+                    notebookId: notebook.id,
+                    afterPage: afterPage
+                )
+                let imported = updated.pages.filter { !previousIds.contains($0.id) }
+                if let file = imported.first?.pdf?.file {
+                    PDFCache.store(data, file: file)
+                }
+                let merged = PendingPageCreations.merging(into: updated)
+                withAnimation(Theme.Motion.soft) { notebook = merged }
+                onChanged(updated)
+                if let firstId = imported.first?.id {
+                    onPick(firstId)
+                }
+            } catch {
+                self.error = error.localizedDescription
+                onFailure()
+            }
+        }
     }
 
     private func insert(at count: Int) {

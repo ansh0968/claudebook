@@ -639,13 +639,19 @@ export class Store {
     return nb;
   }
 
-  /** One page per PDF page. Appends to `notebookId` if given, else makes a new notebook titled `title`. */
-  addPdfPages(file: string, count: number, title: string, notebookId?: string, folderId?: string) {
+  /** One page per PDF page. Inserts into `notebookId` (after 1-based `afterPage`, or at the end) if given, else makes a new notebook titled `title`. */
+  addPdfPages(file: string, count: number, title: string, notebookId?: string, folderId?: string, afterPage?: number) {
     const pages = Array.from({ length: count }, (_, i) => ({ ...this.newPage("blank"), pdf: { file, page: i + 1 } }));
     if (notebookId) {
-      const at = this.insertPages(notebookId, pages);
+      const nb = this.getNotebook(notebookId);
+      if (!nb) throw new Error(`No notebook ${notebookId}`);
+      if (afterPage !== undefined && (!Number.isInteger(afterPage) || afterPage < 0 || afterPage > nb.pages.length)) {
+        throw new RangeError(`afterPage must be from 0 to ${nb.pages.length}`);
+      }
+      const at = this.insertPages(notebookId, pages, afterPage === undefined ? undefined : afterPage - 1);
       return { notebook: this.getNotebook(notebookId)!, firstIndex: at };
     }
+    if (afterPage !== undefined) throw new RangeError("afterPage requires notebookId");
     const nb = this.createNotebook(title, 1, "blank", { folderId });
     nb.pages = pages;
     this.save();
