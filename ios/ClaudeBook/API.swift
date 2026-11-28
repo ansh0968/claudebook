@@ -204,9 +204,11 @@ struct API {
         do { return try await request("pages/\(pageId)/drawing") } catch let e as APIError where e.status == 404 { return nil }
     }
 
-    func importPDF(_ data: Data, title: String, folderId: String? = nil) async throws -> Notebook {
+    func importPDF(_ data: Data, title: String, folderId: String? = nil, notebookId: String? = nil, afterPage: Int? = nil) async throws -> Notebook {
         var query = [URLQueryItem(name: "title", value: title)]
         if let folderId { query.append(URLQueryItem(name: "folderId", value: folderId)) }
+        if let notebookId { query.append(URLQueryItem(name: "notebookId", value: notebookId)) }
+        if let afterPage { query.append(URLQueryItem(name: "afterPage", value: String(afterPage))) }
         return try decode(Notebook.self, await request("notebooks/import-pdf", method: "POST", body: data, contentType: "application/pdf", query: query))
     }
 

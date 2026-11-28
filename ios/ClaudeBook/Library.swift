@@ -345,6 +345,9 @@ final class LibraryModel: ObservableObject {
         do {
             let data = try Data(contentsOf: url)
             guard let nb = try await API.current?.importPDF(data, title: url.deletingPathExtension().lastPathComponent, folderId: folderId) else { return }
+            if let file = nb.pages.first?.pdf?.file {
+                PDFCache.store(data, file: file)
+            }
             await load()
             open(nb.id)
         } catch { self.actionError = error.localizedDescription }
@@ -914,10 +917,23 @@ struct ShelfView: View {
 struct NotebookActions: ViewModifier {
     let notebook: Notebook
     @EnvironmentObject private var model: LibraryModel
+    @State private var exportRequest: PDFExportRequest?
+
+    private var mergedNotebook: Notebook { PendingPageCreations.merging(into: notebook) }
 
     func body(content: Content) -> some View {
         content
             .contextMenu {
+                if !mergedNotebook.pages.isEmpty {
+                    Button {
+                        let target = mergedNotebook
+                        Task { @MainActor in
+                            try? await Task.sleep(for: .milliseconds(180))
+                            exportRequest = PDFExportRequest(title: target.title, pages: target.pages, refreshNotebookId: target.id)
+                        }
+                    } label: { Label("Export PDF", systemImage: "square.and.arrow.up") }
+                    .accessibilityIdentifier("library.exportPDF.\(notebook.id)")
+                }
                 if notebook.isScratch {
                     Button { model.ask(.keep(notebook)) } label: { Label("Keep as notebook…", systemImage: "tray.and.arrow.down") }
                     Button(role: .destructive) { model.ask(.deleteNotebook(notebook)) } label: { Label("Delete now", systemImage: "trash") }
@@ -926,6 +942,9 @@ struct NotebookActions: ViewModifier {
                     Button { model.ask(.moveNotebook(notebook)) } label: { Label("Move to…", systemImage: "folder") }
                     Button(role: .destructive) { model.ask(.deleteNotebook(notebook)) } label: { Label("Delete", systemImage: "trash") }
                 }
+            }
+            .popover(item: $exportRequest) { req in
+                ExportPDFPopover(request: req)
             }
             .draggable("notebook:\(notebook.id)") {
                 Group {

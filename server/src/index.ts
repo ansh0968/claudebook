@@ -214,15 +214,34 @@ api.delete("/folders/:id", (req, res) => {
   store.deleteFolder(req.params.id) ? res.json({ ok: true }) : res.status(404).json({ error: "not found" });
 });
 
-/** The app uploads a PDF from Files; every PDF page becomes a notebook page. */
+/** The app uploads a PDF from Files; every PDF page becomes a notebook page (in a new notebook, or inserted into `notebookId`). */
 api.post("/notebooks/import-pdf", express.raw({ type: "application/pdf", limit: "100mb" }), async (req, res) => {
   if (!Buffer.isBuffer(req.body) || req.body.length === 0) return res.status(400).json({ error: "send the PDF as the body with Content-Type application/pdf" });
+  const notebookId = typeof req.query.notebookId === "string" && req.query.notebookId.trim() ? req.query.notebookId.trim() : undefined;
+  const target = notebookId ? store.getNotebook(notebookId) : undefined;
+  if (notebookId && !target) return res.status(404).json({ error: "no such notebook" });
+  let afterPage: number | undefined;
+  if (req.query.afterPage !== undefined && req.query.afterPage !== "") {
+    if (!notebookId) return res.status(400).json({ error: "afterPage requires notebookId" });
+    if (typeof req.query.afterPage !== "string" || !/^\d+$/.test(req.query.afterPage)) {
+      return res.status(400).json({ error: "afterPage must be a non-negative integer" });
+    }
+    afterPage = Number(req.query.afterPage);
+    if (afterPage > target!.pages.length) {
+      return res.status(400).json({ error: `afterPage must be from 0 to ${target!.pages.length}` });
+    }
+  }
+  let savedFile: string | undefined;
   try {
     const { file, pages } = await savePdf(store, req.body);
+    savedFile = file;
     const title = typeof req.query.title === "string" && req.query.title.trim() ? req.query.title.trim() : "Imported PDF";
-    const folderId = typeof req.query.folderId === "string" && store.getFolder(req.query.folderId) ? req.query.folderId : undefined;
-    res.json(store.addPdfPages(file, pages, title, undefined, folderId).notebook);
+    const folderId = !notebookId && typeof req.query.folderId === "string" && store.getFolder(req.query.folderId) ? req.query.folderId : undefined;
+    const { notebook } = store.addPdfPages(file, pages, title, notebookId, folderId, afterPage);
+    res.json(withExpiry(notebook));
   } catch (e) {
+    if (savedFile) fs.rmSync(pdfPath(store, savedFile), { force: true });
+    if (notebookId && !store.getNotebook(notebookId)) return res.status(404).json({ error: "no such notebook" });
     res.status(400).json({ error: (e as Error).message });
   }
 });

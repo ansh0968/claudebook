@@ -155,6 +155,9 @@ struct NotebookEditor: View {
     @AppStorage("snapShapes") private var snapShapes = true
     @State private var showPages = false
     @State private var showPaperPicker = false
+    @State private var exportRequest: PDFExportRequest?
+    @State private var showPDFImport = false
+    @State private var importingPDF = false
     @State private var notebookLoadGeneration = 0
     @State private var pageCreationTask: Task<Void, Never>?
     @State private var testHooksDone = false
@@ -308,6 +311,37 @@ struct NotebookEditor: View {
                     Menu {
                         if let notebook {
                             Section("Notebook") {
+                                Button {
+                                    controller.flush()
+                                    Task { @MainActor in
+                                        try? await Task.sleep(for: .milliseconds(180))
+                                        showPDFImport = true
+                                    }
+                                } label: { Label("Import PDF pages…", systemImage: "arrow.down.doc") }
+                                .disabled(importingPDF)
+                                .accessibilityIdentifier("editor.importPDF")
+                                Button {
+                                    let drawings = controller.currentDrawings()
+                                    let current = notebookWithCurrentPages(notebook)
+                                    controller.flush()
+                                    Task { @MainActor in
+                                        try? await Task.sleep(for: .milliseconds(180))
+                                        exportRequest = PDFExportRequest(title: current.title, pages: current.pages, drawingOverrides: drawings)
+                                    }
+                                } label: { Label("Export PDF…", systemImage: "square.and.arrow.up") }
+                                .disabled(controller.pages.isEmpty)
+                                .accessibilityIdentifier("editor.exportPDF")
+                                if let page = controller.currentPage {
+                                    Button {
+                                        let drawings = controller.currentDrawings()
+                                        controller.flush()
+                                        Task { @MainActor in
+                                            try? await Task.sleep(for: .milliseconds(180))
+                                            exportRequest = PDFExportRequest(title: notebook.title, pages: [page], drawingOverrides: drawings)
+                                        }
+                                    } label: { Label("Export current page…", systemImage: "doc.text") }
+                                    .accessibilityIdentifier("editor.exportCurrentPage")
+                                }
                                 Button { controller.flush(); library.ask(.renameNotebook(notebook)) } label: { Label("Rename notebook", systemImage: "pencil") }
                                     .accessibilityIdentifier("editor.renameNotebook")
                                 Button(role: .destructive) { library.ask(.deleteNotebook(notebook)) } label: { Label("Delete notebook", systemImage: "trash") }
@@ -332,6 +366,21 @@ struct NotebookEditor: View {
                     .accessibilityLabel("Notebook options")
                 }
             }
+            .overlay(alignment: .topTrailing) {
+                Color.clear
+                    .frame(width: 1, height: 1)
+                    .padding(.trailing, 24)
+                    .padding(.top, 4)
+                    .allowsHitTesting(false)
+                    .popover(item: $exportRequest) { req in
+                        ExportPDFPopover(request: req)
+                    }
+            }
+            .fileImporter(isPresented: $showPDFImport, allowedContentTypes: [.pdf]) { result in
+                if case .success(let url) = result {
+                    Task { await importPDFInEditor(url) }
+                }
+            }
             .sheet(isPresented: $showPaperPicker) {
                 if let notebook, let page = controller.currentPage { PaperPicker(notebook: notebook, page: page) { await load() } }
             }
@@ -339,6 +388,7 @@ struct NotebookEditor: View {
                 if let notebook {
                     // Layer events update the controller directly; thumbnails should show those changes too.
                     PageGrid(notebook: notebookWithCurrentPages(notebook), currentPageId: controller.currentPage?.id,
+                             drawingOverrides: { controller.currentDrawings() },
                              beforeMutation: { discarding in
                                  if discarding { await controller.pauseUploads() }
                                  else { try await controller.flushAndWait() }
@@ -688,6 +738,46 @@ struct NotebookEditor: View {
         Task {
             try? await API.current?.undoClaude(pageId: id, count: count)
             controller.reloadClaudeLayer(pageId: id)
+        }
+    }
+
+    private func importPDFInEditor(_ url: URL) async {
+        guard let current = notebook, !importingPDF else { return }
+        importingPDF = true
+        notice = "Importing PDF…"
+        defer { importingPDF = false }
+        controller.flush()
+        let scoped = url.startAccessingSecurityScopedResource()
+        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+        do {
+            let data = try Data(contentsOf: url)
+            guard let api = API.current else {
+                notice = nil
+                return
+            }
+            let livePages = controller.pages
+            let clampedCount = livePages.isEmpty ? 0 : min(max(0, index + 1), livePages.count)
+            let afterPage = livePages.prefix(clampedCount).filter { !PendingPageCreations.contains($0.id) }.count
+            let previousIds = Set(livePages.map(\.id))
+            let updated = try await api.importPDF(
+                data,
+                title: url.deletingPathExtension().lastPathComponent,
+                notebookId: current.id,
+                afterPage: afterPage
+            )
+            let imported = updated.pages.filter { !previousIds.contains($0.id) }
+            if let file = imported.first?.pdf?.file {
+                PDFCache.store(data, file: file)
+            }
+            notice = nil
+            applyNotebook(updated)
+            if let firstId = imported.first?.id,
+               let target = controller.pages.firstIndex(where: { $0.id == firstId }) {
+                controller.scrollTo(page: target, animated: true)
+            }
+            await library.load()
+        } catch {
+            notice = "Couldn’t import PDF: \(error.localizedDescription)"
         }
     }
 }

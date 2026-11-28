@@ -210,6 +210,21 @@ enum PDFCache {
         open[ref.file]?.page(at: ref.page)
     }
 
+    /// Saves already-loaded PDF bytes locally so imported pages render right away and work offline.
+    static func store(_ data: Data, file: String) {
+        guard !file.isEmpty else { return }
+        let url = dir.appending(path: "\(file).pdf")
+        try? data.write(to: url, options: .atomic)
+        if let doc = CGPDFDocument(url as CFURL) {
+            open[file] = doc
+        }
+    }
+
+    static func remove(_ file: String) {
+        open.removeValue(forKey: file)
+        try? FileManager.default.removeItem(at: dir.appending(path: "\(file).pdf"))
+    }
+
     static func page(_ ref: PDFRef) async -> CGPDFPage? {
         if let page = cached(ref) { return page }
         let url = dir.appending(path: "\(ref.file).pdf")
